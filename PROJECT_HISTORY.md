@@ -1,7 +1,7 @@
 # Kohiko Project History
 
 This document traces the evolution of Kohiko, a C++20 / X11 tiling window
-manager, across its released versions from 0.1.0 through 0.20.1. It is
+manager, across its released versions from 0.1.0 through 0.20.3. It is
 derived from a direct comparison of the source, configuration, and
 documentation of each released version against the one before it.
 
@@ -638,7 +638,7 @@ described as tested.
 
 --------------------------------------------------------------------------
 
-## Phase 12 — Tray Integration Verification (0.20.1)
+## Phase 13 — Tray Integration Verification (0.20.1)
 
 **Versions:** 0.20.1
 
@@ -716,6 +716,164 @@ dropped.
 
 --------------------------------------------------------------------------
 
+## Phase 14 — Two Real Regressions, Fixed Properly (0.20.2)
+
+**Versions:** 0.20.2
+
+**Goals:**
+Fix two problems reported from a real Kohiko 0.20.1 session, explicitly
+not as "known limitations" - a window-classification bug that let tray
+icon windows get managed like normal application windows, and the
+Imlib2 SVG-loading crash risk Phase 13 had disclosed but deliberately
+not fixed.
+
+**Major developments:**
+- Root cause of the classification bug: `TrayIconClient::TryDock()`
+  maps its own window immediately after requesting a dock, without
+  waiting for `SystemTray` to reparent it first - a deliberate choice
+  (so a tray icon still shows *something* even if the dock request
+  goes briefly unanswered) that raced `WindowManager::Manage()`'s
+  ordinary `MapRequest` handling, which had no way to recognize a
+  window already mid-handshake for embedding elsewhere. Fixed
+  generically - `Manage()` now skips any window carrying an
+  `_XEMBED_INFO` property (new: `XConnection::IsXEmbedWindow()`), the
+  freedesktop XEmbed specification's own required marker for exactly
+  this situation, rather than special-casing any particular
+  application. `TrayIconClient::Create()` had already been setting
+  this property correctly since 0.19.0; nothing on the WM side had
+  ever checked it before now. This bug could only ever manifest once a
+  tray icon window actually existed on a real session - Phase 13's own
+  fix is what first made that true, which is most of why it surfaced
+  only in this phase.
+- The Imlib2 SVG-loading risk: reproduction of the *original* specific
+  crash Phase 13 found failed this time, on the same Imlib2 version,
+  despite substantially more instrumented effort (ASan, UBSan, glibc's
+  `MALLOC_CHECK_`) than Phase 13 had applied - suggesting it may be
+  heap-layout-sensitive rather than strictly deterministic, a real
+  limit on how precisely this could be pinned down. A *different*,
+  highly reproducible failure was found in its place - rapid creation/
+  destruction of many different SVG-sourced Pixmaps through Imlib2's
+  API directly produced X11 `BadPixmap` errors on the large majority of
+  free attempts, while the same operations through `UiIconCache`'s own
+  actual usage pattern (load once, hold, free at the end) produced
+  none. Rather than continue chasing an increasingly narrow reproduction
+  window, the fix taken was structural: a new module, `SvgRenderer`,
+  renders `.svg`/`.svgz` icons directly through librsvg and Cairo,
+  bypassing Imlib2's own SVG loader plugin entirely for that one format
+  (every other format is untouched). This is not a novel approach -
+  it's the same pair of libraries virtually the rest of the Linux
+  desktop already renders SVG content through, just without Imlib2's
+  own bridging code in between, which is where the demonstrated
+  unreliability turned out to live. The unproven 0.20.1 mitigation
+  (`imlib_set_cache_size(0)`) was removed rather than kept alongside
+  the real fix, per an explicit instruction not to depend on it.
+- Two new regression tests (`test_windowclassification`,
+  `test_svgrenderer`), both following `test_monitormanager`'s existing
+  "real X connection, gracefully skip if none available" pattern - the
+  SVG one's stress section specifically reproduces the adversarial
+  many-different-SVGs-in-one-process pattern that broke Imlib2's own
+  loader, now asserting zero X errors through the new path instead.
+- A numbering error from Phase 13's own entry (two phases both titled
+  "Phase 12") was corrected while editing this same document.
+
+**Lessons visible from the repository:**
+Phase 13 closed a real, reported gap and, for the one part of it that
+genuinely couldn't be fixed within that phase's own reasonable scope,
+said so plainly instead of either pretending otherwise or quietly
+leaving Kohiko exposed to it - and that disclosure is exactly what
+made this phase possible to scope correctly: the instruction to "fix
+this properly" pointed at a specific, already-documented, already-
+partially-investigated problem rather than an open-ended one. The
+window-classification bug is a cleaner illustration of a pattern this
+project's own history keeps repeating (Phase 10 and Phase 13 both hit
+versions of it too): a code path that looks complete by inspection can
+still have a real gap that only a previously-impossible runtime
+condition ever exercises - here, specifically, that no tray icon
+window had ever existed on a real session before Phase 13's own fix
+made that possible for the first time. Chasing the exact original
+Imlib2 crash to a dead end, and then finding a different, more
+reproducible failure in the same subsystem instead of stopping there,
+is a useful example of when *not* to keep narrowing down a specific
+repro and instead ask the more structural question ("should this code
+path be avoided entirely") the surrounding evidence already supported
+asking.
+
+--------------------------------------------------------------------------
+
+## Phase 15 — A Wi-Fi Reconnection Bug, and a Kernel Regression That Wasn't Kohiko's (0.20.3)
+
+**Versions:** 0.20.3
+
+**Goals:**
+Diagnose a live report of a specific WPA2 network repeatedly failing
+to connect, from real `nmcli`/`journalctl` evidence plus (in a related
+but separate thread) a real hardware Wi-Fi association failure on a
+specific chipset - establishing root cause for each from logs and
+source code rather than assumption, and fixing only what was actually
+Kohiko's to fix.
+
+**Major developments:**
+- The reported handshake failure (`psk mismatch reported by
+  supplicant`) reproduced identically via plain `nmcli`, with
+  Kohiko's own process confirmed, by PID, not to be the actor behind
+  any of the specific failed attempts in the provided logs - so that
+  specific failure was correctly not attributed to Kohiko's code, a
+  conclusion reached from evidence rather than assumed in Kohiko's
+  favor.
+- Tracing the relevant code anyway turned up a real, separate,
+  verified bug: `NetworkManagerClient::BytesToString()` read a
+  Variant-wrapped D-Bus value's `.Items()` without unwrapping it
+  first, silently returning `""` instead of a real SSID - confirmed
+  by direct execution, not inspection alone, including a before/after
+  run of the new regression test against the pre-fix code. The
+  practical effect was total: `ConnectToAccessPoint()`'s "is this
+  network already saved" check never matched anything, for any
+  network, ever - every reconnection to an already-known network
+  silently created a new connection profile instead of reusing one,
+  and (a necessarily paired second fix, since the first fix alone
+  would have made the user-visible symptom worse, not better) a
+  freshly-typed password for an existing profile was never actually
+  written back to it.
+- A separate, real-hardware Wi-Fi association failure (RTL8822BU,
+  5GHz specifically, `failed to get tx report from firmware` →
+  deauth) was investigated via web research against the actual kernel
+  version, firmware version, and dmesg output provided, matched to a
+  specific, recent, unresolved upstream regression report (same chip,
+  same firmware version, explicitly described as breaking starting at
+  kernel 6.18.4 after working on 6.17 and 6.12 LTS), and left
+  genuinely open - no confirmed upstream fix exists to point to, and
+  none was invented. Neither NetworkManager nor Kohiko were modified
+  in relation to it, since neither is where the problem lives.
+- A deeper, mocked-D-Bus-service integration test for the full
+  `Update()`+`ActivateConnection()` call sequence was attempted but
+  not completed (repeated sandbox environment resets interrupted the
+  attempt) - the shipped regression test covers `BytesToString()`
+  directly and by execution, not the full round trip through a live
+  or mocked NetworkManager. This is disclosed rather than implied.
+
+**Lessons visible from the repository:**
+The most important thing this phase got right was resisting the pull
+toward treating "the user is running my software and hit a bug" as
+evidence that the bug is in that software. The provided evidence -
+specifically, that the failure reproduced via bare `nmcli` and that
+the specific failed attempts in the logs weren't Kohiko's own process
+- pointed away from Kohiko for the *headline* symptom, and that
+conclusion held up under actually reading the code, rather than being
+revised to fit an assumption either way. At the same time, tracing the
+relevant code path thoroughly *anyway*, rather than stopping at "not
+my bug," is what surfaced a real, independent, previously-unknown
+defect in that exact area - a useful reminder that "this isn't the
+cause of the specific report in front of me" and "this code is
+correct" are different claims, and only investigating enough to
+support the first one leaves the second one unverified. The rtw88
+thread is a clean example of the flip side of the same discipline:
+research turned up a very close match to a real upstream report, but
+not a confirmed fix, and the honest answer was to say so plainly and
+lay out real trade-offs rather than manufacture a specific version
+number or patch to point to.
+
+--------------------------------------------------------------------------
+
 ## Current Direction
 
 As of 0.20.0, Kohiko adds persistence, recovery, and desktop-session
@@ -735,22 +893,49 @@ itself, not just `kohiko-settings`, on account of wallpaper support).
 
 That release flagged its own biggest gap plainly: everything touching
 Xft, D-Bus, Imlib2, or a real X server had been verified by code
-review and close analogy, not execution. 0.20.1 (Phase 12) closed the
+review and close analogy, not execution. 0.20.1 (Phase 13) closed the
 specific slice of that gap a real user actually hit first - tray
 autostart and icon loading - by setting up exactly the kind of real
 execution environment that gap called for (a real X server, a real
 D-Bus session bus, a real PipeWire stack) and finding two genuine bugs
-neither code review nor the existing documentation had caught. The
-rest of that same gap is explicitly not closed by 0.20.1 and remains
-outstanding: the lock screen's logind integration, wallpaper rendering
-itself, and the autologin flow against an actual display manager were
-all outside this phase's own scope (a tray-icon report) and were not
-touched or re-verified here. Two things seem likely to matter next
-beyond that. First, the Imlib2/librsvg crash risk 0.20.1 disclosed but
-did not resolve is worth either confirming against Arch's actual
-package versions (and filing upstream if it reproduces there too) or
-ruling out - right now it's an open question, not a closed one.
-Second, this phase's own "Extension points" section in
+neither code review nor the existing documentation had caught, though
+one of the two (an Imlib2 SVG-loading crash risk) was disclosed rather
+than fixed at the time. 0.20.2 (Phase 14) fixed that one properly -
+bypassing Imlib2's own SVG loader for a direct librsvg/Cairo path
+instead - and fixed a second, independent real-session regression the
+same real-execution testing style surfaced: tray icon windows being
+managed as normal application windows, a race between
+`TrayIconClient`'s own docking handshake and the WM's ordinary
+`MapRequest` handling that could only ever manifest once a real tray
+icon window existed to race against, which 0.20.1 is what first made
+true.
+
+The rest of the gap 0.20.0 originally flagged is still not fully
+closed: the lock screen's logind integration, wallpaper rendering
+itself, and the autologin flow against an actual display manager
+remain outside the scope of any of the last three phases (each was a
+specific, reported regression, not a general audit) and were not
+touched or re-verified in any of them. 0.20.3 (Phase 15) added one
+more data point to the same pattern the last two phases already
+established - a defect (kohiko-network never actually reusing or
+updating a saved Wi-Fi connection's password) that had gone unnoticed
+because nothing had traced that exact code path end to end against a
+real, reported failure before - while also, in the same investigation,
+correctly declining to attribute a real hardware/kernel-level Wi-Fi
+failure to Kohiko just because it showed up in the same troubleshooting
+session. A few things seem likely to matter next. First,
+`Launcher.cpp`'s own, separate Imlib2 usage for app icons
+(`DrawIcon()`, not routed through the now-fixed `UiIconCache`/
+`SvgRenderer` path) still goes through Imlib2's SVG loader and was
+deliberately left untouched in Phase 14 (unrelated WM functionality,
+not part of what was reported) - whether it carries the same class of
+risk is still an open question. Second, 0.20.3's own regression test
+covers `BytesToString()` directly and by execution, but not the full
+`Update()`+`ActivateConnection()` round trip through a live or mocked
+NetworkManager - an attempt at exactly that (a mocked D-Bus service)
+was started but not finished in that phase; picking it back up would
+close a real, disclosed gap rather than a hypothetical one. Third,
+this project's own "Extension points" section in
 `docs/ARCHITECTURE.md` is deliberately source-level, not dynamically
 loaded - worth revisiting only if a concrete need for genuine runtime
 plugin loading materializes, not preemptively.

@@ -86,6 +86,22 @@ struct SavedConnection
     std::string activeConnectionPath;
 };
 
+// Decodes a D-Bus "array of bytes" value - how NetworkManager
+// represents strings that aren't guaranteed valid UTF-8 (an SSID,
+// notably, is defined as an arbitrary byte string, not text) - back
+// into a plain std::string. Exposed here (rather than kept file-local
+// inside NetworkManagerClient.cpp, where it originally lived) so it
+// can be unit-tested directly - see tests/test_networkmanagerclient.cpp,
+// and that test's own comment for the real bug this exists to guard
+// against: every caller of this function ultimately reads a value out
+// of a GetSettings()-shaped nested dict, where the value arrives
+// wrapped in a D-Bus Variant (DBusClient's own wire-reading code wraps
+// every a{sv} dict-entry value this way) - reading .Items() off that
+// without unwrapping first silently returns an empty string instead
+// of a decode error, which is exactly what made a real bug here go
+// unnoticed for a while (see CHANGELOG.md).
+std::string BytesToString(const DBusValue& arrayOfBytes);
+
 class NetworkManagerClient
 {
 public:

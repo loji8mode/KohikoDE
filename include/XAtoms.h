@@ -58,6 +58,16 @@ public:
     Atom NET_WM_WINDOW_TYPE_MENU;
     Atom NET_WM_WINDOW_TYPE_DOCK;
 
+    // _XEMBED_INFO - required by the freedesktop XEmbed spec to be set
+    // on any window that wants to be embedded into someone else's
+    // window rather than managed as a normal top-level one, *before*
+    // that window is ever mapped. The System Tray Protocol's icon
+    // windows are the only XEmbed clients Kohiko currently creates
+    // itself (see TrayIconClient::Create()), but this is a check on
+    // the property, not on any specific application - see
+    // XConnection::IsXEmbedWindow()'s own comment.
+    Atom XEMBED_INFO;
+
     Atom WM_WINDOW_ROLE;
 
     Atom UTF8_STRING;

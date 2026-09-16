@@ -42,6 +42,8 @@ void XAtoms::Initialize()
     NET_WM_WINDOW_TYPE_MENU       = XInternAtom(display, "_NET_WM_WINDOW_TYPE_MENU", False);
     NET_WM_WINDOW_TYPE_DOCK       = XInternAtom(display, "_NET_WM_WINDOW_TYPE_DOCK", False);
 
+    XEMBED_INFO              = XInternAtom(display, "_XEMBED_INFO", False);
+
     WM_WINDOW_ROLE           = XInternAtom(display, "WM_WINDOW_ROLE", False);
 
     UTF8_STRING              = XInternAtom(display, "UTF8_STRING", False);

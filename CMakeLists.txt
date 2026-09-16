@@ -51,6 +51,13 @@ pkg_check_modules(DBus IMPORTED_TARGET dbus-1)
 # KOHIKO_DESKTOP_APPS_AVAILABLE check below.
 pkg_check_modules(PipeWire IMPORTED_TARGET libpipewire-0.3)
 
+# librsvg - SvgRenderer.cpp's direct librsvg/Cairo rendering path for
+# .svg/.svgz icons (see SvgRenderer.h's own comment for why this
+# exists instead of going through Imlib2's own SVG loader), used by
+# UiIconCache.cpp and so, like DBus/PipeWire above, folded into the
+# same KOHIKO_DESKTOP_APPS_AVAILABLE check below.
+pkg_check_modules(Rsvg IMPORTED_TARGET librsvg-2.0)
+
 # --- kohiko: the window manager ------------------------------------------------
 
 file(GLOB KOHIKO_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/*.cpp)
@@ -80,6 +87,7 @@ list(REMOVE_ITEM KOHIKO_SOURCES
     ${CMAKE_SOURCE_DIR}/src/UiSidebar.cpp
     ${CMAKE_SOURCE_DIR}/src/UiPopupMenu.cpp
     ${CMAKE_SOURCE_DIR}/src/UiIconCache.cpp
+    ${CMAKE_SOURCE_DIR}/src/SvgRenderer.cpp
     ${CMAKE_SOURCE_DIR}/src/TrayIconClient.cpp
     ${CMAKE_SOURCE_DIR}/src/PipeWireClient.cpp
     ${CMAKE_SOURCE_DIR}/src/NetworkManagerClient.cpp
@@ -155,22 +163,22 @@ target_compile_options(kohiko-settings PRIVATE -Wall -Wextra)
 # additionally needs PipeWireClient (libpipewire), which has no D-Bus
 # interface of its own.
 #
-# Gated as a whole on dbus-1 + libpipewire-0.3 rather than built
-# unconditionally: unlike kohiko itself (which merely loses the
-# display-sleep-inhibition *feature* without dbus-1, see above), these
-# three apps have no fallback for a missing D-Bus/PipeWire connection
-# at *compile* time - DBusClient.cpp and PipeWireClient.cpp both
-# `#include` their real headers unconditionally. Skipping the whole
-# section (with a clear warning) keeps a system without those
-# dev packages able to build `kohiko` itself, same as any other
-# optional dependency in this file.
-if(DBus_FOUND AND PipeWire_FOUND)
+# Gated as a whole on dbus-1 + libpipewire-0.3 + librsvg-2.0 rather
+# than built unconditionally: unlike kohiko itself (which merely loses
+# the display-sleep-inhibition *feature* without dbus-1, see above),
+# these six binaries have no fallback for a missing D-Bus/PipeWire/
+# librsvg dependency at *compile* time - DBusClient.cpp,
+# PipeWireClient.cpp, and SvgRenderer.cpp all `#include` their real
+# headers unconditionally. Skipping the whole section (with a clear
+# warning) keeps a system without those dev packages able to build
+# `kohiko` itself, same as any other optional dependency in this file.
+if(DBus_FOUND AND PipeWire_FOUND AND Rsvg_FOUND)
     set(KOHIKO_DESKTOP_APPS_AVAILABLE TRUE)
 else()
     set(KOHIKO_DESKTOP_APPS_AVAILABLE FALSE)
-    message(WARNING "libdbus-1-dev and/or libpipewire-0.3-dev not found - "
+    message(WARNING "libdbus-1-dev, libpipewire-0.3-dev, and/or librsvg2-dev not found - "
         "skipping kohiko-audio, kohiko-network, kohiko-bluetooth, and their "
-        "tray widgets. Install both to enable them.")
+        "tray widgets. Install all three to enable them.")
 endif()
 
 if(KOHIKO_DESKTOP_APPS_AVAILABLE)
@@ -190,6 +198,7 @@ if(KOHIKO_DESKTOP_APPS_AVAILABLE)
         src/UiSidebar.cpp
         src/UiPopupMenu.cpp
         src/UiIconCache.cpp
+        src/SvgRenderer.cpp
         src/TrayIconClient.cpp
         src/Font.cpp
         src/Config.cpp
@@ -199,7 +208,7 @@ if(KOHIKO_DESKTOP_APPS_AVAILABLE)
         src/IniFile.cpp
     )
     target_include_directories(kohiko-desktop-shared PUBLIC ${CMAKE_SOURCE_DIR}/include ${X11_INCLUDE_DIR})
-    target_link_libraries(kohiko-desktop-shared PUBLIC ${X11_LIBRARIES} PkgConfig::Xft PkgConfig::Imlib2 PkgConfig::DBus)
+    target_link_libraries(kohiko-desktop-shared PUBLIC ${X11_LIBRARIES} PkgConfig::Xft PkgConfig::Imlib2 PkgConfig::DBus PkgConfig::Rsvg)
     target_compile_options(kohiko-desktop-shared PRIVATE -Wall -Wextra)
 
     add_executable(kohiko-audio tools/kohiko-audio.cpp src/AudioWindow.cpp src/PipeWireClient.cpp)
@@ -290,6 +299,36 @@ if(X11_Xrandr_FOUND)
     target_link_libraries(test_monitormanager PRIVATE ${X11_Xrandr_LIB})
 endif()
 add_test(NAME MonitorManager COMMAND test_monitormanager)
+
+# Same "real X11 connection, gracefully skips if $DISPLAY isn't set"
+# deal as test_monitormanager just above - regression test for the
+# tray-window classification fix (XConnection::IsXEmbedWindow()).
+add_executable(test_windowclassification
+    tests/test_windowclassification.cpp
+    src/XConnection.cpp
+    src/XAtoms.cpp
+    src/Logger.cpp
+)
+target_include_directories(test_windowclassification PRIVATE ${CMAKE_SOURCE_DIR}/include ${X11_INCLUDE_DIR})
+target_link_libraries(test_windowclassification PRIVATE ${X11_LIBRARIES})
+add_test(NAME WindowClassification COMMAND test_windowclassification)
+
+# Same "real X11 connection, gracefully skips display-dependent
+# checks if $DISPLAY isn't set" deal - regression test for the SVG-
+# rendering-path fix (SvgRenderer.h's own comment has the full
+# "why"). Only built/registered when Rsvg is actually available,
+# matching kohiko-audio/etc.'s own KOHIKO_DESKTOP_APPS_AVAILABLE
+# gating just above, since SvgRenderer.cpp has no compile-time
+# fallback for a missing librsvg-2.0 either.
+if(Rsvg_FOUND)
+    add_executable(test_svgrenderer
+        tests/test_svgrenderer.cpp
+        src/SvgRenderer.cpp
+    )
+    target_include_directories(test_svgrenderer PRIVATE ${CMAKE_SOURCE_DIR}/include ${X11_INCLUDE_DIR})
+    target_link_libraries(test_svgrenderer PRIVATE ${X11_LIBRARIES} PkgConfig::Rsvg)
+    add_test(NAME SvgRenderer COMMAND test_svgrenderer)
+endif()
 
 # Pure data-structure logic (no D-Bus connection involved - see the
 # file itself), same category as test_launcherscoring/
@@ -440,6 +479,23 @@ add_executable(test_iconresolver
 )
 target_include_directories(test_iconresolver PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME IconResolver COMMAND test_iconresolver)
+
+# Pure logic, no live D-Bus connection or running NetworkManager
+# needed - but still needs libdbus-1-dev to compile (links
+# DBusClient.cpp), hence gated on DBus_FOUND rather than unconditional
+# like DesktopEntry/IconResolver just above. Regression test for the
+# BytesToString()/ConnectToAccessPoint() fix - see CHANGELOG.md.
+if(DBus_FOUND)
+    add_executable(test_networkmanagerclient
+        tests/test_networkmanagerclient.cpp
+        src/NetworkManagerClient.cpp
+        src/DBusClient.cpp
+        src/DBusValue.cpp
+    )
+    target_include_directories(test_networkmanagerclient PRIVATE ${CMAKE_SOURCE_DIR}/include)
+    target_link_libraries(test_networkmanagerclient PRIVATE PkgConfig::DBus)
+    add_test(NAME NetworkManagerClient COMMAND test_networkmanagerclient)
+endif()
 
 # Shell-script regression test for scripts/kohiko-session - no
 # compiled binary involved, see the test file itself.

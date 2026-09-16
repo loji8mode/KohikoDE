@@ -50,7 +50,21 @@ echo "==> Installing dependencies (pacman)"
 # libxss          - optional idle-timeout locking, and the X11 fallback half
 #                   of display-sleep inhibition, auto-detected by the Makefile
 # dbus            - optional; provides libdbus, the primary (D-Bus) half of
-#                   display-sleep inhibition, auto-detected by the Makefile
+#                   display-sleep inhibition, auto-detected by the Makefile;
+#                   also required (along with pipewire and librsvg just
+#                   below) for kohiko-audio/kohiko-network/kohiko-bluetooth
+#                   and their tray widgets - see Makefile/README.md's
+#                   "Audio, network, and Bluetooth" section
+# pipewire        - kohiko-audio's only audio backend (see
+#                   include/PipeWireClient.h) - was already a real build
+#                   requirement for that binary before this line was added;
+#                   omitting it here just meant a fresh install-arch.sh run
+#                   silently skipped building kohiko-audio/kohiko-audio-tray
+#                   (and, since the Makefile gates all six of them on the
+#                   same dbus+pipewire+librsvg check together, all five of
+#                   the others too) rather than actually failing loudly
+# librsvg         - SvgRenderer.cpp's direct .svg/.svgz rendering path (see
+#                   include/SvgRenderer.h) for the same six binaries' icons
 # flameshot       - default.conf's exec.screenshot, bound to Print - swap the
 #                   package here too if you point exec.screenshot at something else
 sudo pacman -S --needed --noconfirm \
@@ -63,6 +77,8 @@ sudo pacman -S --needed --noconfirm \
     xorg-server \
     libxss \
     dbus \
+    pipewire \
+    librsvg \
     flameshot
 
 echo "==> Building (make -j\$(nproc))"

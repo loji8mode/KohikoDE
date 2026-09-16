@@ -784,6 +784,34 @@ bool XConnection::IsDockWindowType(::Window window, const XAtoms& atoms)
     return isDock;
 }
 
+bool XConnection::IsXEmbedWindow(::Window window, const XAtoms& atoms)
+{
+    Atom actualType;
+    int actualFormat = 0;
+    unsigned long itemCount = 0;
+    unsigned long bytesLeft = 0;
+    unsigned char* data = nullptr;
+
+    // AnyPropertyType, not atoms.XEMBED_INFO itself: the property's
+    // required *type* per spec is also _XEMBED_INFO (a client is
+    // supposed to set it as XChangeProperty(..., XEMBED_INFO,
+    // XEMBED_INFO, 32, ...), matching what TrayIconClient::Create()
+    // does), but the only thing that actually matters here is whether
+    // some property under this *name* exists at all - being lenient
+    // about the declared type costs nothing and means a client that
+    // gets that one detail wrong still isn't accidentally tiled.
+    bool present =
+        XGetWindowProperty(
+            m_display, window, atoms.XEMBED_INFO, 0, 2, False,
+            AnyPropertyType, &actualType, &actualFormat, &itemCount, &bytesLeft, &data
+        ) == Success && actualType != None;
+
+    if (data)
+        XFree(data);
+
+    return present;
+}
+
 std::vector<::Window> XConnection::QueryChildren(::Window window)
 {
     std::vector<::Window> children;

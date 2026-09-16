@@ -5,6 +5,24 @@
 namespace Kohiko
 {
 
+// Declared in NetworkManagerClient.h (see that declaration's own
+// comment for the "why" and the full CHANGELOG.md reference) - defined
+// here, in Kohiko:: scope rather than this file's own anonymous
+// namespace, specifically so it's reachable from
+// tests/test_networkmanagerclient.cpp.
+std::string BytesToString(const DBusValue& arrayOfBytes)
+{
+    const DBusValue& v = arrayOfBytes.Unwrap();
+
+    std::string result;
+    result.reserve(v.Items().size());
+
+    for (auto& b : v.Items())
+        result.push_back(static_cast<char>(b.AsUInt()));
+
+    return result;
+}
+
 namespace
 {
 
@@ -35,17 +53,6 @@ constexpr std::uint32_t kNmDeviceTypeWireGuard = 29;
 bool AccessPointIsSecured(std::uint32_t wpaFlags, std::uint32_t rsnFlags)
 {
     return wpaFlags != 0 || rsnFlags != 0;
-}
-
-std::string BytesToString(const DBusValue& arrayOfBytes)
-{
-    std::string result;
-    result.reserve(arrayOfBytes.Items().size());
-
-    for (auto& b : arrayOfBytes.Items())
-        result.push_back(static_cast<char>(b.AsUInt()));
-
-    return result;
 }
 
 NetworkDeviceKind DeviceKindFromType(std::uint32_t nmDeviceType)
@@ -404,6 +411,62 @@ void NetworkManagerClient::ConnectToAccessPoint(
 
         if (savedSsid == ssid)
         {
+            if (!password.empty())
+            {
+                // The user was just asked for, and just typed, this
+                // password - it has to actually reach NetworkManager,
+                // or a previously-saved (possibly wrong, possibly
+                // just outdated after the AP's passphrase changed)
+                // secret keeps getting silently reactivated instead,
+                // no matter what gets typed into the prompt each
+                // time. This was unreachable before the BytesToString()
+                // fix just above it (the SSID comparison this sits
+                // inside never used to succeed at all - see that
+                // function's own comment), so this exact gap could
+                // never have been hit in practice until that was
+                // fixed either - both halves of this bug had to be
+                // fixed together, not just the first one found.
+                //
+                // Settings.Connection.Update() replaces the *entire*
+                // connection - it is not a merge/patch operation, per
+                // NetworkManager's own D-Bus reference ("Update the
+                // connection with new settings and properties,
+                // replacing all previous settings and properties").
+                // So this starts from every section GetSettings() (via
+                // settingsReply.front()) just returned - preserving
+                // ipv4/ipv6/connection/etc. untouched - and only adds
+                // or overwrites the one thing that actually needs to
+                // change: this section's own "psk". Each outer-level
+                // section is re-wrapped in exactly one Variant on the
+                // way back out (Unwrap() first in case it already
+                // carried one, then MakeVariant() once), matching how
+                // the brand-new-connection path a few lines down
+                // already writes this same shape - normalizing rather
+                // than assuming which format GetSettings() itself
+                // used avoids having to guess about a nesting-depth
+                // question this file already got wrong once (see
+                // BytesToString() above).
+                std::map<std::string, DBusValue> topLevel;
+
+                for (const auto& [sectionName, sectionValue] : settingsReply.front().Entries())
+                    topLevel.emplace(sectionName, DBusValue::MakeVariant(sectionValue.Unwrap()));
+
+                std::map<std::string, DBusValue> securitySection;
+
+                if (auto it = topLevel.find("802-11-wireless-security"); it != topLevel.end())
+                    securitySection = it->second.Unwrap().Entries();
+
+                if (!securitySection.count("key-mgmt"))
+                    securitySection.emplace("key-mgmt", DBusValue::MakeVariant(DBusValue::MakeString("wpa-psk")));
+
+                securitySection["psk"] = DBusValue::MakeVariant(DBusValue::MakeString(password));
+
+                topLevel["802-11-wireless-security"] = DBusValue::MakeVariant(DBusValue::MakeDict(std::move(securitySection)));
+
+                m_bus.Call(kNmService, saved.objectPath, kNmConnectionIface, "Update",
+                    { DBusValue::MakeDict(std::move(topLevel)) });
+            }
+
             m_bus.Call(kNmService, kNmManagerPath, kNmManagerIface, "ActivateConnection",
                 { DBusValue::MakeObjectPath(saved.objectPath), DBusValue::MakeObjectPath(devicePath), DBusValue::MakeObjectPath(apPath) });
             return;

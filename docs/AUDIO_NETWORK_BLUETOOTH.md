@@ -165,9 +165,12 @@ ImageMagick histogram of the tray container's own pixels, not just
    the same pattern a tray widget uses over its lifetime as its status
    changes - reproducibly corrupted the heap (`corrupted double-linked
    list`) partway through, in this project's own sandbox's installed
-   Imlib2/librsvg (Ubuntu 24.04's `libimlib2-1.12.4`/
-   `librsvg2-2.58.0`). Isolated as precisely as reasonably possible
-   before stopping:
+   Imlib2/librsvg (Ubuntu 24.04's `libimlib2-1.12.1-1.1build2`/
+   `librsvg2-2.58.0` - corrected here from an earlier transcription
+   error that read the first as "1.12.4"; only one Imlib2 version was
+   ever actually available in that sandbox, so this wasn't a version
+   mismatch, just a wrong note). Isolated as precisely as reasonably
+   possible before stopping:
    - Not the SVG files themselves - `rsvg-convert` (librsvg's own CLI,
      same library) renders the exact same files with no issue,
      standalone.
@@ -193,7 +196,9 @@ ImageMagick histogram of the tray container's own pixels, not just
      zero-downside, one-line mitigation, but should not be read as a
      fix.
 
-   **This is disclosed, not fixed.** Root-causing or working around a
+   **This is disclosed, not fixed[, as of 0.20.1 - see the "Real
+   regressions fixed (0.20.2)" section below for what changed].**
+   Root-causing or working around a
    crash inside a third-party image-rendering library's own internals
    is a fundamentally different, larger, and riskier undertaking than
    "why don't these processes launch," and well outside "smallest
@@ -214,6 +219,253 @@ ImageMagick histogram of the tray container's own pixels, not just
    theme whose status icons exist under their bare (non-`-symbolic`)
    names sidesteps it entirely for whichever specific icons it
    provides that way.
+
+   > **Update, 0.20.2:** this section is left exactly as written at
+   > the time (0.20.1) - including the workarounds above, which no
+   > longer apply - because it's an accurate record of what was known
+   > then. It is superseded by "Real regressions fixed (0.20.2)"
+   > below: the Imlib2 SVG-loading path described here is no longer
+   > used at all for `.svg`/`.svgz` icons. `Launcher.cpp`'s own,
+   > separate Imlib2 usage noted above is still untouched and still
+   > worth checking, unchanged.
+
+## Real regressions fixed (0.20.2)
+
+0.20.1 fixed the tray widgets' autostart problem and found (but, for
+one of the two, only disclosed rather than fixed) the two icon-loading
+issues above. Both were reported back as real, live problems on an
+actual Kohiko session running 0.20.1, not caught by that release's own
+testing - see this section's own intro paragraph in `CHANGELOG.md`'s
+0.20.2 entry for why. Both are fixed here.
+
+### Tray icon windows were being managed as normal windows
+
+**Symptom, as reported**: on a real session, the (now-launching,
+thanks to 0.20.1) tray icon windows behaved like invisible normal
+application windows - consuming BSP layout space, interfering with
+other windows, appearing in the taskbar, potentially affecting focus.
+
+**Root cause**, confirmed by reading `TrayIconClient.cpp` and
+`WindowManager.cpp`'s `Manage()`/`HandleMapRequest()` together, then
+confirmed empirically: `TrayIconClient::TryDock()` sends its dock
+request and then immediately calls `XMapWindow()` on its own window,
+without waiting for `SystemTray` to actually reparent it into the tray
+first (deliberately - see that function's own comment: this way a tray
+icon still gets *something* on screen even if the dock request goes
+briefly unanswered, e.g. because the tray doesn't exist yet). Mapping
+a window whose parent is still the root window generates a
+`MapRequest` to the window manager - and `WindowManager::Manage()` had
+no way to recognize that this particular `MapRequest` was for a window
+already in the middle of asking to be embedded somewhere else, so nine
+times out of ten it would already be fully tiled, in `_NET_CLIENT_LIST`,
+and eligible for focus by the time `SystemTray::DockIcon()` got around
+to reparenting it away a moment later - at which point its actual
+content had moved into the tray, but the WM's own bookkeeping (a BSP
+tile, a taskbar entry) didn't know that and kept the phantom entry
+around. This also explains a secondary symptom noticed but not fully
+explained in 0.20.1's own testing: the docked tray icons' `xwininfo`
+geometry looked wrong (hundreds of pixels, not the ~20px they're
+supposed to be) - that was BSP actively resizing them as if they were
+ordinary tiles, before the reparent pulled them out from under it.
+
+Why this surfaced only now: the race depends on a tray icon window
+actually existing and going through this handshake on a real session -
+before 0.20.1's autostart fix, the tray processes never ran at all, so
+`WindowManager::Manage()` had never actually had to classify one of
+these windows outside of a sandbox where no other windows happened to
+be open to notice interference against.
+
+**Fix**, general and property-based, not a per-application special
+case: `WindowManager::Manage()` now checks a new
+`XConnection::IsXEmbedWindow()`, which looks for an `_XEMBED_INFO`
+property - the freedesktop XEmbed specification's own required marker
+that a client is supposed to set on its window, before ever mapping
+it, if that window wants to be embedded into someone else's rather
+than managed as a normal top-level one. `TrayIconClient::Create()`
+already set this correctly (it has since the tray widgets were first
+written, in 0.19.0) - it just went unchecked by the WM side until now.
+Any window carrying it - Kohiko's own tray icons today, any future
+XEmbed-based widget built the same way tomorrow, without needing a
+single line changed here - is skipped before `Manage()` does anything
+else: no BSP tile, no `_NET_CLIENT_LIST` entry, no
+`SelectInputFor(...FocusChangeMask...)`, and critically, no
+`XMapWindow()` by the WM either - `SystemTray::DockIcon()` maps the
+window itself, after reparenting, as it already did; the fix is purely
+about the WM getting out of the way before that happens, not about
+changing anything in how docking itself works. Session Restore, which
+only ever persists windows still present in the same managed-window
+registry `Manage()` populates, needed no separate change to also
+correctly leave tray icons out - it already only sees what `Manage()`
+lets through.
+
+**Tested on a real session** (Xvfb + real D-Bus + real PipeWire, the
+same setup as 0.20.1's own testing, with `kohiko-session` as the entry
+point, plus this time a second real client - `xterm` - open at the
+same time specifically to have something for tray-window mismanagement
+to visibly interfere with):
+- `_NET_CLIENT_LIST` before the fix (pristine 0.20.1 build): included
+  the tray icon windows alongside real application windows. After the
+  fix: contains only real application windows (`xterm`, then also
+  `kohiko-audio` once opened) - the three tray icons never appear in
+  it, at any point.
+- The docked tray icons' own `xwininfo` geometry is now a clean,
+  correct `20x20` each, side by side inside the tray container - not
+  the wrong, oversized geometry from before.
+- With only the tray icons docked and no other window open, `xterm`
+  opened afterward takes the *entire* screen below the bar - it's not
+  sharing space with a phantom tile the tray icons don't actually need.
+- Opening the real `kohiko-audio` GUI (not its tray icon) still
+  produces a completely normal, tiled, `_NET_CLIENT_LIST`-tracked
+  window, side by side with `xterm` - confirming the fix distinguishes
+  a tray icon from its own app's full window correctly, not just "any
+  window this project's own binaries create."
+- `kohikoctl reload` and a WM crash-restart (`kill -KILL` on the
+  `kohiko` process, letting `kohiko-session`'s own supervisor restart
+  it) were both re-verified against the fixed build: reload doesn't
+  duplicate anything (unchanged from 0.20.1), and a fresh set of tray
+  icons re-docks correctly, and is correctly excluded from
+  `_NET_CLIENT_LIST`, after a crash-restart too.
+- Regression test: `tests/test_windowclassification.cpp` (3 checks,
+  real X connection required - `make test-windowclassification` /
+  `ctest`'s `WindowClassification`), exercising
+  `XConnection::IsXEmbedWindow()` directly against a plain window, a
+  window with `_XEMBED_INFO` set exactly the way `TrayIconClient::
+  Create()` sets it, and a nonexistent window ID.
+
+Not independently re-verified this round (unchanged from 0.20.1, and
+this fix doesn't touch anything related to either): scroll-wheel
+volume control, left/right-click behavior, live status updates.
+`SystemTray.cpp`, `TrayIconClient.cpp`, and all three `tools/kohiko-*-
+tray.cpp` files remain byte-for-byte unmodified (confirmed by diff).
+
+### The Imlib2 SVG-loading risk, actually fixed this time
+
+0.20.1 disclosed a real Imlib2/librsvg crash risk without fixing it,
+reasoning that root-causing a third-party rendering library's internals
+was out of scope for a bug about processes not launching. Told
+explicitly not to leave that risk in place, this release investigated
+properly and closed it.
+
+**Reproduction attempts**: the original specific crash (heap
+corruption after a particular 9-icon sequence) could not be reproduced
+again this release, on the same, correct Imlib2 version (1.12.1-
+1.1build2 - see the version correction above), despite substantial
+effort: the identical sequence run repeatedly, a 500-cycle stress loop
+(which turned out to be testing `UiIconCache`'s own cache far more
+than Imlib2 itself - see below), ASan+UBSan instrumentation, and
+glibc's `MALLOC_CHECK_=3`. This may mean the original crash is heap-
+layout/ASLR-sensitive rather than strictly deterministic, or that some
+now-unrecoverable difference in that earlier session's environment
+mattered - it's not possible to say for certain which, and this
+document isn't going to pretend otherwise.
+
+**A different, reliable failure was found instead.** Raw, direct
+Imlib2 API calls (no Kohiko code involved), rapidly loading, rendering,
+and freeing many *different* real SVG-sourced Pixmaps in a tight loop,
+produced X11 `BadPixmap` protocol errors on roughly 95% of
+`XFreePixmap` calls (81,988 errors across 41,200 free attempts in one
+run) - highly reproducible, not flaky at all under that specific
+access pattern. Narrowing it down:
+- Not `imlib_free_image()` specifically - removing that call entirely
+  produced the exact same error count, ruling out the most obvious
+  suspect (freeing the source image somehow also invalidating the
+  already-rendered Pixmap).
+- Not `UiIconCache`'s actual real-world usage pattern - loading each
+  of the same 206 real icons *once*, holding every resulting Pixmap
+  alive for the "process's" lifetime, and freeing everything only at
+  the very end (exactly what `UiIconCache::Get()`'s cache plus
+  `~UiIconCache()` already do, and exactly what a real, long-running
+  tray widget does) produced **zero** errors across all 206. The
+  rapid create-then-immediately-destroy-then-recreate-different-one
+  pattern that broke it is specifically what a tight retry/stress loop
+  does, not what any actual Kohiko binary's normal operation does -
+  worth knowing plainly, since it means the *practical*, everyday risk
+  of hitting this specific failure mode was probably always narrower
+  than 0.20.1's own framing suggested, even before today's fix.
+- Not the SVG files themselves, and not librsvg - confirmed
+  independently via `rsvg-convert` rendering the same files with no
+  issue, standalone.
+
+Both findings this release and the original one from 0.20.1 - one
+easy to reproduce, one not, under different conditions - point at the
+same place: Imlib2's own bridge from a loaded SVG to a pair of
+returned X11 Pixmaps is where the unreliability lives, not in the SVG
+content, not in librsvg, and not in `UiIconCache`'s own code.
+
+**Fix**: `.svg`/`.svgz` icons are no longer loaded through Imlib2 at
+all. A new, self-contained module - `include/SvgRenderer.h`/
+`src/SvgRenderer.cpp` - renders them directly through librsvg and
+Cairo instead (the exact same underlying libraries Imlib2's own SVG
+loader plugin already used internally, and genuinely the standard way
+most of the desktop Linux ecosystem, GTK included, renders SVG content
+- this isn't a novel or unusual approach). `UiIconCache::Get()` routes
+any path ending in `.svg`/`.svgz` (`SvgRenderer::CanHandle()`) there
+instead of to `imlib_load_image()`; every other format is completely
+untouched, still going through Imlib2 exactly as before -
+`.png`/`.xpm`/etc. icons never went through the SVG loader in the
+first place and were never part of this problem. The colour Pixmap is
+built via `cairo_xlib_surface_create()` directly against a real,
+correctly-sized-and-depthed `XCreatePixmap()` result, so Cairo itself
+handles every bit of visual/depth-specific pixel-format conversion;
+the mask is built by rendering a second time into an in-memory ARGB32
+surface purely to read back each pixel's alpha byte (`CAIRO_FORMAT_
+ARGB32`'s layout is well-defined regardless of host byte order - see
+the code's own comment), then `XCreateBitmapFromData()`. Per the
+explicit requirement not to rely on it: `imlib_set_cache_size(0)`,
+0.20.1's unproven defensive mitigation, has been removed - it's now
+irrelevant to the (no longer used for SVGs) path it targeted, and was
+never confirmed to do anything for the raster path either.
+
+**Verified**:
+- The exact adversarial pattern that reliably produced `BadPixmap`
+  errors through Imlib2 (many different SVG-sourced Pixmaps, created
+  and destroyed rapidly, 41,200 operations) reproduces **zero** errors
+  through `SvgRenderer` instead - confirmed both in a plain build and
+  under ASan+UBSan instrumentation.
+- `UiIconCache`'s own real usage pattern - 40 separate, fresh
+  `UiIconCache` instances (each standing in for one tray/audio/
+  network/Bluetooth process's entire lifetime), each loading a rotating
+  subset of real icon names through the real `Resolve()`+`Get()` path
+  and only freeing everything in its own destructor - produced zero X
+  errors across 2,760 total `Get()` calls, plain and under ASan+UBSan
+  alike.
+- Visual correctness, not just absence of errors: rendered directly to
+  a mock bar background and screenshotted, the audio/network/Bluetooth
+  symbolic icons now show as correct, clearly recognizable,
+  anti-aliased shapes (a speaker with sound-wave arcs, WiFi signal
+  arcs, the Bluetooth rune) - a marked improvement over 0.20.1's own
+  rendering, which was producing solid, detail-less blocks for at
+  least the icons it managed to resolve at all. Reconfirmed on a real,
+  live Kohiko session afterward: all three tray icons render as
+  correct, distinct shapes (a muted-volume speaker, a slashed
+  Bluetooth glyph reflecting no adapter present in this sandbox, and a
+  network icon showing an error/offline badge reflecting no
+  NetworkManager connection present) - not solid blocks, not blank.
+- Regression/safety test: `tests/test_svgrenderer.cpp` (14 checks -
+  `make test-svgrenderer` / `ctest`'s `SvgRenderer`). `CanHandle()`'s
+  pure string-matching logic always runs; `RenderToPixmaps()`'s checks
+  (real X connection required, gracefully skipped otherwise) include a
+  single-render correctness check (a real Pixmap and a genuinely
+  non-degenerate mask, not all-transparent or all-opaque), a clean-
+  failure check for a nonexistent file, and - the actual safety
+  regression guard - 180 render/free cycles across 6 distinct
+  synthetic SVGs at varying sizes, asserting zero X protocol errors
+  throughout.
+- Full clean rebuild (both Makefile and CMake, zero warnings) and full
+  test suite (`make test` and `ctest` alike) re-run after both fixes
+  together, not just each in isolation.
+
+Not done, and worth being explicit about: `Launcher.cpp`'s own,
+separate Imlib2 usage for app icons (noted as a related, untouched
+risk in 0.20.1's own section above) is still untouched - it wasn't
+part of what was reported, and changing it wasn't requested.
+Confirming or ruling out whether the *original*, no-longer-reproducible
+0.20.1 crash would recur on Arch Linux's actual `imlib2`/`librsvg`
+package versions specifically wasn't done either (and is now somewhat
+moot for the SVG-icon case specifically, since that path no longer
+goes through Imlib2 at all) - `Launcher.cpp`'s app-icon rendering,
+which does still use Imlib2 for SVGs, would be where that residual
+question actually matters.
 
 ## What was implemented
 
@@ -399,11 +651,19 @@ layer underneath them are exactly as they were.
   `network-wireless`, `bluetooth`), but their actual on-screen
   appearance couldn't be verified there. (A later session verified
   icon rendering specifically for the tray widgets' status icons
-  against a real installed theme, found and fixed a real gap, and
-  found an unresolved, disclosed rendering-crash risk - see [Icon
-  loading](#icon-loading) above. These three apps' own icon names,
-  e.g. `audio-card` for a device row, weren't part of that check and
-  remain unverified on-screen.)
+  against a real installed theme, found and fixed a real gap, and (in
+  a session after that) fixed a real rendering-reliability problem
+  that gap uncovered - see [Icon loading](#icon-loading) and [The
+  Imlib2 SVG-loading risk, actually fixed this time](#the-imlib2-svg-loading-risk-actually-fixed-this-time)
+  above. Both fixes are in `UiIconCache`, shared by these three apps'
+  own device-row icons as much as by the tray widgets, so `audio-card`
+  and friends benefit from the same fix - the "Kohiko Audio" screenshot
+  in this same investigation shows a correctly-rendered, non-blank
+  device icon next to "Dummy Output" - but that specific icon name
+  wasn't independently, rigorously pixel-checked the way the tray
+  icons were, so "on-screen appearance couldn't be verified there"
+  still stands as this bullet's own literal claim about *this
+  section's* own testing.)
 - `kohiko-network`'s Wi-Fi row signal strength is shown via icon only
   in the list (matching the mockup, which doesn't show a numeric
   percent there); the numeric percent is shown in the details panel.
@@ -419,11 +679,13 @@ layer underneath them are exactly as they were.
 ## Recommendations for the next development session
 
 1. **Smoke-test on a real KohikoWM desktop first**, before making
-   further changes to these three apps' own pages - a later session
-   did this for the tray widgets specifically (autostart, docking,
-   icon loading, scroll-volume - see [Tray widget
-   autostart](#tray-widget-autostart-this-sessions-fix) above), but
-   this section's own recommendation - these apps' own page
+   further changes to these three apps' own pages - later sessions did
+   this for the tray widgets specifically (autostart, docking, icon
+   loading, scroll-volume, window classification, SVG rendering
+   reliability - see [Tray widget
+   autostart](#tray-widget-autostart-this-sessions-fix) and [Real
+   regressions fixed (0.20.2)](#real-regressions-fixed-0202) above),
+   but this section's own recommendation - these apps' own page
    navigation, search, row selection, and especially
    `kohiko-bluetooth`'s pairing flow (`BluezClient::PairDevice()`/
    `ConnectDevice()` are genuinely slow, blocking D-Bus calls - see
@@ -444,12 +706,14 @@ layer underneath them are exactly as they were.
 4. If you add anything to the `Makefile` that produces a new `.o` file,
    remember `$(DEPFLAGS)` (see `docs/ARCHITECTURE.md`'s build-system
    section) - it's easy to copy an older rule that predates the fix.
-5. **Investigate the Imlib2/librsvg crash risk noted in [Icon
-   loading](#icon-loading) above** on the actual target system (Arch
-   Linux's own `imlib2`/`librsvg` package versions) before assuming
-   it's specific to this project's sandbox - if it reproduces there
-   too, it's worth an upstream Imlib2 report; if not, it's worth
-   recording here that it doesn't, so the next person doesn't have to
-   re-investigate from scratch. `Launcher.cpp`'s own separate Imlib2
-   usage (`DrawIcon()`) shares the same underlying library and is
-   worth the same check.
+5. ~~Investigate the Imlib2/librsvg crash risk noted in Icon loading
+   above on the actual target system~~ **Resolved as of 0.20.2** for
+   the tray/audio/network/Bluetooth icon path specifically - see [The
+   Imlib2 SVG-loading risk, actually fixed this time](#the-imlib2-svg-loading-risk-actually-fixed-this-time):
+   `.svg`/`.svgz` icons no longer go through Imlib2 at all, so the
+   question of whether that specific crash reproduces on Arch's own
+   `imlib2` package is now moot for this path. It is **not** moot for
+   `Launcher.cpp`'s own, separate Imlib2 usage for app icons
+   (`DrawIcon()`), which still goes through Imlib2 for SVGs and was
+   deliberately left untouched (unrelated WM functionality, not part
+   of what was reported) - checking that one is still open.

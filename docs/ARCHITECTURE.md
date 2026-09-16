@@ -351,17 +351,22 @@ systems:
   Xlib directly. A `m_dirty` flag (set by `RequestRedraw()`, checked
   once per `Run()` loop iteration) means a frame is only actually
   composited when something changed, not on a fixed timer. Icons
-  route through `UiIconCache` (Imlib2-backed, freedesktop icon-theme
-  lookup via `IconResolver`, graceful no-op if a name doesn't resolve
-  anywhere - including after a same-name-plus-`-symbolic` retry, added
-  once a real theme showed the exact name often isn't what's actually
-  shipped; relevant if you're testing in an environment with no icon
-  theme installed, see `docs/AUDIO_NETWORK_BLUETOOTH.md`, which also
-  covers an unresolved Imlib2/librsvg rendering-crash risk worth
-  reading before assuming any icon load is side-effect-free); text
-  goes through `Font` (Xft/
-  fontconfig, with the same per-character fallback the WM's own `Bar`
-  uses).
+  route through `UiIconCache` - freedesktop icon-theme lookup via
+  `IconResolver` (graceful no-op if a name doesn't resolve anywhere,
+  including after a same-name-plus-`-symbolic` retry, added once a
+  real theme showed the exact name often isn't what's actually
+  shipped), then rendering: through Imlib2 for raster formats
+  (PNG/XPM/...), or through `SvgRenderer` (librsvg/Cairo, directly -
+  see that header's own comment) for `.svg`/`.svgz` specifically,
+  *not* through Imlib2's own bundled SVG loader, after real testing
+  found that bridge unreliable under repeated use - see
+  `docs/AUDIO_NETWORK_BLUETOOTH.md`'s "Icon loading" and "Real
+  regressions fixed (0.20.2)" sections for the full investigation
+  before assuming any SVG-sourced icon load is side-effect-free
+  through any *other* Imlib2 call site this project has (namely
+  `Launcher.cpp`'s own, separate, not-yet-migrated one - see its
+  `DrawIcon()`); text goes through `Font` (Xft/fontconfig, with the
+  same per-character fallback the WM's own `Bar` uses).
 
 Resizing recreates the backing pixmap at the new size
 (`UiWindow::ResizeBacking()`, called from the `ConfigureNotify`
@@ -472,7 +477,16 @@ nothing actually read that directory at all, and the tray widgets
 never launched on a real session as a result - see `CHANGELOG.md`'s
 0.20.1 entry and `docs/AUDIO_NETWORK_BLUETOOTH.md`'s "Tray widget
 autostart" section. Fixed now, but worth knowing if you're reading
-older code or history.)
+older code or history.) Likewise, no source changes are needed for
+the WM to correctly *not* manage the new icon's own window as a normal
+application window, as long as it's built on `TrayIconClient` as
+above: `TrayIconClient::Create()` already sets the `_XEMBED_INFO`
+property `WindowManager::Manage()` checks for (via
+`XConnection::IsXEmbedWindow()`) before tiling anything - see
+`CHANGELOG.md`'s 0.20.2 entry for why that check exists at all (a real
+regression: through 0.20.1, it didn't, and tray icon windows could get
+fully tiled/tracked in a race against `SystemTray` reparenting them
+away).
 
 **A new full companion app** (a settings page of its own, like
 `kohiko-audio`) - build on the shared UI toolkit

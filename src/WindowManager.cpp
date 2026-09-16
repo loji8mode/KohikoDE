@@ -1350,6 +1350,22 @@ void WindowManager::Manage(WindowID id)
     if (m_connection.IsDockWindowType(id, m_atoms))
         return;
 
+    // See XConnection::IsXEmbedWindow()'s own comment for why this
+    // has to be checked here, this early, rather than cleaned up
+    // after the fact once SystemTray reparents the window away: by
+    // then it would already have a BSP slot, a taskbar entry, and
+    // focus eligibility it was never supposed to get, all rendering
+    // nothing once the window's actual content moves into the tray a
+    // moment later. Not calling XMapWindow here matters just as much
+    // as not calling m_repository.Add(): SystemTray::DockIcon() maps
+    // this window itself, after reparenting it, as the last step of
+    // the XEmbed handshake - mapping it here first would show it,
+    // full-sized, in whatever tile it would have landed in, for
+    // however many milliseconds pass until the dock request is
+    // processed.
+    if (m_connection.IsXEmbedWindow(id, m_atoms))
+        return;
+
     ManagedWindow* window = m_repository.Add(id);
 
     window->SetTitle(m_connection.GetWindowTitle(id, m_atoms));

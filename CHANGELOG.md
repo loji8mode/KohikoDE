@@ -1,5 +1,231 @@
 # Changelog
 
+## Version 0.20.3
+
+Release date: 2026-08-16
+
+### Fixed
+- **kohiko-network never actually reused or updated a saved Wi-Fi
+  connection's stored password - it silently discarded every
+  freshly-typed password for a network NetworkManager already had a
+  profile for, and (as a direct consequence) never detected that a
+  profile already existed in the first place.** Found while
+  investigating a live report of a WPA2 network ("Linux for best")
+  repeatedly failing with `psk mismatch reported by supplicant`. The
+  handshake failure itself reproduced identically via plain `nmcli`,
+  with no Kohiko process involved at all, and Kohiko's own
+  process was independently confirmed (by PID, in the provided
+  `journalctl` output) not to be the one making any of the specific
+  failed activation attempts logged there - so that specific failure
+  is not attributed to Kohiko, and no attempt was made to explain it
+  away as one. Tracing `NetworkManagerClient.cpp`'s complete profile
+  lookup/secret/activation path anyway (as asked, independent of
+  whether the specific logged failures were Kohiko's doing) turned up
+  a real, separate, verified bug in exactly that path:
+  `ConnectToAccessPoint()`'s "reuse an existing saved connection for
+  this SSID" check reads a saved connection's stored SSID via
+  `BytesToString(wifiSection.Get("ssid"))` - and `BytesToString()`
+  called `.Items()` on that value without unwrapping it first. At the
+  nesting depth that value actually comes from (inside a
+  `GetSettings()`-shaped nested dict), every property value arrives
+  wrapped in a D-Bus Variant; reading `.Items()` off an un-unwrapped
+  Variant doesn't error, it silently returns zero items. Confirmed by
+  direct execution, not just by reading: a small standalone
+  reproduction, and a before/after run of the new regression test
+  against the pre-fix code, both show `BytesToString()` returning `""`
+  for every real SSID, unconditionally.
+  The practical effect: `savedSsid == ssid` never matched, for any
+  network, ever - so every "Connect" click on an already-known
+  network fell through to creating a brand-new connection profile via
+  `AddAndActivateConnection()` instead of reusing (or correctly
+  updating) the existing one, the same "duplicates/re-asks for a
+  known network" anti-pattern reported against other NetworkManager
+  frontends with this exact bug shape. `BytesToString()` is fixed at
+  the root (an `.Unwrap()` call, safe as a no-op for any caller that
+  already had an unwrapped value, so every existing call site benefits
+  without behavior changing for ones that weren't broken) and moved
+  out of this file's anonymous namespace into `Kohiko::` scope,
+  declared in `NetworkManagerClient.h`, specifically so it's directly
+  unit-testable rather than only reachable through the much larger
+  surface `ConnectToAccessPoint()` exposes.
+  A second, dependent fix was necessary alongside the first, not
+  optional: once SSID matching actually works, the existing code
+  would have found the matching saved connection and just reactivated
+  it as-is - silently discarding whatever password the user had just
+  been prompted for and just typed, and reproducing the exact
+  "nothing I type ever seems to take effect" experience the original
+  report described, just deterministically instead of intermittently.
+  `ConnectToAccessPoint()` now calls `Settings.Connection.Update()`
+  with a freshly-typed, non-empty password before activating a
+  matched existing connection - built from the connection's own,
+  just-fetched full settings (`Update()` replaces the *entire*
+  connection per NetworkManager's own D-Bus reference, not a
+  merge/patch, so every other section - `ipv4`, `connection`, etc. -
+  is round-tripped through unchanged) with only that one section's
+  `psk` (and `key-mgmt`, if not already set) added or overwritten.
+- Neither of the above two, related bugs could ever have been
+  observed independently of each other in practice - the second was
+  unreachable until the first was fixed, and fixing only the first
+  without the second would have made the user-visible symptom *more*
+  consistent, not fixed, since the stale secret would then always win
+  instead of sometimes.
+
+### Added
+- `tests/test_networkmanagerclient.cpp` (6 checks, part of `make
+  test`/`ctest` when `libdbus-1-dev` is available, gated the same way
+  `kohiko-network` itself is): constructs the exact D-Bus wire shape
+  `GetSettings()` returns for a saved connection's SSID by hand
+  (Variant-wrapping an array of bytes) and confirms `BytesToString()`
+  decodes it correctly - and, run against the pre-fix code during
+  development, confirmed the test actually fails there rather than
+  passing vacuously.
+
+### Investigated, not changed
+- A real Wi-Fi association failure separately reported and reproduced
+  directly on hardware (RTL8822BU / `rtw88_8822bu`, TP-Link 2357:0138,
+  `linux-lts 6.18.44-1-lts`, firmware 30.20.0): 5GHz association to
+  `Linux for best_5G` consistently fails
+  `authenticated → associated → failed to get tx report from firmware → deauthenticated (reason 2)`,
+  2.4GHz on the same adapter works normally. Matched against a
+  community report describing the identical chip, identical firmware
+  version, and the same failure, explicitly as a regression starting
+  at kernel 6.18.4 (6.12.58 LTS and 6.17 both confirmed still
+  working) - not a chronic, always-been-there issue. No accepted
+  upstream fix or kernel-bugzilla tracking entry was found for this
+  specific regression. This is a kernel/driver-level issue, entirely
+  outside NetworkManager's or Kohiko's own code, and neither was
+  modified in relation to it, per the explicit instruction not to.
+  See the conversation this release's work came from for the full
+  investigation and the options that were considered.
+
+## Version 0.20.2
+
+Release date: 2026-08-15
+
+Both fixes below were found on a real Kohiko 0.20.1 session, not in
+this project's own sandbox - the sandbox testing behind 0.20.1 wasn't
+wrong about what it verified, but it verified less than it needed to:
+the tray icons genuinely docked and rendered correctly there, but
+nothing in that testing happened to exercise how the *window manager
+itself* first classifies a brand-new tray-icon window (0.20.1's
+testing never had a second, real application window open at the same
+time to notice the difference against), and nothing in it ran the
+exact repeated-icon-load sequence needed to expose the Imlib2 issue
+addressed below reliably. Both are fixed properly here, not documented
+as accepted risk.
+
+### Fixed
+- **Tray icon windows were being managed as normal application
+  windows** - tiled into the BSP layout, given a taskbar entry
+  (`_NET_CLIENT_LIST`), eligible for normal focus - rather than
+  treated as the non-interactive infrastructure they are, alongside
+  the bar itself. Root cause: `TrayIconClient::TryDock()` maps its own
+  window immediately after requesting a dock, without waiting for
+  `SystemTray` to actually reparent it first (see that function's own
+  comment for why - briefly, so a tray icon still gets *something* on
+  screen even if the dock request goes unanswered for a moment), which
+  races `WindowManager::Manage()`'s ordinary `MapRequest` handling: a
+  tray icon window could be fully tiled and tracked before
+  `SystemTray` ever got a chance to reparent it away, leaving a
+  phantom BSP tile and taskbar entry rendering nothing once the
+  window's actual content moved into the tray a moment later - this
+  also explains the tray icons' own visibly wrong, oversized geometry
+  under 0.20.1 (BSP was resizing them to fill a tile). This is why it
+  surfaced now rather than earlier: before 0.20.1's autostart fix, the
+  tray icon windows this race depends on never existed on a real
+  session at all. Fixed generically, not by recognizing
+  `kohiko-*-tray` by name: `WindowManager::Manage()` now skips any
+  window carrying an `_XEMBED_INFO` property (new:
+  `XConnection::IsXEmbedWindow()`) - the freedesktop XEmbed
+  specification's own required marker for any window that intends to
+  be embedded into someone else's window rather than managed as a
+  normal one, which `TrayIconClient::Create()` already set correctly,
+  just to no effect before now. Any future tray widget built the same
+  way is classified correctly automatically, with no code changes
+  needed here; the actual Audio/Network/Bluetooth *app* windows
+  (opened directly, not their tray icons) are unaffected and remain
+  ordinary, normal, tiled windows, since they never set this property.
+  Session Restore, which only ever persists currently-managed windows,
+  needed no separate change for tray icons to stay out of it either -
+  same root cause, same fix.
+- **A real, reproducible Imlib2 SVG-loading reliability problem**,
+  found via ASan/UBSan-instrumented and Valgrind-style (glibc
+  `MALLOC_CHECK_`) reproduction attempts this release, is now avoided
+  entirely rather than merely documented. 0.20.1 recorded this crash
+  against "libimlib2-1.12.4" - that was a transcription error; the
+  only Imlib2 version ever actually available in this project's own
+  sandbox is 1.12.1-1.1build2, and that correction matters, because
+  the *original* specific crash (a heap corruption after loading a
+  particular 9-icon sequence) could not be reproduced again this
+  release on that same, correct version, despite substantial
+  instrumented effort (hundreds of stress cycles, ASan/UBSan, glibc's
+  `MALLOC_CHECK_=3`) - it may be heap-layout/ASLR-sensitive rather
+  than strictly deterministic. A *different*, highly and reliably
+  reproducible failure was found this release instead: rapidly
+  creating and destroying many different SVG-sourced Imlib2-rendered
+  X11 Pixmaps in one process (not `UiIconCache`'s own actual usage
+  pattern, which loads each unique icon once and holds it for the
+  process's lifetime - that specific pattern produced zero errors
+  across all 206 real Adwaita status icons tested) reliably produced
+  X11 `BadPixmap` errors on ~95% of `XFreePixmap` calls. Both findings
+  - one hard to reproduce, one very easy to, under different
+  conditions - point the same direction: real unreliability
+  specifically in Imlib2's own SVG-to-Pixmap bridge, not in the SVG
+  files themselves (librsvg's own `rsvg-convert` CLI renders the exact
+  same files with no issue, standalone) and not in `UiIconCache`'s
+  code (a minimal, direct, raw-Imlib2-API-only reproduction with no
+  Kohiko code involved hits the same `BadPixmap` pattern). Rather than
+  depend on a workaround for a bridge with a demonstrated reliability
+  problem, `.svg`/`.svgz` icons are now rendered through a new,
+  self-contained module, `SvgRenderer` (`include/SvgRenderer.h`,
+  `src/SvgRenderer.cpp`), using librsvg and Cairo directly - the same
+  underlying libraries Imlib2's own SVG loader plugin uses internally,
+  and genuinely the standard way most of the Linux desktop ecosystem
+  (GTK included) renders SVG content, just without Imlib2's bridging
+  code in between. Verified clean (zero X errors, including under
+  ASan/UBSan) across the exact adversarial pattern
+  (create-many-different-SVG-pixmaps-in-a-tight-loop) that reliably
+  broke the old path, and across `UiIconCache`'s own real usage
+  pattern. Visually, icons now render as correct, recognizable,
+  anti-aliased shapes - confirmed on a real session, and actually a
+  clear improvement over 0.20.1's own rendering, which (now
+  understood, not just observed) was quietly producing solid,
+  detail-less blocks for at least some icons rather than true
+  failures. `.png`/`.xpm`/other raster icon formats are completely
+  unaffected - they never went through Imlib2's SVG loader in the
+  first place, and still load exactly as before.
+- Per the requirement not to depend on it: `imlib_set_cache_size(0)`,
+  added in 0.20.1 as a defensive (and, per that entry's own honest
+  wording, unproven) mitigation for the issue above, has been removed
+  from `UiIconCache`'s constructor - the real fix above makes it
+  irrelevant to the SVG path it was aimed at, and it was never
+  confirmed to do anything for the raster path either.
+
+### Added
+- `librsvg2-dev` (pacman: `librsvg`) joins `libdbus-1-dev`/
+  `libpipewire-0.3-dev` as a build requirement for kohiko-audio,
+  kohiko-network, kohiko-bluetooth, and their three tray widgets -
+  `SvgRenderer.cpp` `#include`s it unconditionally, the same "no
+  fallback at compile time" treatment the other two already had. Also
+  added `pipewire` to `scripts/install-arch.sh`'s own package list
+  while already touching it for `librsvg` - a real, pre-existing gap
+  from before this release (pipewire was already a hard build
+  requirement for kohiko-audio specifically; a fresh install-arch.sh
+  run without it already-installed some other way silently skipped
+  building all six of these binaries rather than failing loudly).
+- Two new regression tests, both following the existing
+  `test_monitormanager` convention of gracefully skipping (exit 0,
+  not a failure) when no real `$DISPLAY` is available, so both are
+  kept out of `make test`/available separately (`make
+  test-windowclassification`, `make test-svgrenderer`) the same way
+  `make test-monitors` already was, but are registered with `ctest`
+  the same way `test_monitormanager` already is too:
+  `test_windowclassification` (3 checks: `IsXEmbedWindow()`'s three
+  cases above) and `test_svgrenderer` (14 checks: `CanHandle()`'s pure
+  logic always runs; `RenderToPixmaps()`'s checks include the same
+  adversarial many-different-SVGs stress pattern that reproduced the
+  `BadPixmap` issue above, now asserting zero X errors).
+
 ## Version 0.20.1
 
 Release date: 2026-08-13

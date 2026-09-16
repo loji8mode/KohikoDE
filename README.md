@@ -86,10 +86,12 @@ sudo apt install libxss-dev
 # optional, for the primary (D-Bus) half of display-sleep inhibition:
 sudo apt install libdbus-1-dev
 # optional, for kohiko-audio/kohiko-network/kohiko-bluetooth and their
-# tray widgets (see Audio, network, and Bluetooth) - both required
-# together for those six binaries to build at all; everything else in
-# this repository builds fine without them:
-sudo apt install libdbus-1-dev libpipewire-0.3-dev
+# tray widgets (see Audio, network, and Bluetooth) - all three
+# required together for those six binaries to build at all (the third,
+# librsvg2-dev, is what SvgRenderer.cpp renders .svg/.svgz icons
+# through - see include/SvgRenderer.h); everything else in this
+# repository builds fine without them:
+sudo apt install libdbus-1-dev libpipewire-0.3-dev librsvg2-dev
 ```
 
 Also install the lock screen's PAM service file - without it, every
@@ -911,6 +913,38 @@ just fine if you run them instead, since this is a completely ordinary
 implementation of the standard protocol either way, but there's no
 need to for these three in particular.
 
+### Tray icons are infrastructure, not managed windows
+
+A docked tray icon is never tiled, never gets a taskbar entry, is
+never eligible for normal keyboard/click focus, and is never persisted
+by Session Restore - it's WM-level plumbing, the same category as the
+bar itself, not an application window. This is enforced generically,
+not by recognizing any particular tray application by name:
+`WindowManager::Manage()` skips any window that carries an
+`_XEMBED_INFO` property (the freedesktop XEmbed specification's own
+required marker for a window that intends to be embedded into someone
+else's window rather than managed as a normal top-level one - see
+`TrayIconClient::Create()`, the only thing in this codebase that
+currently sets it), so any future tray widget built the same way gets
+the same treatment automatically, with no code changes needed here.
+Opening the *actual* Audio/Network/Bluetooth app - as opposed to its
+tray icon - creates a completely ordinary, normal, tiled window, since
+that app's own window never sets this property; only the small tray
+icon does.
+
+This matters for timing as much as classification: a tray client maps
+its own window immediately after requesting a dock, without waiting
+for Kohiko to actually reparent it first (see
+`TrayIconClient::TryDock()`'s own comment for why), so the check has
+to win a real race, not just clean up after one - by the time
+`SystemTray` gets around to reparenting the window into the tray a
+moment later, a `WindowManager::Manage()` that didn't check this
+already would have fully tiled it. See `CHANGELOG.md`'s 0.20.2 entry
+for how this was found and fixed - it was a real, if fairly obscure,
+consequence of the tray widgets never having actually run before
+0.20.1 (see the entry just above it) meant Kohiko had genuinely never
+had to classify one of these windows on a real session until then.
+
 ## Audio, network, and Bluetooth
 
 Three standalone native applications, installed and built alongside
@@ -981,18 +1015,26 @@ of launching a second one, the same single-instance behavior as
 opening the app any other way.
 
 None of these three apps or their tray widgets are built at all if
-`libdbus-1-dev`/`libpipewire-0.3-dev` aren't present at build time
-(see [Building](#building)) - `kohiko`, `kohikoctl`, and
+`libdbus-1-dev`/`libpipewire-0.3-dev`/`librsvg2-dev` aren't present at
+build time (see [Building](#building)) - `kohiko`, `kohikoctl`, and
 `kohiko-settings` build and work exactly as before either way.
 
 Icon rendering for the tray widgets goes through the system icon theme
 (`~/.config/gtk-3.0/settings.ini`'s `gtk-icon-theme-name`, falling
 back to `hicolor` - see [docs/AUDIO_NETWORK_BLUETOOTH.md](docs/AUDIO_NETWORK_BLUETOOTH.md#icon-loading)
-for exactly what that does and doesn't find) and then through Imlib2's
-own SVG loader for anything vector-based, which most modern icon
-themes' status icons are; see that same doc for a known, unresolved
-Imlib2/librsvg crash risk found while testing this, affecting a
-minority of specific icon files under specific conditions.
+for exactly what that does and doesn't find), then to a real file -
+raster formats (PNG, XPM, ...) through Imlib2 exactly as before, but
+`.svg`/`.svgz` files through `SvgRenderer` (librsvg and Cairo,
+directly - see `include/SvgRenderer.h`'s own comment), not through
+Imlib2's own bundled SVG loader plugin. That's a change from 0.20.1:
+real testing found Imlib2's own SVG-to-pixmap bridge unreliable under
+repeated use within one process (both a heap corruption and a
+separate, highly reproducible pattern of X11 `BadPixmap` errors,
+neither reproducible in the SVG files themselves or in librsvg's own
+rendering), so 0.20.2 bypasses it entirely for vector icons rather
+than attempt to work around a third-party rendering bridge with a
+demonstrated reliability problem - see `CHANGELOG.md`'s 0.20.2 entry
+and that same doc's "Icon loading" section for the full investigation.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how these three
 apps are put together internally (the shared `UiWindow`/`Widget`

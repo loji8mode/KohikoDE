@@ -233,6 +233,31 @@ public:
     // windows.
     bool IsDockWindowType(::Window window, const XAtoms& atoms);
 
+    // True if this window carries a _XEMBED_INFO property - the
+    // freedesktop XEmbed spec requires any client that wants to be
+    // embedded into someone else's window (rather than managed as a
+    // normal top-level one) to set this *before* ever mapping that
+    // window. Kohiko's own TrayIconClient (see its Create()) is the
+    // only thing that currently does this, for the System Tray
+    // Protocol's icon windows specifically, but this checks the
+    // property itself, not any particular application - any future
+    // XEmbed-based client gets the same treatment automatically.
+    // WindowManager::Manage() checks this before anything else about
+    // window *type* or *class*, and for good reason: unlike
+    // IsDockWindowType() above, which only has to stop Manage() from
+    // permanently adopting a window, this has to win a real race.
+    // TrayIconClient maps its window immediately after requesting a
+    // dock, without waiting for the tray to actually reparent it
+    // first (see that class's own comment on TryDock()) - so by the
+    // time SystemTray reparents the window away, a WindowManager that
+    // didn't check this already would have fully managed it: a BSP
+    // slot, a taskbar entry, focus eligibility, all before the
+    // reparent it was always going to lose ever happens. This is
+    // checked purely by property, not by process name or binary path,
+    // so it applies the same way to any window that sets it, present
+    // or future.
+    bool IsXEmbedWindow(::Window window, const XAtoms& atoms);
+
     // Direct children of the root window, in bottom-to-top stacking
     // order (as XQueryTree returns them) - used once, at startup, by
     // WindowManager::AdoptExistingWindows() to find windows mapped by

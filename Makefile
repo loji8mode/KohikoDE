@@ -41,7 +41,7 @@ LIBS += $(shell pkg-config --libs xft fontconfig)
 DESKTOP_SHARED_SRC := src/DBusValue.cpp src/DBusClient.cpp src/AppInstanceLock.cpp \
     src/AppConfigStore.cpp src/NotificationClient.cpp src/UiWindow.cpp src/UiWidget.cpp \
     src/UiListRow.cpp src/UiScrollView.cpp src/UiSidebar.cpp src/UiPopupMenu.cpp \
-    src/UiIconCache.cpp src/TrayIconClient.cpp
+    src/UiIconCache.cpp src/SvgRenderer.cpp src/TrayIconClient.cpp
 DESKTOP_APP_ONLY_SRC := src/PipeWireClient.cpp src/NetworkManagerClient.cpp src/BluezClient.cpp \
     src/AudioWindow.cpp src/NetworkWindow.cpp src/BluetoothWindow.cpp
 
@@ -84,18 +84,29 @@ endif
 
 # --- kohiko-audio / kohiko-network / kohiko-bluetooth + tray widgets -------------
 #
-# Gated on dbus-1 + libpipewire-0.3 both actually being present -
-# unlike kohiko's own *optional* dbus-1 usage just above (which only
-# loses a feature without it), DBusClient.cpp and PipeWireClient.cpp
-# both `#include` their real headers unconditionally, so these six
-# binaries have no fallback at compile time. See CMakeLists.txt's
-# identical KOHIKO_DESKTOP_APPS_AVAILABLE check for the same reasoning.
+# Gated on dbus-1 + libpipewire-0.3 + librsvg-2.0 all actually being
+# present - unlike kohiko's own *optional* dbus-1 usage just above
+# (which only loses a feature without it), DBusClient.cpp,
+# PipeWireClient.cpp, and SvgRenderer.cpp all `#include` their real
+# headers unconditionally, so these six binaries have no fallback at
+# compile time. See CMakeLists.txt's identical
+# KOHIKO_DESKTOP_APPS_AVAILABLE check for the same reasoning.
 KOHIKO_HAVE_DBUS_PKG := $(shell pkg-config --exists dbus-1 && echo yes)
 
 ifeq ($(shell pkg-config --exists libpipewire-0.3 && echo yes),yes)
     KOHIKO_HAVE_PIPEWIRE := yes
     CXXFLAGS     += $(shell pkg-config --cflags libpipewire-0.3)
     PIPEWIRE_LIBS := $(shell pkg-config --libs libpipewire-0.3)
+endif
+
+# librsvg + Cairo - SvgRenderer.cpp renders .svg/.svgz icons directly
+# through these, rather than through Imlib2's own bundled SVG loader
+# plugin - see SvgRenderer.h's own comment for why. Same
+# no-fallback-at-compile-time treatment as libpipewire-0.3 just above.
+ifeq ($(shell pkg-config --exists librsvg-2.0 && echo yes),yes)
+    KOHIKO_HAVE_LIBRSVG := yes
+    CXXFLAGS  += $(shell pkg-config --cflags librsvg-2.0)
+    RSVG_LIBS := $(shell pkg-config --libs librsvg-2.0)
 endif
 
 DESKTOP_SHARED_OBJ := $(patsubst src/%.cpp,build/%.o,$(DESKTOP_SHARED_SRC))
@@ -111,10 +122,10 @@ DESKTOP_COMMON_OBJ := build/Font.o build/Config.o build/IconResolver.o build/Xdg
 
 all: kohiko kohikoctl kohiko-settings
 
-ifeq ($(KOHIKO_HAVE_PIPEWIRE)-$(KOHIKO_HAVE_DBUS_PKG),yes-yes)
+ifeq ($(KOHIKO_HAVE_PIPEWIRE)-$(KOHIKO_HAVE_DBUS_PKG)-$(KOHIKO_HAVE_LIBRSVG),yes-yes-yes)
 all: kohiko-audio kohiko-network kohiko-bluetooth kohiko-audio-tray kohiko-network-tray kohiko-bluetooth-tray
 else
-$(info Skipping kohiko-audio/kohiko-network/kohiko-bluetooth and their tray widgets - install libdbus-1-dev and libpipewire-0.3-dev to enable them.)
+$(info Skipping kohiko-audio/kohiko-network/kohiko-bluetooth and their tray widgets - install libdbus-1-dev, libpipewire-0.3-dev, and librsvg2-dev to enable them.)
 endif
 
 kohiko: $(OBJ)
@@ -142,13 +153,13 @@ build/kohiko-settings-main.o: tools/kohiko-settings.cpp | build
 # --- kohiko-audio -----------------------------------------------------------------
 
 kohiko-audio: $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) build/PipeWireClient.o build/AudioWindow.o build/kohiko-audio-main.o
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LIBS) $(PIPEWIRE_LIBS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LIBS) $(PIPEWIRE_LIBS) $(RSVG_LIBS)
 
 build/kohiko-audio-main.o: tools/kohiko-audio.cpp | build
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
 kohiko-audio-tray: $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) build/PipeWireClient.o build/kohiko-audio-tray-main.o
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LIBS) $(PIPEWIRE_LIBS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LIBS) $(PIPEWIRE_LIBS) $(RSVG_LIBS)
 
 build/kohiko-audio-tray-main.o: tools/kohiko-audio-tray.cpp | build
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
@@ -156,13 +167,13 @@ build/kohiko-audio-tray-main.o: tools/kohiko-audio-tray.cpp | build
 # --- kohiko-network ---------------------------------------------------------------
 
 kohiko-network: $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) build/NetworkManagerClient.o build/NetworkWindow.o build/kohiko-network-main.o
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LIBS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LIBS) $(RSVG_LIBS)
 
 build/kohiko-network-main.o: tools/kohiko-network.cpp | build
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
 kohiko-network-tray: $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) build/NetworkManagerClient.o build/kohiko-network-tray-main.o
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LIBS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LIBS) $(RSVG_LIBS)
 
 build/kohiko-network-tray-main.o: tools/kohiko-network-tray.cpp | build
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
@@ -170,18 +181,29 @@ build/kohiko-network-tray-main.o: tools/kohiko-network-tray.cpp | build
 # --- kohiko-bluetooth --------------------------------------------------------------
 
 kohiko-bluetooth: $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) build/BluezClient.o build/BluetoothWindow.o build/kohiko-bluetooth-main.o
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LIBS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LIBS) $(RSVG_LIBS)
 
 build/kohiko-bluetooth-main.o: tools/kohiko-bluetooth.cpp | build
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
 kohiko-bluetooth-tray: $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) build/BluezClient.o build/kohiko-bluetooth-tray-main.o
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LIBS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LIBS) $(RSVG_LIBS)
 
 build/kohiko-bluetooth-tray-main.o: tools/kohiko-bluetooth-tray.cpp | build
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
-test: build/test_bsptree build/test_launcherscoring build/test_placementhabits build/test_dbusvalue build/test_sessionstore build/test_configmigration build/test_recoverymode build/test_appdirwatcher build/test_autologinconfigurator build/test_wallpapermanager build/test_desktopentry build/test_iconresolver
+# test_networkmanagerclient needs libdbus-1-dev to even compile
+# (NetworkManagerClient.cpp/DBusClient.cpp #include <dbus/dbus.h>
+# unconditionally, same "no fallback at compile time" situation as
+# kohiko-network itself) - added to the `test` prerequisite list and
+# run conditionally, the same way kohiko-network's own six-binary
+# group is gated, rather than unconditionally like the tests above it
+# that need nothing beyond the C++ standard library.
+ifeq ($(KOHIKO_HAVE_DBUS_PKG),yes)
+    TEST_NETWORKMANAGERCLIENT := build/test_networkmanagerclient
+endif
+
+test: build/test_bsptree build/test_launcherscoring build/test_placementhabits build/test_dbusvalue build/test_sessionstore build/test_configmigration build/test_recoverymode build/test_appdirwatcher build/test_autologinconfigurator build/test_wallpapermanager build/test_desktopentry build/test_iconresolver $(TEST_NETWORKMANAGERCLIENT)
 	./build/test_bsptree
 	./build/test_launcherscoring
 	./build/test_placementhabits
@@ -195,6 +217,9 @@ test: build/test_bsptree build/test_launcherscoring build/test_placementhabits b
 	./build/test_desktopentry
 	./build/test_iconresolver
 	sh tests/test_kohiko_session.sh
+ifeq ($(KOHIKO_HAVE_DBUS_PKG),yes)
+	./build/test_networkmanagerclient
+endif
 
 build/test_bsptree: tests/test_bsptree.cpp src/BSPTree.cpp src/BSPLeaf.cpp src/BSPSplit.cpp src/ManagedWindow.cpp src/LayoutEngine.cpp | build
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
@@ -283,6 +308,15 @@ build/test_desktopentry: tests/test_desktopentry.cpp src/DesktopEntry.cpp src/In
 build/test_iconresolver: tests/test_iconresolver.cpp src/IconResolver.cpp src/IniFile.cpp src/Xdg.cpp src/Utils.cpp | build
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
 
+# Pure logic, no live D-Bus connection or running NetworkManager
+# needed (see the file itself) - but still needs libdbus-1-dev to
+# compile at all, since it links DBusClient.cpp - hence the
+# TEST_NETWORKMANAGERCLIENT gating above rather than being
+# unconditional like the tests just above it. Regression test for the
+# BytesToString()/ConnectToAccessPoint() fix - see CHANGELOG.md.
+build/test_networkmanagerclient: tests/test_networkmanagerclient.cpp src/NetworkManagerClient.cpp src/DBusClient.cpp src/DBusValue.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ $(LIBS)
+
 # Needs a real X11/XRandr connection - gracefully skips the checks
 # that need one if $DISPLAY isn't set (see the file itself), so it's
 # kept separate from `make test` rather than folded into it.
@@ -291,6 +325,27 @@ test-monitors: build/test_monitormanager
 
 build/test_monitormanager: tests/test_monitormanager.cpp src/Monitor.cpp src/MonitorManager.cpp src/MonitorRule.cpp src/Workspace.cpp src/WorkspaceManager.cpp src/BSPTree.cpp src/BSPLeaf.cpp src/BSPSplit.cpp src/ManagedWindow.cpp src/LayoutEngine.cpp src/Config.cpp src/XConnection.cpp src/XAtoms.cpp src/Utils.cpp src/Logger.cpp | build
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ -lX11 $(shell pkg-config --exists xrandr && pkg-config --libs xrandr)
+
+# Same "needs a real X11 connection, kept out of `make test`" deal as
+# test-monitors just above - regression test for the tray-window
+# classification fix (XConnection::IsXEmbedWindow(), see that
+# function's own comment and WindowManager::Manage()'s use of it).
+test-windowclassification: build/test_windowclassification
+	./build/test_windowclassification
+
+build/test_windowclassification: tests/test_windowclassification.cpp src/XConnection.cpp src/XAtoms.cpp src/Logger.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ -lX11
+
+# Same "needs a real X11 connection, kept out of `make test`" deal
+# again - CanHandle() (pure logic) always runs regardless; only the
+# RenderToPixmaps() stress/safety section needs $DISPLAY (see the
+# file itself). Regression test for the SVG-rendering-path fix (see
+# SvgRenderer.h's own comment).
+test-svgrenderer: build/test_svgrenderer
+	./build/test_svgrenderer
+
+build/test_svgrenderer: tests/test_svgrenderer.cpp src/SvgRenderer.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ -lX11 $(RSVG_LIBS)
 
 # Installing kohiko always installs Kohiko Settings alongside it -
 # it's part of Kohiko itself, not a separate package (see
@@ -336,7 +391,7 @@ install: kohiko kohikoctl kohiko-settings
 	install -Dm644 desktop/kohiko.desktop $(DESTDIR)/usr/share/xsessions/kohiko.desktop
 
 .PHONY: install-desktop-apps
-ifeq ($(KOHIKO_HAVE_PIPEWIRE)-$(KOHIKO_HAVE_DBUS_PKG),yes-yes)
+ifeq ($(KOHIKO_HAVE_PIPEWIRE)-$(KOHIKO_HAVE_DBUS_PKG)-$(KOHIKO_HAVE_LIBRSVG),yes-yes-yes)
 install: install-desktop-apps
 install-desktop-apps: kohiko-audio kohiko-network kohiko-bluetooth kohiko-audio-tray kohiko-network-tray kohiko-bluetooth-tray
 	install -Dm755 kohiko-audio $(DESTDIR)/usr/local/bin/kohiko-audio
