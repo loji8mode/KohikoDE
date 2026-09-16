@@ -1,5 +1,56 @@
 # Changelog
 
+## Version 0.20.7
+
+Release date: 2026-09-10
+
+### Fixed
+- **Regression from 0.20.6's `Bar::Redraw()` optimization: the bar's
+  tray icons and active-workspace highlight could get stuck showing
+  stale or blank content - "only rendering when affected by
+  something, and only sometimes" - until an unrelated state change
+  (a workspace switch, a notification, a tray change) happened to
+  trigger a full repaint anyway.** Reported live (with screenshots)
+  after building and running 0.20.6. Root cause: 0.20.6 made
+  `Bar::Redraw()` skip the full bar repaint when nothing about the
+  bar's *logical* state (workspace, tray width, notification text,
+  etc.) had changed since the last full repaint, repainting only the
+  clock's own rectangle instead. `WindowManager::HandleExpose()` -
+  called whenever an X11 `Expose` event reports that some region of
+  the bar's window was just uncovered (most commonly: something had
+  briefly overlapped the bar and moved away or closed) - was still
+  calling `Redraw()` with no way to bypass that skip. An Expose event
+  says nothing about whether the bar's *logical* state changed; it
+  only means the window's actual on-screen pixels in that region can
+  no longer be trusted, which 0.20.6's `Show()`/`Configure()` handling
+  had already correctly accounted for, but this call site was missed.
+  When an Expose event landed on a tick where nothing logical had
+  changed, the fast path correctly-by-its-own-rules left everything
+  except the clock stale, exactly matching the report. Fixed by adding
+  a `forceFullRepaint` parameter to `Bar::Redraw()` (default `false`,
+  every existing call site unaffected), with `HandleExpose()` as its
+  one caller - the same "force past the state comparison" pattern
+  0.20.6 already used for `WallpaperManager::ApplyToRoot()`'s
+  `forceRerender`, applied here for the same class of reason (X11
+  makes no content guarantee) rather than a different, more surprising
+  one. Verified with a new pixel-level regression test
+  (`tests/test_bar.cpp`, 5 new checks) that reproduces the exact bug
+  mechanism directly: deliberately paints garbage onto the live bar
+  window (simulating what real Expose damage leaves behind) and
+  confirms via `XGetImage` pixel readback that an ordinary `Redraw()`
+  correctly leaves it damaged (proving the bug's mechanism, not just
+  asserting the fix), while `Redraw(forceFullRepaint=true)` - what
+  `HandleExpose()` now calls - reliably restores the real, correct
+  pixel every time. A live attempt to reproduce the original report
+  end-to-end by overlapping a real window over the running bar and
+  moving it away was not achieved in the sandbox used for this fix -
+  Kohiko's own BSP tiling keeps ordinary windows from ever overlapping
+  the bar's reserved screen space, so triggering a genuine Expose
+  event on it live would need the lock screen or a bar-adjacent popup
+  specifically, not a plain tiled window; this is noted honestly as
+  unverified live end-to-end, distinct from the pixel-level mechanism
+  test above, which does directly verify the fix.
+
 ## Version 0.20.6
 
 Release date: 2026-09-09

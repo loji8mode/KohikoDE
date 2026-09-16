@@ -90,6 +90,23 @@ unsigned long RequestsForOneRedraw(Display* display, Bar& bar)
     return after - before;
 }
 
+// Reads back a single pixel actually on screen - used to verify a
+// forced repaint restores *real* content, not just that some X11
+// activity happened (which the request-count checks above already
+// cover well, but can't tell correct pixels from merely-different
+// ones).
+unsigned long ReadPixel(Display* display, ::Window window, int x, int y)
+{
+    XImage* image = XGetImage(display, window, x, y, 1, 1, AllPlanes, ZPixmap);
+
+    if (!image)
+        return static_cast<unsigned long>(-1);
+
+    unsigned long pixel = XGetPixel(image, 0, 0);
+    XDestroyImage(image);
+    return pixel;
+}
+
 }
 
 int main()
@@ -212,6 +229,73 @@ int main()
 
     Check(afterConfigureRequests >= firstRedrawRequests / 2,
           "Configure() (geometry change) forces a full repaint on the next Redraw() too");
+
+    std::printf("\n-- A live bug report, reproduced directly: Expose-style external window damage --\n");
+    std::printf("   (WindowManager::HandleExpose() calling Redraw(forceFullRepaint=true) is what fixes this)\n");
+    {
+        // A background-only spot, comfortably clear of any text
+        // glyph's anti-aliased edges - an unambiguous solid-color
+        // check rather than one sensitive to font rendering
+        // specifics. Deliberately chosen well inside the bar's width
+        // (300px, against a 1920px-wide bar) so it's background
+        // regardless of exactly how many workspace labels/indicators
+        // are drawn.
+        int probeX = 300;
+        int probeY = 5;
+        Display* rawDisplay = display;
+
+        bar.Redraw(); // a known-correct full repaint to establish a baseline
+        unsigned long correctPixel = ReadPixel(rawDisplay, bar.WindowId(), probeX, probeY);
+        Check(correctPixel != static_cast<unsigned long>(-1),
+              "can read back a real pixel from the bar's window (sanity check for this whole section)");
+
+        // Simulates exactly what an Expose event's damage looks like -
+        // some other window had been overlapping this exact spot and
+        // just moved away, and the X server makes no promise about
+        // what pixels are left behind. Drawn directly on the *window*
+        // (m_backing, the off-screen source of truth, is completely
+        // untouched by this - same as a real overlap would leave it).
+        GC scratchGc = XCreateGC(rawDisplay, bar.WindowId(), 0, nullptr);
+        XSetForeground(rawDisplay, scratchGc, 0xFF00FF); // a color nothing in this bar would ever legitimately draw
+        XFillRectangle(rawDisplay, bar.WindowId(), scratchGc, probeX - 2, probeY - 2, 4, 4);
+        XSync(rawDisplay, False);
+
+        unsigned long corruptedPixel = ReadPixel(rawDisplay, bar.WindowId(), probeX, probeY);
+        Check(corruptedPixel != correctPixel,
+              "the simulated external damage actually changed that pixel (sanity check on the simulation itself)");
+
+        // The actual regression: an ordinary Redraw() (what
+        // WindowManager::Tick() calls every second, and what
+        // HandleExpose() called before this fix) with the bar's
+        // logical state completely unchanged since the last full
+        // repaint correctly - by design - takes the cheap clock-only
+        // path, which never touches this spot. This demonstrates the
+        // exact mechanism the live bug report hit: real content stays
+        // stale here until something *else* happens to trigger a full
+        // repaint.
+        std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+        bar.Redraw();
+        unsigned long afterOrdinaryRedraw = ReadPixel(rawDisplay, bar.WindowId(), probeX, probeY);
+        Check(afterOrdinaryRedraw == corruptedPixel,
+              "...and confirms it: an ordinary Redraw() with nothing logically changed does NOT touch that "
+              "spot - it stays damaged, exactly like the live report (tray icons/workspace highlight frozen "
+              "until something unrelated changed)");
+
+        // Re-damage the same spot, then redraw exactly the way
+        // HandleExpose() now does.
+        XFillRectangle(rawDisplay, bar.WindowId(), scratchGc, probeX - 2, probeY - 2, 4, 4);
+        XSync(rawDisplay, False);
+        Check(ReadPixel(rawDisplay, bar.WindowId(), probeX, probeY) != correctPixel,
+              "re-damaged the same spot for the actual fix check below");
+
+        bar.Redraw(/*forceFullRepaint=*/true);
+        unsigned long afterForcedRedraw = ReadPixel(rawDisplay, bar.WindowId(), probeX, probeY);
+        Check(afterForcedRedraw == correctPixel,
+              "Redraw(forceFullRepaint=true) - what HandleExpose() calls - restores the real, correct pixel "
+              "even though nothing about the bar's logical state changed: this is the actual fix");
+
+        XFreeGC(rawDisplay, scratchGc);
+    }
 
     // Sanity: PowerButtonRect()/Geometry() are still well-formed after
     // all of the above (nothing left the bar in a half-updated state).

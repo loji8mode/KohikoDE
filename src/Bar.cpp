@@ -236,7 +236,7 @@ const Rect& Bar::Geometry() const
     return m_geometry;
 }
 
-void Bar::Redraw()
+void Bar::Redraw(bool forceFullRepaint)
 {
     if (!m_visible || m_window == 0 || !m_backing)
         return;
@@ -284,6 +284,7 @@ void Bar::Redraw()
     // guess at where the clock's rectangle is - it's exactly where the
     // last full redraw put it.
     bool onlyClockCouldDiffer =
+        !forceFullRepaint &&
         m_hasDrawnOnce &&
         m_workspaceCount == m_lastDrawnWorkspaceCount &&
         m_currentWorkspace == m_lastDrawnCurrentWorkspace &&

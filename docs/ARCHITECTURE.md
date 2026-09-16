@@ -393,10 +393,18 @@ systems:
   (a dedicated `XNextRequest()`-based test, `tests/test_bar.cpp`,
   measured full redraws in the low 20s-40s of X11 requests versus
   ~11 for a clock-only tick against the same running bar). Any real
-  change - including the bar having been hidden and shown again,
-  since X11 doesn't guarantee a plain window's pixels survive an
-  unmap/remap - still takes the exact original full-repaint path.
-  See `CHANGELOG.md`'s 0.20.6 entry for the full measurement writeup.
+  change - including the bar having been hidden and shown again
+  (X11 doesn't guarantee a plain window's pixels survive an
+  unmap/remap) or an `Expose` event on the bar's window (0.20.7 -
+  `WindowManager::HandleExpose()` passes `Redraw()`'s
+  `forceFullRepaint` parameter for exactly this: an Expose event means
+  some region of the window was just uncovered, e.g. by something that
+  had been overlapping it, and X11 makes no promise about what's left
+  behind there - missing this call site is what let 0.20.6 ship with
+  the tray/workspace-highlight area of the bar visibly getting stuck
+  stale) - still takes the exact original full-repaint path. See
+  `CHANGELOG.md`'s 0.20.6 and 0.20.7 entries for the full measurement
+  writeups.
 - **`UiWindow`** (the shared toolkit, and separately
   `kohiko-settings`'s own hand-rolled equivalent) renders to an
   off-screen `Pixmap` the same size as the window

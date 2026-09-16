@@ -1688,5 +1688,56 @@ still triggers a full re-render, confirmed by the mmap'd byte count
 matching the new file's own size rather than assuming a fresh decode
 happened just because something got redrawn.
 
+The performance-audit checkpoint went out, and a live report came
+back within the day - screenshots, not a description: tray icons and
+the active-workspace highlight in the bar rendering "only when
+affected by something... and only sometimes when they want."
+Someone had actually built 0.20.6 and run it. That's a different kind
+of signal than anything caught during the audit itself, and it
+deserved being treated as more trustworthy than any measurement taken
+in the sandbox that produced the fix - a real desktop, used for real,
+had found something the whole verification pass had missed.
+
+The two symptoms in the screenshots - frozen tray icons, an
+active-workspace number never highlighted - turned out to be one
+mechanism, and re-reading `Bar::Redraw()`'s own call sites in
+`WindowManager.cpp` found it directly rather than needing to guess
+from the screenshots alone: `HandleExpose()` still called `Redraw()`
+plain, with no way to bypass the state-comparison fast path the
+previous entry had just added. An `Expose` event doesn't mean the
+bar's *logical* state changed - it means some region of the window
+was just uncovered (most commonly something had briefly overlapped
+it) and X11 makes no promise about what's left behind in that region.
+`Show()` and `Configure()` had already gotten this exact reasoning
+right two entries ago; this one call site was the gap. On a tick where
+nothing logical had changed - the ordinary case - the fast path
+correctly-by-its-own-rules touched only the clock, leaving whatever
+the Expose event had actually exposed (which, on a bar, is most of
+it) stale until something unrelated forced a full repaint. "Only
+rendering when affected by something, only sometimes" describes that
+mechanism almost exactly once you know to look for it.
+
+The fix followed the same shape as `ApplyToRoot()`'s `forceRerender`
+from the same session: a `forceFullRepaint` parameter on `Redraw()`,
+default false, every existing call site untouched, with
+`HandleExpose()` as the one caller passing true. Verifying it asked
+for something the earlier `test_bar.cpp` checks hadn't needed -
+request *counts* prove work happened, not that the work was *correct*
+- so the new check reads real pixels back off the live window with
+`XGetImage`: paint an obviously-wrong color directly onto the bar's
+window (not the backing pixmap - simulating exactly what real Expose
+damage leaves, since the pixmap itself is never touched by a window
+being overlapped), confirm an ordinary `Redraw()` genuinely leaves it
+damaged - proving the bug's mechanism stood up on its own before
+claiming the fix - then confirm `Redraw(forceFullRepaint=true)`
+reliably restores the real, correct pixel. One honest gap: a live
+end-to-end reproduction, overlapping an actual window over the
+running bar and moving it away, wasn't achieved in this sandbox -
+Kohiko's own BSP tiling keeps ordinary windows from ever overlapping
+the bar's reserved space, so a genuine live repro would need the lock
+screen or a bar-adjacent popup specifically. Recorded as unverified
+live end-to-end rather than folded into "verified" alongside the
+pixel-level mechanism test, which does stand on its own.
+
 --------------------------------------------------------------------------
 

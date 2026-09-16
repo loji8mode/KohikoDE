@@ -124,7 +124,25 @@ public:
     // rest of the bar entirely and only touches the clock's own
     // rectangle. See m_hasDrawnOnce's own comment for what "provably
     // identical" is checked against and why it's safe.
-    void Redraw();
+    //
+    // `forceFullRepaint` exists for callers where the window's actual
+    // on-screen pixels can no longer be trusted even though nothing
+    // about the bar's own *logical* state changed - right now that's
+    // exactly one caller, WindowManager::HandleExpose(): an Expose
+    // event means some region of this window was just uncovered (a
+    // window that had been overlapping the bar moved or closed, most
+    // commonly) and X11 makes no guarantee about what was left behind
+    // there, the same reason Show() and Configure() already force this
+    // internally for their own cases. Skipping this is what let a real
+    // Expose event leave the tray/workspace-label/indicator area of
+    // the bar showing stale or blank content indefinitely - until
+    // some unrelated state change happened to trigger a full repaint
+    // anyway - while only the clock kept visibly updating, exactly
+    // matching a live bug report of tray icons and the active-
+    // workspace highlight "only rendering when affected by something."
+    void Redraw(
+        bool forceFullRepaint = false
+    );
 
     int Height() const;
 
@@ -205,10 +223,15 @@ private:
     // reset to false any time something could make the window's actual
     // on-screen pixels stop matching this snapshot without going
     // through a full redraw first - m_geometry changing size
-    // (Configure()) or the window having been unmapped and remapped
+    // (Configure()), the window having been unmapped and remapped
     // (Show(), which - unlike m_backing, which is untouched by this -
-    // X11 doesn't guarantee preserves prior window content for). See
-    // Redraw()'s own comment for the full reasoning.
+    // X11 doesn't guarantee preserves prior window content for), or an
+    // Expose event on the window (Redraw()'s own forceFullRepaint
+    // parameter, passed by WindowManager::HandleExpose() - the same
+    // "X11 doesn't guarantee what's there" reasoning as Show(), just
+    // triggered by something *else* briefly overlapping this window
+    // instead of this window itself being unmapped). See Redraw()'s
+    // own comment for the full reasoning.
     bool m_hasDrawnOnce = false;
     int m_lastDrawnWorkspaceCount = 0;
     int m_lastDrawnCurrentWorkspace = 0;

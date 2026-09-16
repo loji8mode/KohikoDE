@@ -836,7 +836,16 @@ void WindowManager::HandleExpose(const XExposeEvent& event)
         return;
 
     if (Bar* bar = BarWindowMatching(event.window))
-        bar->Redraw();
+        // forceFullRepaint=true: an Expose event means some region of
+        // this window was just uncovered, and X11 makes no guarantee
+        // about what's left there - Redraw()'s own state comparison
+        // only knows whether the bar's *logical* state changed, not
+        // whether the window's actual pixels are still trustworthy,
+        // so relying on it here specifically would leave whatever was
+        // exposed (most of the bar, if nothing else happened to change
+        // at the same moment) stale or blank. See Redraw()'s own
+        // comment.
+        bar->Redraw(/*forceFullRepaint=*/true);
     else if (event.window == m_launcher.WindowId())
         m_launcher.HandleExpose();
     else if (event.window == m_notepad.WindowId())
