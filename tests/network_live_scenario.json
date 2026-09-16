@@ -1,0 +1,12 @@
+{
+  "connections": [
+    {"id": "HomeNet", "ssid": "HomeNet", "has_secret": true, "psk": "hunter2network"},
+    {"id": "OldNet", "ssid": "OldNet", "has_secret": false, "psk": ""}
+  ],
+  "access_points": [
+    {"ssid": "HomeNet", "strength": 90, "secured": true},
+    {"ssid": "OldNet", "strength": 75, "secured": true},
+    {"ssid": "Neighbor's Extremely Long WiFi Network Name For Testing", "strength": 45, "secured": true},
+    {"ssid": "Coffee Shop Guest", "strength": 60, "secured": false}
+  ]
+}

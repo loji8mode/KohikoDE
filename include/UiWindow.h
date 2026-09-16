@@ -142,12 +142,33 @@ public:
     int Height() const { return m_height; }
     const UiTheme& Theme() const { return m_theme; }
 
+    // Both traversals below are `static`, and public despite being
+    // internal dispatch machinery - despite living on UiWindow,
+    // neither one touches `this` (they only ever read the Widget tree
+    // rooted at the `widget` argument), so there's nothing to
+    // encapsulate: they're pure tree traversal over caller-supplied
+    // data. Made callable from outside specifically so
+    // tests/test_scrollhittest.cpp can exercise them directly against
+    // a small hand-built Widget tree without needing a live X11
+    // Display/UiWindow, the same reason Rect::ClampedTo() and
+    // BackgroundPlacementText() are free of any live-window state.
+    static Widget* HitTest(Widget* widget, Point p, bool& hitSomething);
+
+    // Separate traversal for Button4/5 (scroll-wheel) dispatch - see
+    // Widget::WantsScroll()'s comment for why the ordinary click
+    // HitTest() above is the wrong tool for this. Same "topmost/most-
+    // nested child first" order and the same ClipsHitTesting() early-
+    // out as HitTest(), but the match condition is WantsScroll()
+    // instead of WantsInput(), so it returns the nearest enclosing
+    // ScrollView under the pointer regardless of what interactive
+    // control is drawn on top of it there.
+    static Widget* HitTestForScroll(Widget* widget, Point p);
+
 private:
 
     void Redraw();
     void HandleEvent(XEvent& event);
     void ResizeBacking(int width, int height);
-    Widget* HitTest(Widget* widget, Point p, bool& hitSomething);
 
     struct FdWatch { int fd; FdCallback callback; };
     struct Timer { std::chrono::milliseconds interval; std::chrono::steady_clock::time_point next; TimerCallback callback; };

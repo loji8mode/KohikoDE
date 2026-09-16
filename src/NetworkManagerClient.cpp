@@ -389,6 +389,38 @@ void NetworkManagerClient::RequestWiFiScan()
     }
 }
 
+bool NetworkManagerClient::HasUsableSavedSecret(const std::string& ssid)
+{
+    for (auto& saved : m_savedConnections)
+    {
+        if (saved.type != "802-11-wireless")
+            continue;
+
+        std::vector<DBusValue> settingsReply;
+        if (!m_bus.Call(kNmService, saved.objectPath, kNmConnectionIface, "GetSettings", {}, &settingsReply) || settingsReply.empty())
+            continue;
+
+        const DBusValue& wifiSection = settingsReply.front().Get("802-11-wireless");
+        if (BytesToString(wifiSection.Get("ssid")) != ssid)
+            continue;
+
+        // Found the saved profile for this SSID - whether it counts
+        // as "usable" now hinges entirely on GetSecrets(), not on
+        // anything GetSettings() already told us (see this method's
+        // own header comment for why those are deliberately separate
+        // calls).
+        std::vector<DBusValue> secretsReply;
+        if (!m_bus.Call(kNmService, saved.objectPath, kNmConnectionIface, "GetSecrets",
+                { DBusValue::MakeString("802-11-wireless-security") }, &secretsReply) || secretsReply.empty())
+            return false;
+
+        const DBusValue& securitySection = secretsReply.front().Get("802-11-wireless-security");
+        return !securitySection.Get("psk").AsString().empty();
+    }
+
+    return false; // no saved connection at all for this SSID
+}
+
 void NetworkManagerClient::ConnectToAccessPoint(
     const std::string& devicePath, const std::string& apPath,
     const std::string& ssid, const std::string& password)

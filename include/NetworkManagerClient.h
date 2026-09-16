@@ -157,6 +157,31 @@ public:
     // nm-applet would also see.
     void ConnectToAccessPoint(const std::string& devicePath, const std::string& apPath, const std::string& ssid, const std::string& password);
 
+    // Whether a saved 802-11-wireless connection profile already
+    // exists for `ssid` *and* NetworkManager will actually hand back
+    // a usable secret for it right now - the check
+    // `NetworkWindow::PromptAndConnect()`'s caller uses to decide
+    // whether to show the password prompt at all, added in 0.20.4
+    // alongside the fix it exists for (see CHANGELOG.md): the UI
+    // previously prompted for *every* secured access point
+    // unconditionally, with no way to tell "there's already a saved,
+    // working password for this one" apart from "there genuinely
+    // isn't". `GetSettings()` deliberately never includes secrets -
+    // NetworkManager's own security boundary, so anyone able to read
+    // a connection's settings can't thereby read every stored Wi-Fi
+    // password - only a separate, explicit `GetSecrets()` call
+    // returns the actual `psk`, and only to a caller NetworkManager
+    // is willing to grant it to (ordinarily true for a connection
+    // this same desktop session created; false, and therefore
+    // correctly treated as "no usable secret, must prompt", for
+    // anything else - wrong owning user, connection requires
+    // re-authentication, or no such saved connection at all). Only
+    // ever checks `psk` (WPA-PSK/WPA3-SAE both store their passphrase
+    // there in NetworkManager's own data model) - a saved WEP
+    // connection's `wep-key0` isn't covered, consistent with this
+    // task's own WPA/WPA2 scope.
+    bool HasUsableSavedSecret(const std::string& ssid);
+
     // `devicePath` may be "/" (NetworkManager's own placeholder for
     // "pick automatically") - what's used for VPN connections, which
     // route over whichever device already has connectivity rather

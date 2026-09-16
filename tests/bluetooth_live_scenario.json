@@ -1,0 +1,12 @@
+{
+  "adapters": [
+    {"path": "/org/bluez/hci0", "address": "AA:BB:CC:DD:EE:00", "alias": "Kohiko Desktop", "powered": true, "discoverable": false, "discovering": false}
+  ],
+  "devices": [
+    {"path": "/org/bluez/hci0/dev_00", "adapter": "/org/bluez/hci0", "address": "11:11:11:11:11:11", "alias": "Kohiko Wireless Headphones Pro Max", "icon": "audio-headphones", "paired": true, "connected": true, "trusted": true, "battery": 85},
+    {"path": "/org/bluez/hci0/dev_01", "adapter": "/org/bluez/hci0", "address": "22:22:22:22:22:22", "alias": "Magic Keyboard", "icon": "input-keyboard", "paired": true, "connected": true, "trusted": true, "battery": 42},
+    {"path": "/org/bluez/hci0/dev_02", "adapter": "/org/bluez/hci0", "address": "33:33:33:33:33:33", "alias": "Old Bluetooth Mouse", "icon": "input-mouse", "paired": true, "connected": false, "trusted": false, "battery": -1},
+    {"path": "/org/bluez/hci0/dev_03", "adapter": "/org/bluez/hci0", "address": "44:44:44:44:44:44", "alias": "Unknown Device With An Extremely Long Advertised Name", "icon": "", "paired": false, "connected": false, "trusted": false, "battery": -1},
+    {"path": "/org/bluez/hci0/dev_04", "adapter": "/org/bluez/hci0", "address": "55:55:55:55:55:55", "alias": "JBL Speaker", "icon": "audio-speakers", "paired": false, "connected": false, "trusted": false, "battery": -1}
+  ]
+}

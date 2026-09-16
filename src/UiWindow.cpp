@@ -321,6 +321,36 @@ Widget* UiWindow::HitTest(Widget* widget, Point p, bool& hitSomething)
     return nullptr;
 }
 
+Widget* UiWindow::HitTestForScroll(Widget* widget, Point p)
+{
+    if (!widget || !widget->visible)
+        return nullptr;
+
+    // Same clip early-out as HitTest(): a point outside a clipping
+    // container's own bounds can't hit anything inside it, however
+    // deep that child's stale absolute coordinates might otherwise
+    // place it.
+    if (widget->ClipsHitTesting() && !widget->bounds.Contains(p))
+        return nullptr;
+
+    // Descend first so a ScrollView nested inside another scrollable
+    // area (not a real case today, but keeps this consistent with
+    // HitTest()'s "most specific match wins" rule) still resolves to
+    // the innermost one.
+    auto& children = widget->Children();
+    for (auto it = children.rbegin(); it != children.rend(); ++it)
+    {
+        Widget* hit = HitTestForScroll(it->get(), p);
+        if (hit)
+            return hit;
+    }
+
+    if (widget->WantsScroll() && widget->bounds.Contains(p))
+        return widget;
+
+    return nullptr;
+}
+
 void UiWindow::HandleEvent(XEvent& event)
 {
     switch (event.type)
@@ -346,8 +376,7 @@ void UiWindow::HandleEvent(XEvent& event)
 
             if (event.xbutton.button == Button4 || event.xbutton.button == Button5)
             {
-                bool hit = false;
-                Widget* target = HitTest(m_root.get(), p, hit);
+                Widget* target = HitTestForScroll(m_root.get(), p);
                 if (target)
                     target->OnScroll(p, event.xbutton.button == Button4 ? 1 : -1);
                 m_dirty = true;

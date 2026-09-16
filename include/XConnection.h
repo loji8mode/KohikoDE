@@ -38,13 +38,26 @@ public:
     // The pointer's current position in absolute (root) coordinates -
     // a plain XQueryPointer() wrapper. Exists for the handful of
     // moments nothing has generated a MotionNotify/EnterNotify to
-    // report the pointer's location: right after startup, and right
-    // after a monitor topology change, both of which can otherwise
-    // leave a monitor the pointer is already sitting still over (nothing
-    // there yet to move across or enter) not actually recognized as
-    // focused - see WindowManager::HandleMonitorTopologyChanged() and
-    // WindowManager::Initialize().
+    // report the pointer's location: right after startup, right
+    // after a monitor topology change, and after several other
+    // layout/workspace/session transitions that can otherwise leave
+    // real focus stale relative to wherever the pointer is actually
+    // resting - see WindowManager::HandleMonitorTopologyChanged(),
+    // WindowManager::Initialize(), and WindowManager::
+    // SyncFocusToPointer() and its own callers.
     Point QueryPointer() const;
+
+    // Moves the pointer to an absolute (root-relative) position -
+    // a plain XWarpPointer() wrapper. Kohiko otherwise never moves the
+    // pointer on its own (every other focus change here follows the
+    // pointer, not the other way around); the one deliberate exception
+    // is an explicit monitor-focus switch (WindowManager::
+    // FocusMonitorCommand()) under focus_follows_mouse - without
+    // actually relocating the pointer too, the very next incidental
+    // bit of mouse movement on whichever monitor the pointer physically
+    // never left would immediately switch focus straight back, silently
+    // undoing the switch that was just explicitly requested.
+    void WarpPointer(int x, int y);
 
     int Screen() const;
 

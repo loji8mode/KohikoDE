@@ -201,9 +201,30 @@ build/kohiko-bluetooth-tray-main.o: tools/kohiko-bluetooth-tray.cpp | build
 # that need nothing beyond the C++ standard library.
 ifeq ($(KOHIKO_HAVE_DBUS_PKG),yes)
     TEST_NETWORKMANAGERCLIENT := build/test_networkmanagerclient
+    # test_networkmanager_live.sh drives this harness against
+    # mock_networkmanager.py - gated the same as TEST_NETWORKMANAGERCLIENT
+    # above (just NetworkManagerClient/DBusClient/DBusValue) since the
+    # shell script itself separately, gracefully skips if python3-dbus
+    # isn't available too. Not added to TEST_NETWORKMANAGERCLIENT's own
+    # variable since the two are invoked differently (a binary run
+    # directly vs. a shell script that builds its own throwaway D-Bus
+    # environment around the binary).
+    TEST_NETWORKMANAGER_LIVE_HARNESS := build/test_networkmanager_live_harness
 endif
 
-test: build/test_bsptree build/test_launcherscoring build/test_placementhabits build/test_dbusvalue build/test_sessionstore build/test_configmigration build/test_recoverymode build/test_appdirwatcher build/test_autologinconfigurator build/test_wallpapermanager build/test_desktopentry build/test_iconresolver $(TEST_NETWORKMANAGERCLIENT)
+# test_scrollhittest links the full DESKTOP_SHARED_OBJ group (it
+# exercises UiWindow/UiWidget/UiScrollView, but SvgRenderer.cpp and
+# DBusClient.cpp are in that same object group and #include their
+# real headers unconditionally) - gated the same three-way check as
+# kohiko-audio/network/bluetooth themselves, since this is the shared
+# UI toolkit those three apps are the only reason to build at all.
+ifeq ($(KOHIKO_HAVE_PIPEWIRE)-$(KOHIKO_HAVE_DBUS_PKG)-$(KOHIKO_HAVE_LIBRSVG),yes-yes-yes)
+    TEST_SCROLLHITTEST := build/test_scrollhittest
+    TEST_NETWORKWINDOW := build/test_networkwindow
+    TEST_BLUETOOTHWINDOW := build/test_bluetoothwindow
+endif
+
+test: kohiko build/x11_test_client build/test_bsptree build/test_launcherscoring build/test_placementhabits build/test_dbusvalue build/test_sessionstore build/test_configmigration build/test_recoverymode build/test_lockrecovery build/test_appdirwatcher build/test_autologinconfigurator build/test_wallpapermanager build/test_desktopentry build/test_iconresolver build/test_eventloop build/test_windowplacementnotice build/test_rect_clamping $(TEST_NETWORKMANAGERCLIENT) $(TEST_SCROLLHITTEST) $(TEST_NETWORKWINDOW) $(TEST_NETWORKMANAGER_LIVE_HARNESS) $(TEST_BLUETOOTHWINDOW)
 	./build/test_bsptree
 	./build/test_launcherscoring
 	./build/test_placementhabits
@@ -211,14 +232,25 @@ test: build/test_bsptree build/test_launcherscoring build/test_placementhabits b
 	./build/test_sessionstore
 	./build/test_configmigration
 	./build/test_recoverymode
+	./build/test_lockrecovery
 	./build/test_appdirwatcher
 	./build/test_autologinconfigurator
 	./build/test_wallpapermanager
 	./build/test_desktopentry
 	./build/test_iconresolver
+	./build/test_eventloop
+	./build/test_windowplacementnotice
+	./build/test_rect_clamping
 	sh tests/test_kohiko_session.sh
+	sh tests/test_networkmanager_live.sh
+	sh tests/test_xembed_dock_timeout.sh
 ifeq ($(KOHIKO_HAVE_DBUS_PKG),yes)
 	./build/test_networkmanagerclient
+endif
+ifeq ($(KOHIKO_HAVE_PIPEWIRE)-$(KOHIKO_HAVE_DBUS_PKG)-$(KOHIKO_HAVE_LIBRSVG),yes-yes-yes)
+	./build/test_scrollhittest
+	./build/test_networkwindow
+	./build/test_bluetoothwindow
 endif
 
 build/test_bsptree: tests/test_bsptree.cpp src/BSPTree.cpp src/BSPLeaf.cpp src/BSPSplit.cpp src/ManagedWindow.cpp src/LayoutEngine.cpp | build
@@ -269,6 +301,12 @@ build/test_configmigration: tests/test_configmigration.cpp src/ConfigMigration.c
 build/test_recoverymode: tests/test_recoverymode.cpp src/RecoveryMode.cpp src/Xdg.cpp | build
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
 
+# Same shape as test_recoverymode just above (plain file I/O, no X11,
+# no real crash needed) - covers the "crashed while locked resumes
+# fully exposed" fix, see LockRecovery.h and the 0.20.4 CHANGELOG.
+build/test_lockrecovery: tests/test_lockrecovery.cpp src/LockRecovery.cpp src/Xdg.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
+
 # Real functional test against actual Linux inotify (via throwaway
 # temp directories) - no X11 needed, see the file itself.
 build/test_appdirwatcher: tests/test_appdirwatcher.cpp src/AppDirWatcher.cpp src/Xdg.cpp | build
@@ -308,6 +346,29 @@ build/test_desktopentry: tests/test_desktopentry.cpp src/DesktopEntry.cpp src/In
 build/test_iconresolver: tests/test_iconresolver.cpp src/IconResolver.cpp src/IniFile.cpp src/Xdg.cpp src/Utils.cpp | build
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
 
+# Pure chrono arithmetic, no X11/D-Bus/real waiting needed - the
+# TickSchedule functions are header-only inline (EventLoop.h)
+# specifically so this test doesn't need to link EventLoop.cpp itself,
+# which would drag in the whole WindowManager dependency graph for
+# logic that has none of its own. Regression test for the taskbar/
+# clock "frozen until something else forces a repaint" fix - see
+# CHANGELOG.md.
+build/test_eventloop: tests/test_eventloop.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
+
+# Pure string formatting, no WindowManager/X11 dependency - see
+# WindowPlacementNotice.h's own comment for why. Regression test for
+# the "app opens on a background workspace with zero on-screen signal"
+# fix - see CHANGELOG.md.
+build/test_windowplacementnotice: tests/test_windowplacementnotice.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
+
+# Pure struct/arithmetic logic, no dependency beyond Types.h itself.
+# Covers Rect::ClampedTo() - existing logic, but newly depended on
+# directly by the Swap-drag animation clipping fix - see CHANGELOG.md.
+build/test_rect_clamping: tests/test_rect_clamping.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
+
 # Pure logic, no live D-Bus connection or running NetworkManager
 # needed (see the file itself) - but still needs libdbus-1-dev to
 # compile at all, since it links DBusClient.cpp - hence the
@@ -316,6 +377,33 @@ build/test_iconresolver: tests/test_iconresolver.cpp src/IconResolver.cpp src/In
 # BytesToString()/ConnectToAccessPoint() fix - see CHANGELOG.md.
 build/test_networkmanagerclient: tests/test_networkmanagerclient.cpp src/NetworkManagerClient.cpp src/DBusClient.cpp src/DBusValue.cpp | build
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ $(LIBS)
+
+build/test_networkmanager_live_harness: tests/live/test_networkmanager_live_harness.cpp src/NetworkManagerClient.cpp src/DBusClient.cpp src/DBusValue.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ $(LIBS)
+
+# Plain X11 client (no Kohiko headers/objects at all) driving
+# tests/test_xembed_dock_timeout.sh - see that script and
+# tests/live/x11_test_client.cpp's own header comment.
+build/x11_test_client: tests/live/x11_test_client.cpp | build
+	$(CXX) $(CXXFLAGS) -Wall -Wextra $< -o $@ -lX11
+
+# Regression test for the scroll-routing fix (see CHANGELOG.md) -
+# links the full DESKTOP_SHARED_OBJ/DESKTOP_COMMON_OBJ group since
+# that's what actually builds UiWindow/UiWidget/UiScrollView, the same
+# gating reasoning as TEST_SCROLLHITTEST above.
+build/test_scrollhittest: tests/test_scrollhittest.cpp $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) tests/test_scrollhittest.cpp $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) -o $@ $(LIBS) $(RSVG_LIBS)
+
+# Links NetworkWindow.o itself (not just DESKTOP_SHARED_OBJ) since
+# FilterPastedPasswordText() - the only thing this test actually calls -
+# is defined there, plus NetworkManagerClient.o since NetworkWindow.cpp
+# constructs one as a member. Same three-way gate as test_scrollhittest:
+# this is exactly the dependency chain kohiko-network itself needs.
+build/test_networkwindow: tests/test_networkwindow.cpp build/NetworkWindow.o build/NetworkManagerClient.o $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) tests/test_networkwindow.cpp build/NetworkWindow.o build/NetworkManagerClient.o $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) -o $@ $(LIBS) $(RSVG_LIBS)
+
+build/test_bluetoothwindow: tests/test_bluetoothwindow.cpp build/BluetoothWindow.o build/BluezClient.o $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) tests/test_bluetoothwindow.cpp build/BluetoothWindow.o build/BluezClient.o $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) -o $@ $(LIBS) $(RSVG_LIBS)
 
 # Needs a real X11/XRandr connection - gracefully skips the checks
 # that need one if $DISPLAY isn't set (see the file itself), so it's

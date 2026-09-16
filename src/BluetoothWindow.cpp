@@ -367,6 +367,15 @@ void BluetoothWindow::EnsureSelection(const std::vector<BluetoothDevice>& device
     m_selectedDevicePath = devices.empty() ? std::string() : devices.front().objectPath;
 }
 
+int BluetoothWindow::ComputeDetailsPanelHeight(const BluetoothDevice& device)
+{
+    int buttonsHeight = !device.paired ? 44
+        : device.connected ? (44 + 10 + 44 + 10 + 44)
+        : (44 + 10 + 44);
+
+    return 18 + 40 + 18 + 3 * 30 + 10 + buttonsHeight + 18;
+}
+
 int BluetoothWindow::AppendDeviceSection(Widget& content, int y, int contentWidth)
 {
     if (m_bluez.Adapters().empty())
@@ -459,10 +468,7 @@ int BluetoothWindow::AppendDeviceSection(Widget& content, int y, int contentWidt
     int detailsY = split ? y : leftY;
     int detailsWidth = split ? contentWidth - leftWidth - kCardGap : contentWidth;
 
-    int buttonsHeight = !selected->paired ? 44
-        : selected->connected ? (44 + 10 + 44 + 10 + 44)
-        : (44 + 10 + 44);
-    int detailsHeight = 18 + 40 + 18 + 3 * 30 + 10 + buttonsHeight + 18;
+    int detailsHeight = ComputeDetailsPanelHeight(*selected);
 
     std::string adapterPath = m_bluez.Adapters().front().objectPath;
     Rect panelBounds{ detailsX, detailsY, detailsWidth, detailsHeight };

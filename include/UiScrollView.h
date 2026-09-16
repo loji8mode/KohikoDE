@@ -26,7 +26,18 @@ public:
     void Draw(UiWindow& window) override;
     bool WantsInput() const override { return true; }
     bool ClipsHitTesting() const override { return true; }
+    bool WantsScroll() const override { return true; }
     void OnScroll(Point p, int delta) override;
+
+    // The overlay scrollbar thumb's geometry, factored out of Draw()
+    // as pure arithmetic (no UiWindow/X11 involved) so
+    // tests/test_scrollhittest.cpp can check it directly against
+    // hand-picked bounds/content/offset combinations. Returns a
+    // zero-height Rect (nothing to draw) when `contentHeight` doesn't
+    // exceed `viewport.height` - the same "nothing overflows, so no
+    // thumb" condition Draw() already checks before ever calling
+    // this.
+    static Rect ComputeThumbRect(Rect viewport, int contentHeight, int scrollOffset);
 
 private:
 

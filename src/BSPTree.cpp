@@ -220,6 +220,76 @@ void BSPTree::Remove(ManagedWindow* window)
         grandparent->SetRight(std::move(survivor));
 }
 
+void BSPTree::Remove(
+    ManagedWindow* window,
+    const Rect& tilingArea,
+    int innerGap)
+{
+    if (!window)
+        return;
+
+    BSPLeaf* leaf = FindLeaf(m_root.get(), window);
+
+    if (!leaf)
+        return;
+
+    if (leaf == m_lastFocused)
+        m_lastFocused = nullptr;
+
+    if (leaf == m_root.get())
+    {
+        m_root.reset();
+        return;
+    }
+
+    BSPSplit* parent = leaf->Parent();
+
+    if (!parent)
+        return;
+
+    // `survivor` is about to be promoted straight into `parent`'s own
+    // current slot, so `parent`'s own current area (computed here,
+    // before any of the surgery below, while it's still findable from
+    // the root) is exactly the area `survivor` inherits.
+    Rect newArea;
+    bool haveArea = ComputeNodeGeometry(m_root.get(), parent, tilingArea, innerGap, newArea);
+
+    std::unique_ptr<BSPNode> survivor =
+        (parent->Left() == leaf) ? parent->TakeRight() : parent->TakeLeft();
+
+    BSPNode* survivorRaw = survivor.get();
+
+    BSPSplit* grandparent = parent->Parent();
+
+    if (!grandparent)
+    {
+        m_root = std::move(survivor);
+
+        if (m_root)
+            m_root->SetParent(nullptr);
+    }
+    else if (grandparent->Left() == parent)
+    {
+        grandparent->SetLeft(std::move(survivor));
+    }
+    else
+    {
+        grandparent->SetRight(std::move(survivor));
+    }
+
+    // See this overload's own comment (BSPTree.h) - re-derive
+    // survivor's internal split direction(s) against the area it
+    // actually occupies now, rather than leaving whatever direction(s)
+    // its splits happened to be tuned for before. `haveArea` is false
+    // only if `parent` somehow isn't under `m_root` at all, which
+    // can't happen in practice (it was just found via FindLeaf()'s own
+    // parent pointer from a leaf that unquestionably is), but this is
+    // cheap insurance against silently normalizing against a garbage
+    // Rect if that invariant is ever violated.
+    if (haveArea && survivorRaw)
+        NormalizeDirections(survivorRaw, newArea, innerGap);
+}
+
 void BSPTree::Focus(ManagedWindow* window)
 {
     if (!window)
@@ -884,6 +954,33 @@ SplitDirection BSPTree::DirectionForRect(const Rect& rect)
     return (rect.width >= rect.height)
         ? SplitDirection::Vertical
         : SplitDirection::Horizontal;
+}
+
+void BSPTree::NormalizeDirections(
+    BSPNode* node,
+    const Rect& area,
+    int innerGap)
+{
+    if (!node || node->IsLeaf())
+        return;
+
+    auto* split = static_cast<BSPSplit*>(node);
+
+    SplitDirection natural = DirectionForRect(area);
+
+    if (split->Direction() != natural)
+        split->SetDirection(natural);
+
+    Rect first;
+    Rect second;
+
+    // Uses whichever direction `split` ends up with above, so a flip
+    // right here is what its own children get Subdivide()'d and
+    // checked against too - not the pre-flip direction.
+    split->Subdivide(area, innerGap, first, second);
+
+    NormalizeDirections(split->Left(), first, innerGap);
+    NormalizeDirections(split->Right(), second, innerGap);
 }
 
 std::string BSPTree::SerializeNode(const BSPNode* node) const

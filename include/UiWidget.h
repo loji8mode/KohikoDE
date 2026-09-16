@@ -79,6 +79,19 @@ public:
     // stale coordinates happen to overlap something else on screen.
     virtual bool ClipsHitTesting() const { return false; }
 
+    // True for widgets that actually implement OnScroll() themselves
+    // (currently just ScrollView) - lets scroll-wheel dispatch find
+    // the nearest scrollable *container* under the pointer instead of
+    // whatever plain WantsInput() widget (a Slider, a Button, a
+    // ListRow, ...) happens to sit at that exact pixel. Without this,
+    // mouse-wheel scrolling a device/network/Bluetooth list only
+    // worked over the sliver of "dead space" between rows, since the
+    // ordinary click hit-test - correctly, for clicks - always
+    // resolves to the most specific interactive widget under the
+    // point, and everything except ScrollView silently no-ops
+    // OnScroll() by inheriting the base-class default above.
+    virtual bool WantsScroll() const { return false; }
+
     virtual void OnPress(Point p) { (void)p; }
     virtual void OnRelease(Point p) { (void)p; }
     virtual void OnMotion(Point p, bool pressed) { (void)p; (void)pressed; }

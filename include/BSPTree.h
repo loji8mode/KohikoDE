@@ -111,6 +111,33 @@ public:
     // exact guarantee this locks in.
     void Remove(ManagedWindow* window);
 
+    // Placement-aware remove: the same structural collapse as above
+    // (survivor promoted straight into the removed leaf's parent's old
+    // slot; nothing above the grandparent is ever touched), but also
+    // re-derives the split direction of every split *within* the
+    // promoted survivor subtree against the area it actually ends up
+    // occupying - which can be a very different shape from whatever
+    // area its own splits were originally tuned for. Concretely: two
+    // windows side by side in a short, wide slot (because that slot
+    // was short and wide when they were placed there) don't stay side
+    // by side - now stretched thin and tall - once closing an
+    // unrelated sibling promotes that whole slot to fill an entire,
+    // much taller column; this re-derives that pair's split back to
+    // top/bottom, exactly the same rule DirectionForRect() already
+    // applies to any *fresh* Insert(). A no-op wherever the promoted
+    // subtree is a single leaf (nothing to recurse into) or every
+    // split inside it already suits its new area. Ratios are never
+    // touched, only direction - a manually-resized pair keeps
+    // whatever relative size the user gave it, just possibly applied
+    // to the other axis. See NormalizeDirections() for the recursive
+    // engine, and the 0.20.4 CHANGELOG entry for the live
+    // reproduction this fixes.
+    void Remove(
+        ManagedWindow* window,
+        const Rect& tilingArea,
+        int innerGap
+    );
+
     // Bookkeeping only: remembers `window`'s leaf as the insert
     // anchor. Actual X input focus is WindowManager's job.
     void Focus(ManagedWindow* window);
@@ -273,6 +300,23 @@ private:
     ) const;
 
     static SplitDirection DirectionForRect(const Rect& rect);
+
+    // The recursive engine behind the placement-aware Remove() above.
+    // Walks `node`'s subtree top-down, given the area `node` itself
+    // currently occupies: for a Split, flips its direction (via the
+    // same SetDirection() Rotate() uses) whenever DirectionForRect()
+    // disagrees with what's already there, then recurses into both
+    // children with their own newly-Subdivide()'d areas - using
+    // whichever direction the split ends up with, so a flip at this
+    // level is correctly reflected in what its children are checked
+    // against too. A no-op immediately for a leaf (nothing to
+    // recurse into) or a null `node`. Ratio is never touched, exactly
+    // like Rotate().
+    void NormalizeDirections(
+        BSPNode* node,
+        const Rect& area,
+        int innerGap
+    );
 
     // `window`'s own declared minimum (ManagedWindow::MinWidth()/
     // MinHeight(), from WM_NORMAL_HINTS), floored at floorWidth x

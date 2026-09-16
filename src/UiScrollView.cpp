@@ -60,11 +60,45 @@ void ScrollView::SetContent(std::unique_ptr<Widget> content)
         Translate(m_content, dx, dy);
 }
 
+Rect ScrollView::ComputeThumbRect(Rect viewport, int contentHeight, int scrollOffset)
+{
+    if (contentHeight <= viewport.height)
+        return Rect{ 0, 0, 0, 0 };
+
+    const int trackHeight = viewport.height;
+    const int thumbHeight = std::max(24, trackHeight * viewport.height / contentHeight);
+    const int maxOffset = contentHeight - viewport.height;
+    const int maxThumbTravel = trackHeight - thumbHeight;
+    const int thumbY = viewport.y + (maxOffset > 0 ? (scrollOffset * maxThumbTravel / maxOffset) : 0);
+
+    const int thumbWidth = 4;
+    const int thumbX = viewport.Right() - thumbWidth - 3;
+
+    return Rect{ thumbX, thumbY, thumbWidth, thumbHeight };
+}
+
 void ScrollView::Draw(UiWindow& window)
 {
     window.SetClip(bounds);
     DrawChildren(window);
     window.ClearClip();
+
+    if (!m_content)
+        return;
+
+    // A thin overlay thumb - shown only when there's actually
+    // something to scroll, drawn last so it sits above the content -
+    // is the only visual cue that a short window is hiding rows below
+    // the fold. Without it, resizing down toward the documented
+    // ~420x360 floor (see AudioWindow.h) silently swaps "everything
+    // is visible" for "the rest doesn't exist" from the user's point
+    // of view: the content is one wheel-scroll away, but nothing on
+    // screen suggests that, and there's no drag handle (deliberately -
+    // this is a cue, not a second scrolling mechanism to keep in sync
+    // with OnScroll()'s own clamping).
+    const Rect thumb = ComputeThumbRect(bounds, m_content->bounds.height, m_scrollOffset);
+    if (thumb.height > 0)
+        window.FillRoundedRect(thumb, window.Theme().border, thumb.width / 2);
 }
 
 void ScrollView::OnScroll(Point, int delta)

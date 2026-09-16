@@ -46,6 +46,33 @@ public:
     bool Initialize();
     void Run();
 
+    // The exact height BuildDetailsPanel() needs for `device` - top
+    // padding, icon/name/status block, the three fixed detail rows,
+    // and however many action buttons `device`'s paired/connected
+    // state calls for, plus bottom padding. AppendDeviceSection() has
+    // to know this *before* BuildDetailsPanel() runs (to size the
+    // Card's own bounds up front), so both call this one function
+    // rather than keeping two independently-maintained copies of the
+    // same arithmetic in sync by hand - see CHANGELOG.md's 0.20.4
+    // entry for why that duplication, while not currently wrong, was
+    // worth removing rather than merely testing. `static` and public
+    // for the same reason as UiWindow::HitTest()/HitTestForScroll() -
+    // it doesn't touch `this`, and tests/test_bluetoothwindow.cpp
+    // calls it directly.
+    static int ComputeDetailsPanelHeight(const BluetoothDevice& device);
+
+    // Also public, same reasoning: tests/test_bluetoothwindow.cpp
+    // builds the real widget tree for a device and walks it checking
+    // no child overflows `panelBounds` (clipping) and the tree's
+    // actual extent lands close to `panelBounds.height` (excess
+    // unused space) - both against ComputeDetailsPanelHeight()'s own
+    // output, so the two independent code paths are cross-checked by
+    // this test in the same run. NOT static, unlike the above - it
+    // captures `this` in each button's onClick (for m_bluez calls the
+    // test never triggers), so it needs a real, if un-Initialize()'d,
+    // BluetoothWindow instance to call it on.
+    std::unique_ptr<Widget> BuildDetailsPanel(const BluetoothDevice& device, const std::string& adapterPath, const Rect& panelBounds);
+
 private:
 
     enum class Page { Main, Advanced };
@@ -65,7 +92,6 @@ private:
     int AppendDeviceSection(Widget& content, int y, int contentWidth);
 
     std::unique_ptr<Widget> BuildDeviceRow(const BluetoothDevice& device, const Rect& rowBounds, bool showDivider);
-    std::unique_ptr<Widget> BuildDetailsPanel(const BluetoothDevice& device, const std::string& adapterPath, const Rect& panelBounds);
 
     // Picks a sensible selected device after every rebuild: keeps the
     // current selection if it still exists, otherwise falls back to

@@ -10,6 +10,18 @@
 namespace Kohiko
 {
 
+// Filters clipboard/PRIMARY-selection text pasted into the Wi-Fi
+// password prompt down to what it will actually accept - every byte
+// that isn't an ASCII control character (0x00-0x1f, plus DEL/0x7f),
+// so a multi-byte UTF-8 character (any byte with the high bit set)
+// passes through untouched while a stray trailing newline - what X11
+// clipboard contents almost always end with when copied from a
+// terminal or a password manager that appends one - does not. A free
+// function, not inlined into the modal's own SelectionNotify handler
+// in NetworkWindow.cpp, specifically so it's testable without a real
+// X11 selection round trip - see tests/test_networkwindow.cpp.
+std::string FilterPastedPasswordText(const std::string& raw);
+
 // kohiko-network's top-level app class - a single Wi-Fi-focused page
 // (toolbar with the Wi-Fi/VPN state and a refresh button, a live
 // search field, an AVAILABLE NETWORKS list, and a details panel for

@@ -12,6 +12,22 @@
 namespace Kohiko
 {
 
+std::string FilterPastedPasswordText(const std::string& raw)
+{
+    std::string filtered;
+    filtered.reserve(raw.size());
+
+    for (unsigned char c : raw)
+    {
+        if (c < 0x20 || c == 0x7f)
+            continue; // every C0 control character, newline/tab included, plus DEL
+
+        filtered.push_back(static_cast<char>(c));
+    }
+
+    return filtered;
+}
+
 namespace
 {
 
@@ -114,6 +130,23 @@ std::optional<std::string> PromptForPassword(
     XGrabKeyboard(display, win, False, GrabModeAsync, GrabModeAsync, CurrentTime);
     XGrabPointer(display, win, False, ButtonPressMask, GrabModeAsync, GrabModeAsync, None, None, CurrentTime);
 
+    // Paste support (Ctrl+V from CLIPBOARD, middle-click from PRIMARY -
+    // the two conventional X11 paste gestures) - added alongside the
+    // "accepts pasted text" requirement in CHANGELOG.md's 0.20.4 entry.
+    // Neither XGrabKeyboard/XGrabPointer above nor this window's own
+    // event_mask needs to change for SelectionNotify specifically: X11
+    // delivers it straight to whichever window issued the matching
+    // XConvertSelection() call, the same way SelectionClear/
+    // SelectionRequest target a specific window regardless of that
+    // window's own selected event mask. Only UTF8_STRING is
+    // requested - virtually universal on anything a password would
+    // plausibly be copied from on a modern desktop (a password
+    // manager, a browser, a terminal) - with no XA_STRING fallback
+    // attempted if a selection owner doesn't support it.
+    Atom clipboardAtom = XInternAtom(display, "CLIPBOARD", False);
+    Atom utf8Atom = XInternAtom(display, "UTF8_STRING", False);
+    Atom pasteTargetAtom = XInternAtom(display, "KOHIKO_NETWORK_PASSWORD_PASTE", False);
+
     GC gc = XCreateGC(display, win, 0, nullptr);
     XftDraw* xftDraw = XftDrawCreate(display, win, visual, colormap);
 
@@ -146,6 +179,34 @@ std::optional<std::string> PromptForPassword(
         XFlush(display);
     };
 
+    // Reads back whatever XConvertSelection() converted into
+    // `pasteTargetAtom` on our own window, filters it the same way
+    // typed input already is, appends it, and cleans the property up
+    // - shared by both the Ctrl+V and middle-click paste gestures
+    // below, since they differ only in which selection they request.
+    auto handleSelectionNotify = [&](const XSelectionEvent& sel)
+    {
+        if (sel.property == None)
+            return; // conversion failed, or the owner has nothing in this format - nothing to paste
+
+        Atom actualType;
+        int actualFormat;
+        unsigned long itemCount, bytesAfter;
+        unsigned char* data = nullptr;
+
+        if (XGetWindowProperty(display, win, sel.property, 0, 65536, False, AnyPropertyType,
+                &actualType, &actualFormat, &itemCount, &bytesAfter, &data) == Success && data)
+        {
+            if (actualFormat == 8)
+                password += FilterPastedPasswordText(std::string(reinterpret_cast<char*>(data), itemCount));
+
+            XFree(data);
+        }
+
+        XDeleteProperty(display, win, sel.property);
+        redraw();
+    };
+
     redraw();
 
     while (!done)
@@ -162,6 +223,8 @@ std::optional<std::string> PromptForPassword(
             case ButtonPress:
                 if (event.xbutton.x < 0 || event.xbutton.x >= width || event.xbutton.y < 0 || event.xbutton.y >= height)
                     done = true; // clicked outside - same "outside == dismiss" convention as PopupMenu
+                else if (event.xbutton.button == Button2)
+                    XConvertSelection(display, XA_PRIMARY, utf8Atom, pasteTargetAtom, win, event.xbutton.time);
                 break;
 
             case KeyPress:
@@ -185,6 +248,10 @@ std::optional<std::string> PromptForPassword(
                         password.pop_back();
                     redraw();
                 }
+                else if ((keysym == XK_v || keysym == XK_V) && (event.xkey.state & ControlMask))
+                {
+                    XConvertSelection(display, clipboardAtom, utf8Atom, pasteTargetAtom, win, event.xkey.time);
+                }
                 else if (len > 0 && static_cast<unsigned char>(buffer[0]) >= 0x20)
                 {
                     password.append(buffer, len);
@@ -192,6 +259,10 @@ std::optional<std::string> PromptForPassword(
                 }
                 break;
             }
+
+            case SelectionNotify:
+                handleSelectionNotify(event.xselection);
+                break;
 
             default:
                 break;
@@ -504,7 +575,22 @@ std::unique_ptr<Widget> NetworkWindow::BuildDetailsPanel(const NetworkDevice& wi
     connectBtn->bounds = { x + buttonWidth + buttonGap, y, buttonWidth, buttonHeight };
     connectBtn->onClick = [this, devicePath, apPath, ssid, secured]
     {
-        if (!secured)
+        // Only the *first* half of this condition used to exist: any
+        // secured network unconditionally went to PromptAndConnect(),
+        // regardless of whether NetworkManager already had a saved,
+        // working secret for this exact SSID - forcing a password
+        // prompt on literally every manual connect to a known
+        // network, typed-in text or not. HasUsableSavedSecret() (see
+        // its own comment) is the actual "is there something to
+        // reuse" check; when it's true, this takes the same path an
+        // open network already did - straight to
+        // ConnectToAccessPoint() with an empty password, which its
+        // own "reuse an existing saved profile" branch (the one
+        // 0.20.3's BytesToString() fix made reachable at all) already
+        // correctly treats as "activate with whatever's already
+        // saved, don't touch it" rather than as "the user wants no
+        // password".
+        if (!secured || m_networkManager.HasUsableSavedSecret(ssid))
             m_networkManager.ConnectToAccessPoint(devicePath, apPath, ssid, "");
         else
             PromptAndConnect(devicePath, apPath, ssid, secured);

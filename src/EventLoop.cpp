@@ -8,6 +8,7 @@
 #include <X11/Xlib.h>
 
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <sys/select.h>
 #include <sys/time.h>
@@ -55,6 +56,32 @@ void EventLoop::Run()
 
     Display* display = m_connection.GetDisplay();
     int xfd = m_connection.ConnectionFd();
+
+    // Tick() (the clock, idle-lock/sleep-inhibition checks, launcher/
+    // notepad cursor blink, notification expiry - see its own
+    // comment) is scheduled off this absolute deadline, not off
+    // select() itself timing out. The two look equivalent at first
+    // glance but aren't: with the timeout reset fresh on every loop
+    // iteration (the old approach), *any* unrelated fd going ready
+    // before the full second is up - IPC, the app-dir watcher, the
+    // lock bridge, the wallpaper file watch, and especially
+    // ScreenSaverInhibitor's own fd, which subscribes bus-wide to
+    // every NameOwnerChanged signal on the session bus, not just ones
+    // it cares about, so it can drop a crashed inhibitor's cookie
+    // automatically (see that class's own comment) - restarts the
+    // wait from a full second again, indefinitely. That's easy to
+    // miss testing somewhere quiet (a fresh sandbox with almost
+    // nothing else on the bus), and easy to hit on an actual desktop
+    // session, `startx`-launched or not, where routine background
+    // D-Bus traffic is normal and frequent - the WM keeps servicing
+    // every real X11 event throughout, so nothing *looks* stuck, but
+    // the clock (and everything else Tick() drives) can go a long time
+    // without actually updating, however busy the bus gets. Tracking
+    // an absolute deadline instead means every loop iteration counts
+    // down the *same* target regardless of how many times select()
+    // returns early in between - other fd traffic can only delay a
+    // tick by the time it takes to service it, never indefinitely.
+    auto nextTick = std::chrono::steady_clock::now();
 
     while (m_running && m_windowManager.IsRunning() && !g_terminateRequested)
     {
@@ -157,18 +184,27 @@ void EventLoop::Run()
         // at something like frame rate, not once a second - but only
         // while an animation is actually in flight, so an idle Kohiko
         // still spends almost all its time asleep in select().
-        timeval timeout{};
+        auto tickInterval = m_windowManager.HasActiveAnimation()
+            ? std::chrono::steady_clock::duration(std::chrono::microseconds(8000)) // ~125Hz
+            : std::chrono::steady_clock::duration(std::chrono::seconds(1));
 
-        if (m_windowManager.HasActiveAnimation())
+        auto now = std::chrono::steady_clock::now();
+
+        nextTick = TickSchedule::PullForward(nextTick, now, tickInterval);
+
+        if (TickSchedule::IsDue(now, nextTick))
         {
-            timeout.tv_sec = 0;
-            timeout.tv_usec = 8000; // ~125Hz
+            m_windowManager.Tick();
+            now = std::chrono::steady_clock::now();
+            nextTick = now + tickInterval;
         }
-        else
-        {
-            timeout.tv_sec = 1;
-            timeout.tv_usec = 0;
-        }
+
+        auto remainingUs = std::chrono::duration_cast<std::chrono::microseconds>(
+            TickSchedule::TimeUntilDue(now, nextTick));
+
+        timeval timeout{};
+        timeout.tv_sec = static_cast<time_t>(remainingUs.count() / 1000000);
+        timeout.tv_usec = static_cast<suseconds_t>(remainingUs.count() % 1000000);
 
         int ready = select(maxFd + 1, &readSet, nullptr, nullptr, &timeout);
 
@@ -181,10 +217,7 @@ void EventLoop::Run()
         }
 
         if (ready == 0)
-        {
-            m_windowManager.Tick();
-            continue;
-        }
+            continue; // nextTick is due (or past due) - the top of the next iteration picks it up unconditionally, no separate check needed here
 
         if (ipcFd >= 0 && FD_ISSET(ipcFd, &readSet))
             m_windowManager.Ipc().Poll();

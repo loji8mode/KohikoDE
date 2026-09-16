@@ -6,10 +6,12 @@
 #include "IpcPath.h"
 #include "Json.h"
 #include "Logger.h"
+#include "LockRecovery.h"
 #include "ManagedWindow.h"
 #include "MonitorRule.h"
 #include "Process.h"
 #include "Utils.h"
+#include "WindowPlacementNotice.h"
 #include "XConnection.h"
 #include "Xdg.h"
 
@@ -135,11 +137,18 @@ void WindowManager::Initialize()
     // fires for every trigger (keybind, kohikoctl, suspend/startup
     // config, or an external session-lock request below), since they
     // all funnel through LockScreen::Lock()/Unlock() already. See
-    // SessionLockBridge.h.
+    // SessionLockBridge.h. Also maintains LockRecovery's own crash
+    // marker here, for the same reason and via the same single
+    // funnel - see LockRecovery.h.
     m_lockScreen.SetLockStateChangedCallback(
         [this](bool locked)
         {
             m_sessionLockBridge.NotifyLocked(locked);
+
+            if (locked)
+                LockRecovery::NoteLocked();
+            else
+                LockRecovery::NoteUnlocked();
         });
 
     // The other direction: `loginctl lock-session`/an equivalent
@@ -170,6 +179,21 @@ void WindowManager::Initialize()
             if (LockScreenAutoOnSuspend())
                 m_lockScreen.Lock(m_monitors, m_wallpaperManager);
         });
+
+    // LockRecovery::WasLockedAtLastExit() covers a case config alone
+    // can't: the *previous* Kohiko process ended - crashed, was
+    // killed, or lost power - without ever unlocking. Confirmed live:
+    // without this, that resumes into a completely exposed desktop,
+    // no lock screen anywhere, nothing on screen to say anything went
+    // wrong. See LockRecovery.h. Checked first, but order doesn't
+    // actually matter - Lock() is a safe no-op if already locked, so
+    // it makes no difference which of this or the config-driven check
+    // just below actually does the locking when both apply.
+    if (LockRecovery::WasLockedAtLastExit())
+    {
+        Logger::Info("the screen was locked when the previous session ended unexpectedly - locking again");
+        m_lockScreen.Lock(m_monitors, m_wallpaperManager);
+    }
 
     // lockscreen.after=always additionally locks once right here, at
     // startup - covering a freshly started or just-restarted session
@@ -232,8 +256,15 @@ void WindowManager::Initialize()
     // the pointer physically moves. Querying it directly here instead
     // of waiting for an event fixes that for the actual, common case
     // of "start Kohiko while the pointer is already on a monitor
-    // that's still empty."
-    UpdateFocusedMonitorFromPointer(m_connection.QueryPointer());
+    // that's still empty." Also reconciles *window* focus the same
+    // way: AdoptExistingWindows() above focuses each surviving window
+    // in turn as it re-manages them (same as any freshly opened
+    // window), so whichever one happened to be last in the root's own
+    // child z-order is what ends up focused - not whatever the pointer
+    // is actually resting over, and not necessarily whatever was
+    // focused before Kohiko last exited either, since nothing records
+    // that. See SyncFocusToPointer()'s own comment.
+    SyncFocusToPointer();
 }
 
 void WindowManager::AdoptExistingWindows()
@@ -285,6 +316,14 @@ void WindowManager::Shutdown()
 
     for (auto& [monitor, bar] : m_bars)
         bar->Hide();
+
+    // Unconditionally, regardless of whether still locked at this
+    // exact moment - this is a *clean* exit, so there's no crash for
+    // the next startup to recover from. Without this, deliberately
+    // quitting while locked would leave the marker behind, and the
+    // next, entirely fresh login would come up pre-locked for no
+    // reason. See LockRecovery.h.
+    LockRecovery::NoteUnlocked();
 }
 
 bool WindowManager::IsRunning() const
@@ -348,11 +387,66 @@ void WindowManager::Tick()
     m_lockScreen.Tick();
     CheckIdleTimeoutLock();
     CheckSleepInhibition();
+    CheckPendingXEmbedWindows();
 
     // Also what clears a Bar::ShowNotification() once it expires - see
     // Bar::Redraw()'s own expiry check.
     for (auto& [monitor, bar] : m_bars)
         bar->Redraw();
+}
+
+void WindowManager::CheckPendingXEmbedWindows()
+{
+    if (m_pendingXEmbedWindows.empty())
+        return;
+
+    std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+
+    // Collect the ids to force-manage first, erasing every entry
+    // that's either resolved (docked) or timed out from the pending
+    // list in one pass, *then* call Manage() on whatever's left over -
+    // Manage() only ever adds to m_pendingXEmbedWindows, never removes
+    // from it, so there's no reentrancy hazard in calling it once this
+    // loop is done looking at the vector, but doing so *during* the
+    // loop (invalidating iterators into the same vector Manage() might
+    // otherwise touch) would be asking for trouble for no benefit.
+    std::vector<WindowID> toManage;
+
+    for (auto it = m_pendingXEmbedWindows.begin(); it != m_pendingXEmbedWindows.end(); )
+    {
+        // Belt-and-suspenders alongside HandleClientMessage()'s own
+        // immediate cleanup on a successful dock - see that function's
+        // comment for why both exist rather than relying on just one.
+        if (m_tray.IsDocked(it->id))
+        {
+            it = m_pendingXEmbedWindows.erase(it);
+            continue;
+        }
+
+        if (now < it->deadline)
+        {
+            ++it;
+            continue;
+        }
+
+        toManage.push_back(it->id);
+        it = m_pendingXEmbedWindows.erase(it);
+    }
+
+    for (WindowID id : toManage)
+    {
+        // The window may have been destroyed in the interval between
+        // being marked pending and this deadline - HandleDestroyNotify
+        // already removes it from m_pendingXEmbedWindows when that
+        // happens, so reaching here with a since-destroyed id should
+        // be impossible, but GetWindowAttributes()'s own bool return
+        // is a cheap, direct liveness check to lean on rather than
+        // trust that invariant blindly - the same defensive style
+        // Manage() already uses it with for override-redirect.
+        XWindowAttributes attrs{};
+        if (m_connection.GetWindowAttributes(id, attrs))
+            Manage(id, /*skipXEmbedCheck=*/true);
+    }
 }
 
 void WindowManager::CheckIdleTimeoutLock()
@@ -545,6 +639,20 @@ void WindowManager::HandleDestroyNotify(const XDestroyWindowEvent& event)
     if (m_repository.Contains(event.window))
         Unmanage(event.window);
 
+    // A window can be destroyed while still only provisionally
+    // pending a dock (see Manage()'s own comment on
+    // m_pendingXEmbedWindows) - never having reached m_repository at
+    // all, so the check above alone wouldn't catch it. Without this,
+    // a destroyed-before-timeout window's now-stale id would sit in
+    // the pending list until its deadline, then fail
+    // GetWindowAttributes()'s liveness check in
+    // CheckPendingXEmbedWindows() and get silently dropped anyway -
+    // harmless today, but only because that liveness check exists as
+    // a second line of defense; cleaning up here, at the actual
+    // source event, is the more direct fix.
+    std::erase_if(m_pendingXEmbedWindows,
+        [&event](const PendingXEmbedWindow& pending) { return pending.id == event.window; });
+
     m_tray.HandleWindowDestroyed(event.window);
 }
 
@@ -622,6 +730,33 @@ void WindowManager::UpdateFocusedMonitorFromPointer(const Point& pointer)
         return;
 
     FocusMonitor(*under);
+}
+
+void WindowManager::SyncFocusToPointer()
+{
+    Point pointer = m_connection.QueryPointer();
+
+    // Same reasoning as HandlePointerMotion()/HandleEnterNotify() -
+    // keeps *monitor* focus honest too, in case this is called (session
+    // restore, in particular) before anything else ever has been.
+    UpdateFocusedMonitorFromPointer(pointer);
+
+    // Same guards as HandleEnterNotify() itself, in the same order -
+    // this is deliberately just that function's own reconciliation
+    // step, invoked directly instead of waiting on an EnterNotify that
+    // was never going to arrive (the pointer, in absolute screen
+    // terms, didn't move - only whatever's under it did).
+    if (m_launcher.IsOpen() || m_notepad.IsOpen())
+        return;
+
+    if (!m_config.GetBool("general.focus_follows_mouse", true))
+        return;
+
+    ManagedWindow* floating = FloatingWindowAt(pointer);
+    ManagedWindow* window = floating ? floating : WindowAt(pointer);
+
+    if (window && !window->Focused())
+        Focus(window->Id());
 }
 
 void WindowManager::HandleFocusIn(const XFocusChangeEvent& event)
@@ -706,7 +841,33 @@ void WindowManager::HandleExpose(const XExposeEvent& event)
 
 void WindowManager::HandleClientMessage(const XClientMessageEvent& event)
 {
-    m_tray.HandleClientMessage(event);
+    if (::Window dockedIcon = m_tray.HandleClientMessage(event))
+    {
+        // The window might already be sitting in a BSP tile if
+        // Manage()'s own timeout fallback (CheckPendingXEmbedWindows())
+        // gave up on it before this (in this scenario, unusually slow)
+        // dock request finally arrived - DockIcon() (already run, by
+        // the time HandleClientMessage() above returns) reparents and
+        // maps unconditionally, regardless of any of that, so cleaning
+        // up whatever tiling state might exist is this function's job.
+        // Unmanage() only ever touches Kohiko's own bookkeeping (the
+        // BSP slot, the repository entry, focus) - never anything
+        // through X11 on the window itself - so calling it here, after
+        // DockIcon() has already reparented the same window elsewhere,
+        // is safe: there's nothing in Unmanage() that assumes the
+        // window is still where it was.
+        if (m_repository.Contains(dockedIcon))
+            Unmanage(dockedIcon);
+
+        // No longer a candidate for the timeout fallback either, if it
+        // was one - redundant with CheckPendingXEmbedWindows()'s own
+        // m_tray.IsDocked() check (belt-and-suspenders, see that
+        // function's comment), but doing it here too means a
+        // just-docked icon can't sit forgotten in the pending list for
+        // up to a second doing nothing before that sweep notices.
+        std::erase_if(m_pendingXEmbedWindows,
+            [dockedIcon](const PendingXEmbedWindow& pending) { return pending.id == dockedIcon; });
+    }
 
     // The standard EWMH way an already-mapped client asks the WM for a
     // state change - "please make me fullscreen" (flameshot's overlay,
@@ -1073,6 +1234,30 @@ void WindowManager::EndSwapDrag(ManagedWindow* window, const Point& cursor)
 
     Rect fromRect = m_dragCurrentRect;
 
+    // m_dragCurrentRect tracks the cursor with a fixed grab-offset for
+    // the whole drag (UpdateSwapDrag()'s own comment) - correct and
+    // expected for that purpose, but it can legitimately extend
+    // partially off-screen (grab a window away from its own left edge,
+    // drag far enough left, and the carried rect's own left edge goes
+    // negative - harmless while actually dragging, since nothing
+    // renders past the screen edge regardless). Wrong as an
+    // animation's *starting* rect, though, in either branch below: the
+    // clipped, off-screen portion isn't "there" for the tween to
+    // visibly grow out of, so its early frames render noticeably
+    // smaller than they should - and in the swap case, since `target`
+    // is sliding in from the opposite direction at the very same time,
+    // the two can visibly fail to meet in the middle, briefly exposing
+    // wallpaper neither one actually covers yet. Confirmed live under
+    // Xvfb - a rapid burst of screenshots right after a drop caught
+    // exactly this: the dragged window's visible edge cut off well
+    // short of the screen edge, a gap of bare wallpaper where neither
+    // window had caught up to yet. Clamping to the drop monitor's own
+    // work area is the fully on-screen animation start this was always
+    // meant to be.
+    Monitor* dropMonitor = m_monitors.Containing(cursor);
+    Monitor& animMonitor = dropMonitor ? *dropMonitor : FocusedMonitor();
+    fromRect = fromRect.ClampedTo(animMonitor.WorkArea(), window->BorderWidth());
+
     // Clear the drag state *before* SwapWindows()/Arrange() run below,
     // so Arrange() is free to reposition this window like any other
     // tiled one again.
@@ -1094,6 +1279,16 @@ void WindowManager::EndSwapDrag(ManagedWindow* window, const Point& cursor)
 
         m_animator.Start(window, fromRect, window->Geometry(), kSwapAnimationMs);
         m_animator.Start(target, targetFromRect, target->Geometry(), kSwapAnimationMs);
+
+        // The two windows just traded places, but the cursor stayed
+        // exactly where it was released - see SyncFocusToPointer()'s
+        // own comment. Whichever of the two now actually sits under
+        // `cursor` (almost always `target`, since that's where this
+        // drag was dropped, but not necessarily - a deeply nested
+        // swap can move more of the tree around than just these two
+        // rects) is what ends up focused, not whichever one happened
+        // to hold focus before the drag started.
+        SyncFocusToPointer();
     }
     else
     {
@@ -1315,7 +1510,7 @@ std::string WindowManager::HandleIpcCommand(const std::string& request)
 
 // --- internals ----------------------------------------------------------------
 
-void WindowManager::Manage(WindowID id)
+void WindowManager::Manage(WindowID id, bool skipXEmbedCheck)
 {
     if (m_repository.Contains(id))
         return;
@@ -1363,8 +1558,49 @@ void WindowManager::Manage(WindowID id)
     // full-sized, in whatever tile it would have landed in, for
     // however many milliseconds pass until the dock request is
     // processed.
-    if (m_connection.IsXEmbedWindow(id, m_atoms))
+    //
+    // That's a genuine, if purely cosmetic, reason to check the
+    // property at all - but the property alone is *not* proof a dock
+    // request is actually coming. _XEMBED_INFO is a general X11
+    // embedding protocol, not something exclusively used for system
+    // tray icons (a Qt/GTK application can use it for other embedding
+    // purposes entirely unrelated to a tray), and even a genuine tray
+    // icon's SYSTEM_TRAY_REQUEST_DOCK ClientMessage is a *separate*,
+    // asynchronous event from this MapRequest - nothing guarantees it
+    // ever arrives (no tray host running, a client that sets the
+    // property without following through, or simply a race). Treating
+    // the property as permanent proof, the way this check used to,
+    // meant any window meeting only that one condition was silently
+    // never mapped - not "shown as a tray icon", genuinely invisible
+    // forever - confirmed directly, not assumed: an otherwise-plain
+    // top-level window carrying only this one property, built as a
+    // deliberately minimal reproduction (tests/live/x11_test_client.cpp),
+    // stayed at its original creation geometry under a real Kohiko WM
+    // in a live Xvfb session while an identical window without the
+    // property was correctly tiled full-screen. See CHANGELOG.md's
+    // 0.20.4 entry for the rest of the investigation, including why
+    // outright removing this check - not just loosening it - would
+    // reintroduce that same cosmetic flash for every genuine tray icon
+    // instead.
+    //
+    // So the property is only ever a *provisional* reason to hold off
+    // mapping now, not a permanent one: skipXEmbedCheck (true only
+    // when CheckPendingXEmbedWindows() below re-invokes this after a
+    // real dock request never arrived in time) is what actually keeps
+    // this fast path from becoming the same permanent trap again.
+    if (!skipXEmbedCheck && m_connection.IsXEmbedWindow(id, m_atoms))
+    {
+        bool alreadyPending = std::any_of(m_pendingXEmbedWindows.begin(), m_pendingXEmbedWindows.end(),
+            [id](const PendingXEmbedWindow& pending) { return pending.id == id; });
+
+        if (!alreadyPending)
+        {
+            static constexpr auto kXEmbedDockTimeout = std::chrono::seconds(2);
+            m_pendingXEmbedWindows.push_back({ id, std::chrono::steady_clock::now() + kXEmbedDockTimeout });
+        }
+
         return;
+    }
 
     ManagedWindow* window = m_repository.Add(id);
 
@@ -1770,6 +2006,34 @@ void WindowManager::Manage(WindowID id)
     else
     {
         Arrange();
+
+        // A plain top-level window (no `parent` - a transient always
+        // gets pulled into view above instead, see the block just
+        // above) landing on a workspace nothing is currently showing
+        // is deliberate, existing behaviour, not a bug: a
+        // `workspace<N>=` autostart line, a `windowrule=workspace:N`,
+        // or a learned adaptive-placement habit is explicitly meant
+        // to open its target quietly in the background rather than
+        // yanking focus away from whatever the user is doing (see the
+        // Window Placement comment above). But "quiet" isn't supposed
+        // to mean "invisible": from the user's side this looks
+        // identical to the application simply failing to open at all
+        // - confirmed directly, reproducing this exact config shape
+        // (an app named in the same `workspace<N>=` line as another
+        // one already known to hit this): the process is alive, a
+        // real window exists, and it's perfectly normal once you
+        // happen to switch to workspace N, but nothing on screen ever
+        // says so. A transient's implicit "make this visible" already
+        // solves this for dialogs; a one-line notification on
+        // whichever monitor the user is actually looking at is the
+        // equivalent for everything else - cheap, undismissable
+        // silence is the actual defect here, not the placement
+        // decision itself.
+        std::string appName = AppClassKey(window);
+
+        ShowNotificationOnMonitor(
+            FocusedMonitor(),
+            WindowPlacementNotice::BackgroundPlacementText(appName, window->Workspace()));
     }
 
     RefreshClientList();
@@ -1786,7 +2050,16 @@ void WindowManager::Unmanage(WindowID id)
     int workspace = window->Workspace();
 
     if (window->OccupiesTreeSlot())
-        m_workspaces.Get(workspace).Tree().Remove(window);
+    {
+        Monitor* shownOn = MonitorShowing(workspace);
+        Monitor& referenceMonitor = shownOn ? *shownOn : FocusedMonitor();
+
+        int innerGap = m_config.GetInt("general.inner_gap", 6);
+        int outerGap = m_config.GetInt("general.outer_gap", 8);
+        Rect tilingArea = TilingArea(referenceMonitor).Shrunk(outerGap);
+
+        m_workspaces.Get(workspace).Tree().Remove(window, tilingArea, innerGap);
+    }
 
     m_scratchpad.Forget(id);
     m_repository.Remove(id);
@@ -2143,6 +2416,15 @@ void WindowManager::SwitchWorkspaceOnMonitor(Monitor& monitor, int id)
     Arrange();
 
     FocusMonitor(monitor);
+
+    // FocusMonitor() above picks whichever window happens to be first
+    // in `id`'s own visible list - not necessarily whatever the
+    // pointer is actually resting over right now, which never crossed
+    // anything (its screen position didn't change, only the workspace
+    // showing under it did) so there was never an EnterNotify to
+    // reconcile the two on its own. See SyncFocusToPointer()'s own
+    // comment.
+    SyncFocusToPointer();
 }
 
 void WindowManager::ShowNotificationOnMonitor(Monitor& monitor, const std::string& text)
@@ -2251,6 +2533,30 @@ void WindowManager::FocusMonitorCommand(const std::string& arg)
         return;
 
     FocusMonitor(*target);
+
+    // Without this, under focus_follows_mouse, the pointer is still
+    // sitting exactly where it always was - almost certainly still
+    // over the monitor just switched *away* from - so the very next
+    // incidental bit of mouse movement there (HandlePointerMotion()/
+    // HandleEnterNotify(), same as any other crossing) would
+    // immediately switch focus straight back, silently undoing the
+    // switch this function was just explicitly asked to make. Moving
+    // the pointer onto the monitor that's now focused, instead of
+    // leaving it behind, is what keeps an explicit switch from
+    // fighting its own purpose this way - the opposite direction from
+    // every other fix here (SyncFocusToPointer()'s own comment): those
+    // move *focus* to match the pointer; this moves the *pointer* to
+    // match an explicit focus change, since "sync focus to wherever
+    // the pointer already is" would just undo the very switch this
+    // function exists to make.
+    if (m_config.GetBool("general.focus_follows_mouse", true))
+    {
+        const Rect& geometry = target->Geometry();
+
+        m_connection.WarpPointer(
+            geometry.x + geometry.width / 2,
+            geometry.y + geometry.height / 2);
+    }
 }
 
 void WindowManager::MoveFocusedToWorkspace(int id)
@@ -2285,7 +2591,21 @@ void WindowManager::MoveFocusedToWorkspace(int id)
         window->IsFullscreen() && window->PreviousState() == WindowState::Tiled;
 
     if (wasTiled || wasFullscreenTile)
-        m_workspaces.Get(oldWorkspaceId).Tree().Remove(window);
+    {
+        // Deliberately the *old* workspace's own reference monitor,
+        // not `referenceMonitor` above (that one is `id`'s destination
+        // - right for the TryTile() call below, wrong for what
+        // survivor(s) left behind on `oldWorkspaceId` are about to
+        // occupy).
+        Monitor* oldShownOn = MonitorShowing(oldWorkspaceId);
+        Monitor& oldReferenceMonitor = oldShownOn ? *oldShownOn : FocusedMonitor();
+
+        int innerGap = m_config.GetInt("general.inner_gap", 6);
+        int outerGap = m_config.GetInt("general.outer_gap", 8);
+        Rect oldTilingArea = TilingArea(oldReferenceMonitor).Shrunk(outerGap);
+
+        m_workspaces.Get(oldWorkspaceId).Tree().Remove(window, oldTilingArea, innerGap);
+    }
 
     window->SetWorkspace(id);
 
@@ -2422,7 +2742,15 @@ void WindowManager::MoveWindowToMonitor(ManagedWindow* window, Monitor& target)
         window->IsFullscreen() && window->PreviousState() == WindowState::Floating;
 
     if (wasTiled || wasFullscreenTile)
-        m_workspaces.Get(oldWorkspaceId).Tree().Remove(window);
+    {
+        Monitor& oldReferenceMonitor = sourceMonitor ? *sourceMonitor : FocusedMonitor();
+
+        int innerGap = m_config.GetInt("general.inner_gap", 6);
+        int outerGap = m_config.GetInt("general.outer_gap", 8);
+        Rect oldTilingArea = TilingArea(oldReferenceMonitor).Shrunk(outerGap);
+
+        m_workspaces.Get(oldWorkspaceId).Tree().Remove(window, oldTilingArea, innerGap);
+    }
 
     window->SetWorkspace(targetWorkspaceId);
     window->SetMonitor(target.Id());
@@ -2511,7 +2839,14 @@ void WindowManager::ToggleFloating()
     }
     else if (window->IsTiled())
     {
-        m_workspaces.Get(window->Workspace()).Tree().Remove(window);
+        Monitor* shownOn = MonitorShowing(window->Workspace());
+        Monitor& referenceMonitor = shownOn ? *shownOn : FocusedMonitor();
+
+        int innerGap = m_config.GetInt("general.inner_gap", 6);
+        int outerGap = m_config.GetInt("general.outer_gap", 8);
+        Rect tilingArea = TilingArea(referenceMonitor).Shrunk(outerGap);
+
+        m_workspaces.Get(window->Workspace()).Tree().Remove(window, tilingArea, innerGap);
 
         Rect geometry = window->FloatingGeometry();
 
@@ -2574,7 +2909,16 @@ void WindowManager::ToggleScratchpadForFocused()
             return;
 
         if (window->OccupiesTreeSlot())
-            m_workspaces.Get(window->Workspace()).Tree().Remove(window);
+        {
+            Monitor* shownOn = MonitorShowing(window->Workspace());
+            Monitor& referenceMonitor = shownOn ? *shownOn : FocusedMonitor();
+
+            int innerGap = m_config.GetInt("general.inner_gap", 6);
+            int outerGap = m_config.GetInt("general.outer_gap", 8);
+            Rect tilingArea = TilingArea(referenceMonitor).Shrunk(outerGap);
+
+            m_workspaces.Get(window->Workspace()).Tree().Remove(window, tilingArea, innerGap);
+        }
 
         window->SetPreviousState(window->State());
         window->SetState(WindowState::Scratchpad);
@@ -2705,6 +3049,10 @@ void WindowManager::RotateFocused()
 
     m_workspaces.Get(window->Workspace()).Tree().Rotate(window);
     Arrange();
+
+    // Rotating one split can shift every other tile sharing that
+    // split's ancestor chain - see SyncFocusToPointer()'s own comment.
+    SyncFocusToPointer();
 }
 
 void WindowManager::FlipFocused()
@@ -2716,6 +3064,7 @@ void WindowManager::FlipFocused()
 
     m_workspaces.Get(window->Workspace()).Tree().Flip(window);
     Arrange();
+    SyncFocusToPointer();
 }
 
 void WindowManager::ReloadConfig()
@@ -3273,7 +3622,16 @@ void WindowManager::ApplyTilingMisbehaviorFallback(ManagedWindow* window)
     // one too; the whole point of this fallback is landing it
     // somewhere floating instead.
     if (window->OccupiesTreeSlot())
-        m_workspaces.Get(oldWorkspace).Tree().Remove(window);
+    {
+        Monitor* shownOn = MonitorShowing(oldWorkspace);
+        Monitor& referenceMonitor = shownOn ? *shownOn : FocusedMonitor();
+
+        int innerGap = m_config.GetInt("general.inner_gap", 6);
+        int outerGap = m_config.GetInt("general.outer_gap", 8);
+        Rect tilingArea = TilingArea(referenceMonitor).Shrunk(outerGap);
+
+        m_workspaces.Get(oldWorkspace).Tree().Remove(window, tilingArea, innerGap);
+    }
 
     window->ResetTilingMisbehavior();
 
@@ -3641,8 +3999,13 @@ void WindowManager::HandleMonitorTopologyChanged()
     // happens to be sitting over it - plugging in a second monitor to
     // the side the pointer was already resting near is the common
     // case - it needs to be checked directly rather than waiting for
-    // the pointer to move before it's recognized as focused.
-    UpdateFocusedMonitorFromPointer(m_connection.QueryPointer());
+    // the pointer to move before it's recognized as focused. Also
+    // reconciles *window* focus - Arrange() above can map/unmap/
+    // reposition windows across monitors (RelocateOrphanedFloatingWindows()
+    // in particular, for whatever a disconnected monitor was showing),
+    // any of which can leave a stale window focused relative to
+    // wherever the pointer actually ends up. See SyncFocusToPointer().
+    SyncFocusToPointer();
 }
 
 void WindowManager::RebuildBars()
@@ -3773,6 +4136,31 @@ WindowRuleEffect WindowManager::ResolveWindowRules(
 
 void WindowManager::RaiseModalWindows()
 {
+    // LockScreen first, unconditionally, and returns immediately if
+    // it wins - nothing else is allowed a say in stacking order while
+    // locked, Launcher/Notepad included (nether should even be
+    // reachable while locked in the first place, given LockScreen's
+    // own exclusive XGrabKeyboard/XGrabPointer - see its own header
+    // comment - but this is the actual visual guarantee, independent
+    // of that: whatever else is true, the lock surface itself must be
+    // what's on screen). Concretely fixes a real, confirmed-live
+    // regression: this function used to only ever consider Launcher/
+    // Notepad, so a startup/autostart application mapped *after* the
+    // screen was locked - LockScreen only raises itself once, at the
+    // moment Lock() runs - could end up on top of it, silently and
+    // completely (verified live under Xvfb: an ordinary xterm opening
+    // post-lock covered the entire lock surface, clock/username/
+    // password field included). Input was never actually at risk
+    // either way - the exclusive grab means keystrokes go to
+    // LockScreen regardless of what's stacked where - but a user who
+    // can't *see* the password field they're typing into is exactly
+    // the kind of broken this function exists to prevent.
+    if (m_lockScreen.IsLocked())
+    {
+        m_connection.Raise(m_lockScreen.WindowId());
+        return;
+    }
+
     if (m_launcher.IsOpen())
         m_connection.Raise(m_launcher.WindowId());
     else if (m_notepad.IsOpen())

@@ -613,14 +613,30 @@ still exist as plain commands if you'd rather bind explicit keyboard
 control yourself (`kohikoctl dispatch focusmonitor right`, or a `bind=`
 line) - nothing is bound to them by default anymore.
 
+Several transitions - switching workspaces, a Swap/Rotate/Flip
+rearranging the tiled layout, and adopting whatever session survived a
+restart - can leave a different window under the pointer than
+whatever was focused a moment before, since none of them are
+triggered by an actual pointer crossing (the pointer, in screen
+terms, never moved - only the content under it did). Since 0.20.4,
+Kohiko explicitly re-checks and corrects this right after each one,
+under the same `general.focus_follows_mouse` setting above.
+`focusmonitor`/`movetomonitor` are the one exception in the *other*
+direction: switching monitors explicitly warps the pointer onto the
+newly-focused monitor instead (also gated on
+`general.focus_follows_mouse`), since correcting *focus* to match
+wherever the pointer already sits would just undo the switch that was
+just requested. A brand new window grabbing focus regardless of
+where the pointer happens to be resting is deliberately not "corrected"
+by any of this - that's the ordinary, intended policy, not a case of
+the two falling out of sync.
+
 **Every monitor has its own bar**, each showing that monitor's *own*
 active workspace - Monitor 1's bar highlights workspace 1 while
 Monitor 2's highlights workspace 5, independently, exactly matching
-whatever `kohikoctl monitors` reports for each. Only the currently-
-focused monitor's bar shows a window title (real X input focus is
-singular, so that's the only one with a genuine "focused window" to
-show); the clock and the scratchpad/notepad indicators appear on every
-bar. The system tray is a single X11-wide selection, so it can only
+whatever `kohikoctl monitors` reports for each. The clock
+and the scratchpad/notepad indicators appear on every bar. The system
+tray is a single X11-wide selection, so it can only
 ever dock on one bar - it stays on whichever monitor is Primary().
 
 **Dragging a floating window (Super+LMB) across a monitor boundary
@@ -804,6 +820,17 @@ that the same program opening some unrelated window an hour into the
 session gets redirected too. A `windowrule=workspace:N` for the same
 window (see [Window rules](#window-rules)) always wins over this if both
 apply, since that's a more specific, deliberate override.
+
+Landing on a workspace nothing is currently showing is deliberate:
+the window opens quietly, in the background, without stealing focus
+from whatever you're doing right now - exactly like `windowrule=
+workspace:N` and a learned adaptive-placement habit both already do
+for the same reason. Since 0.20.4, that's paired with a one-line
+notification on whichever monitor you're actually looking at ("Discord
+opened on workspace 2") specifically so "quiet" doesn't also mean
+"indistinguishable from the application having failed to open at
+all" - switching to workspace N is still how you actually get to it,
+this just tells you it's there.
 
 ### XDG autostart (`.desktop` entries)
 
@@ -1056,7 +1083,9 @@ lifetime of the session:
   when nothing is).
 
 `_NET_WM_NAME` is honoured both ways: Kohiko reads it from client
-windows for their title (shown in the bar), and sets it on its own
+windows for their title (used for `windowrule=title:` matching, and to
+know when a redraw is worth triggering - not displayed directly in the
+bar, see the 0.20.4 CHANGELOG entry for why), and sets it on its own
 check window for the round-trip above.
 
 Kohiko also implements the one EWMH window *state* it needs to:
@@ -1242,6 +1271,19 @@ away with. Stacking alone wouldn't stop Kohiko's own global hotkeys
 or a misbehaving client that calls `XSetInputFocus` on itself directly
 from stealing keystrokes - including the password itself.
 
+That grab keeps keystrokes safe regardless of what's stacked where, but
+the lock screen still needs to stay the thing actually *visible*, too:
+since 0.20.4, any window that opens while locked - a startup/autostart
+application in particular, which has no way to know a lock happened
+after it was launched - stays behind the lock screen, never in front of
+it, checked again every time. Before 0.20.4 this wasn't guaranteed:
+`LockScreen` only raised itself once, at the moment of locking, so a
+window opening afterward could end up on top of it - completely, not
+just partially - with nothing on screen indicating the session was even
+still locked. Login/keystroke safety itself was never affected either
+way (the grab above already covers that independently), but a lock
+screen you can't see is still a real problem of its own.
+
 Whatever's typed is wiped from memory (overwritten with zeros, not just
 `.clear()`'d - see `Utils::SecureErase`) the moment it's no longer
 needed: right after a successful authentication, right after a failed
@@ -1266,6 +1308,22 @@ described above) on any system without a session bus, without logind
 running, or where Kohiko isn't running as a logind-managed session at
 all (a bare `startx` outside any login manager, for instance) - none of
 which are errors.
+
+Surviving a crash while locked is a separate guarantee from all of the
+above, and since 0.20.4 an explicit one: `kohiko-session` restarts a
+crashed Kohiko automatically (see its own comment), but the restarted
+process otherwise has no memory of what state the previous one was in.
+Without a specific check for this, that resumes into a fully exposed,
+completely unlocked desktop - confirmed by direct reproduction (lock,
+then `kill -9` the running process to simulate a crash) before this
+existed. A small marker file, written whenever the screen locks and
+removed whenever it unlocks again normally, is checked once at startup;
+if it's still there, the previous process never got as far as unlocking,
+so Kohiko locks again immediately - independent of `lockscreen.after`
+entirely, since this is safety recovery, not a matter of preference. A
+deliberate logout while still locked clears the marker too, so a fresh
+login afterward doesn't come up pre-locked for no reason.
+
 
 ## Suspend integration
 
@@ -1429,7 +1487,7 @@ Roughly the file layout the project was designed around, one responsibility each
 
 | File                       | Responsibility |
 |----------------------------|----------------|
-| `BSPTree` / `BSPNode` / `BSPLeaf` / `BSPSplit` | The tree itself: placement-aware insert-next-to-focused (natural direction, then the other direction, then shrinking other tiles - never below `general.min_tile_*`), remove-and-collapse, swap, resize, rotate, flip, neighbor search, hit-testing, JSON dump |
+| `BSPTree` / `BSPNode` / `BSPLeaf` / `BSPSplit` | The tree itself: placement-aware insert-next-to-focused (natural direction, then the other direction, then shrinking other tiles - never below `general.min_tile_*`), direction-aware remove-and-collapse, swap, resize, rotate, flip, neighbor search, hit-testing, JSON dump |
 | `LayoutEngine`             | Walks the tree and turns ratios into pixels (gaps, borders, smart gaps/borders) |
 | `WindowManager`            | Coordinator - owns everything else, sequences the actual X11 event handling |
 | `KeyboardManager`          | Config binds -> grabbed keys -> `Command`s. No other logic. |
@@ -1445,7 +1503,7 @@ Roughly the file layout the project was designed around, one responsibility each
 | `Config` / `ConfigParser`  | The `key=value` file, with repeatable keys for `bind=`/`exec.*=`/`windowrule=`/`monitor=` |
 | `WindowRule`                | Parses/matches `windowrule=` lines - see [Window rules](#window-rules) |
 | `IPCServer` / `kohikoctl`  | The Unix-socket control protocol and its CLI client |
-| `Bar`                      | One instance per monitor - its own workspaces/active-highlight, a title (focused monitor only), scratchpad/notepad indicators, clock, transient notifications - plain Xlib text, no toolkit |
+| `Bar`                      | One instance per monitor - its own workspaces/active-highlight, scratchpad/notepad indicators, clock, transient notifications - plain Xlib text, no toolkit |
 | `MonitorManager` / `Monitor` / `MonitorRule` | XRandr detection and hotplug, one monitor's geometry/`WorkArea()`/active workspace, `monitor=` rule parsing - see [Multi-monitor](#multi-monitor) |
 | `PowerMenu`                | The bar's `[Power]` popup - exactly Shutdown/Restart/Suspend, see [The power menu](#the-power-menu) |
 | `LockScreen` / `Authenticator` | The native lock screen and its PAM authentication (run in a short-lived forked child, never inline in the main process) - see [Native lock screen](#native-lock-screen) |
@@ -1466,7 +1524,15 @@ leaf refers to rather than touching any rect, which is what makes it safe
 to lay out again immediately afterward - `Animator` then plays that
 transition back over a couple of frames instead of applying it instantly,
 which is the only place Kohiko's "no decorative animation" rule allows
-motion at all.
+motion at all. The dragged window's animation starts from wherever it
+visually was under the cursor at the moment of the drop
+(`Rect::ClampedTo()`'d onto the drop monitor's work area since 0.20.4 -
+a window carried at a fixed grab-offset from the cursor for the whole
+drag can legitimately end up partially off-screen, harmless while
+actually dragging, but wrong as an animation's own starting point; see
+the 0.20.4 CHANGELOG entry) rather than from its old tile position, so
+the transition reads as "it settles where you dropped it," not "it
+teleports back, then slides."
 
 Before a window is ever inserted, `BSPTree::Insert()`'s placement-aware
 overload (and `HasSpaceForAnotherWindow()`, its non-mutating probe of the
@@ -1484,6 +1550,19 @@ than the tile it was actually given (`general.tiling_misbehavior_threshold`
 in a row) gets pulled out of the tree and switched to floating -
 `general.tiling_misbehavior_fallback` - rather than being forced back
 into a tile it's already shown it won't render into correctly.
+
+Closing a window promotes its sibling straight into the freed slot -
+if that sibling is itself a further-split pair rather than a single
+window, `BSPTree::Remove()` also re-derives that pair's own split
+direction (at any depth) against the area it actually inherits, using
+the same wide-slot-splits-vertically/tall-slot-splits-horizontally
+rule a fresh `Insert()` already applies. Without this (0.20.4), a pair
+that made sense side by side in a short, wide slot stayed side by
+side - now unnaturally narrow - once closing an unrelated neighbour
+promoted that whole slot to fill a much taller column; see the 0.20.4
+CHANGELOG entry for the exact before/after. Ratios are never touched
+by this, only direction, so a manually-resized pair keeps its
+relative proportions, just applied to whichever axis now applies.
 
 ## Done
 

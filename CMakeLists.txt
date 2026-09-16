@@ -397,6 +397,17 @@ add_executable(test_recoverymode
 target_include_directories(test_recoverymode PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME RecoveryMode COMMAND test_recoverymode)
 
+# Same shape as test_recoverymode just above (plain file I/O, no X11,
+# no real crash needed) - covers the "crashed while locked resumes
+# fully exposed" fix, see LockRecovery.h and the 0.20.4 CHANGELOG.
+add_executable(test_lockrecovery
+    tests/test_lockrecovery.cpp
+    src/LockRecovery.cpp
+    src/Xdg.cpp
+)
+target_include_directories(test_lockrecovery PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME LockRecovery COMMAND test_lockrecovery)
+
 # A real functional test against actual Linux inotify (via throwaway
 # temp directories) - no X11 needed, see the file itself.
 add_executable(test_appdirwatcher
@@ -480,6 +491,37 @@ add_executable(test_iconresolver
 target_include_directories(test_iconresolver PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME IconResolver COMMAND test_iconresolver)
 
+# Pure chrono arithmetic, no X11/D-Bus/real waiting needed - the
+# TickSchedule functions are header-only inline (EventLoop.h)
+# specifically so this doesn't need to link EventLoop.cpp itself,
+# which would drag in the whole WindowManager dependency graph.
+# Regression test for the taskbar/clock "frozen until something else
+# forces a repaint" fix - see CHANGELOG.md.
+add_executable(test_eventloop
+    tests/test_eventloop.cpp
+)
+target_include_directories(test_eventloop PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME EventLoop COMMAND test_eventloop)
+
+# Pure string formatting, no WindowManager/X11 dependency - see
+# WindowPlacementNotice.h's own comment. Regression test for the "app
+# opens on a background workspace with zero on-screen signal" fix -
+# see CHANGELOG.md.
+add_executable(test_windowplacementnotice
+    tests/test_windowplacementnotice.cpp
+)
+target_include_directories(test_windowplacementnotice PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME WindowPlacementNotice COMMAND test_windowplacementnotice)
+
+# Pure struct/arithmetic logic, no dependency beyond Types.h itself.
+# Covers Rect::ClampedTo() - existing logic, but newly depended on
+# directly by the Swap-drag animation clipping fix - see CHANGELOG.md.
+add_executable(test_rect_clamping
+    tests/test_rect_clamping.cpp
+)
+target_include_directories(test_rect_clamping PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME RectClamping COMMAND test_rect_clamping)
+
 # Pure logic, no live D-Bus connection or running NetworkManager
 # needed - but still needs libdbus-1-dev to compile (links
 # DBusClient.cpp), hence gated on DBus_FOUND rather than unconditional
@@ -495,6 +537,62 @@ if(DBus_FOUND)
     target_include_directories(test_networkmanagerclient PRIVATE ${CMAKE_SOURCE_DIR}/include)
     target_link_libraries(test_networkmanagerclient PRIVATE PkgConfig::DBus)
     add_test(NAME NetworkManagerClient COMMAND test_networkmanagerclient)
+
+    # A real round-trip against tests/mock_networkmanager.py rather
+    # than pure logic - regression test for the credential-reuse fix
+    # (see CHANGELOG.md's 0.20.4 entry). The shell script itself
+    # gracefully skips (exit 0) if python3-dbus/PyGObject aren't
+    # available, same reasoning as gating this block on DBus_FOUND at
+    # all rather than making it unconditional.
+    add_executable(test_networkmanager_live_harness
+        tests/live/test_networkmanager_live_harness.cpp
+        src/NetworkManagerClient.cpp
+        src/DBusClient.cpp
+        src/DBusValue.cpp
+    )
+    target_include_directories(test_networkmanager_live_harness PRIVATE ${CMAKE_SOURCE_DIR}/include)
+    target_link_libraries(test_networkmanager_live_harness PRIVATE PkgConfig::DBus)
+    add_test(NAME NetworkManagerLive
+        COMMAND sh ${CMAKE_SOURCE_DIR}/tests/test_networkmanager_live.sh $<TARGET_FILE:test_networkmanager_live_harness>)
+endif()
+
+# Regression test for the scroll-routing fix (see CHANGELOG.md) -
+# links kohiko-desktop-shared directly rather than listing individual
+# sources, since that's exactly the UiWindow/UiWidget/UiScrollView
+# group this test exercises. Gated the same way as
+# kohiko-audio/network/bluetooth themselves (KOHIKO_DESKTOP_APPS_AVAILABLE),
+# since that shared library only exists when they do.
+if(KOHIKO_DESKTOP_APPS_AVAILABLE)
+    add_executable(test_scrollhittest
+        tests/test_scrollhittest.cpp
+    )
+    target_include_directories(test_scrollhittest PRIVATE ${CMAKE_SOURCE_DIR}/include)
+    target_link_libraries(test_scrollhittest PRIVATE kohiko-desktop-shared)
+    add_test(NAME ScrollHitTest COMMAND test_scrollhittest)
+
+# Same gate, and links src/NetworkWindow.cpp + src/NetworkManagerClient.cpp
+# directly (matching kohiko-network's own add_executable() above) since
+# those aren't part of kohiko-desktop-shared - FilterPastedPasswordText(),
+# the only thing this test calls, lives in the former.
+    add_executable(test_networkwindow
+        tests/test_networkwindow.cpp
+        src/NetworkWindow.cpp
+        src/NetworkManagerClient.cpp
+    )
+    target_include_directories(test_networkwindow PRIVATE ${CMAKE_SOURCE_DIR}/include)
+    target_link_libraries(test_networkwindow PRIVATE kohiko-desktop-shared)
+    add_test(NAME NetworkWindow COMMAND test_networkwindow)
+
+# Same gate/reasoning, for BluetoothWindow.cpp + BluezClient.cpp's own
+# ComputeDetailsPanelHeight()/BuildDetailsPanel().
+    add_executable(test_bluetoothwindow
+        tests/test_bluetoothwindow.cpp
+        src/BluetoothWindow.cpp
+        src/BluezClient.cpp
+    )
+    target_include_directories(test_bluetoothwindow PRIVATE ${CMAKE_SOURCE_DIR}/include)
+    target_link_libraries(test_bluetoothwindow PRIVATE kohiko-desktop-shared)
+    add_test(NAME BluetoothWindow COMMAND test_bluetoothwindow)
 endif()
 
 # Shell-script regression test for scripts/kohiko-session - no
@@ -502,6 +600,25 @@ endif()
 add_test(
     NAME KohikoSession
     COMMAND sh ${CMAKE_SOURCE_DIR}/tests/test_kohiko_session.sh
+)
+
+# Plain X11 client (no Kohiko headers/objects) driving
+# test_xembed_dock_timeout.sh - see that script and
+# tests/live/x11_test_client.cpp's own header comment. Unconditional,
+# same as the kohiko target itself - only needs libX11, already a hard
+# requirement for the whole project.
+add_executable(x11_test_client tests/live/x11_test_client.cpp)
+target_include_directories(x11_test_client PRIVATE ${X11_INCLUDE_DIR})
+target_link_libraries(x11_test_client PRIVATE ${X11_LIBRARIES})
+
+# Live regression test for the 0.20.4 XEmbed dock-timeout fallback fix
+# (see CHANGELOG.md) - runs the real `kohiko` target as an actual
+# window manager under Xvfb, gracefully skipped by the script itself
+# if Xvfb/xwininfo aren't available.
+add_test(
+    NAME XEmbedDockTimeout
+    COMMAND sh ${CMAKE_SOURCE_DIR}/tests/test_xembed_dock_timeout.sh
+        $<TARGET_FILE:kohiko> $<TARGET_FILE:x11_test_client>
 )
 
 # --- install ------------------------------------------------------------------------

@@ -270,8 +270,6 @@ void Bar::Redraw()
 
     if (!m_notificationText.empty())
         DrawText(x + 16, baseline, m_notificationText, m_activePixel);
-    else if (!m_title.empty())
-        DrawText(x + 16, baseline, m_title, m_foregroundPixel);
 
     int trayWidth = 0;
 

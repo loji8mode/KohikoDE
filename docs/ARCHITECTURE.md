@@ -60,7 +60,22 @@ monitor (plain Xlib drawing, no toolkit - see
 `MouseManager` for input, `WorkspaceManager`/`MonitorManager` for
 multi-monitor/multi-workspace state, and a single-threaded
 `EventLoop` multiplexing the X11 connection with the IPC socket via
-`select()`. See the
+`select()`. `WindowManager::Tick()` - the bar's clock among the other
+periodic things it drives - runs off an absolute deadline tracked in
+`EventLoop.h`'s `TickSchedule` namespace, not off `select()` itself
+timing out: resetting the wait to a fresh interval on every loop
+iteration (the pre-0.20.4 behaviour) let ordinary background fd
+activity - especially `ScreenSaverInhibitor`'s D-Bus match, which is
+bus-wide by design - push a due tick back indefinitely, since every
+loop iteration started counting from zero again regardless of how much
+real time had already elapsed. Tracking the deadline as an absolute
+`steady_clock::time_point` instead means other fd traffic can delay a
+tick by however long it takes to service it, but can never push it
+back further than that. See `tests/test_eventloop.cpp` (the pure
+scheduling logic, unit-tested independently of the loop itself) and
+the 0.20.4 entry in [`CHANGELOG.md`](../CHANGELOG.md) for the full
+story, including the live-session churn test that reproduced the
+original bug and confirmed the fix. See the
 [Architecture section of the README](../README.md#architecture) for
 the full file-by-file table and the placement/tiling algorithm's own
 description - that content lives there because it's tightly coupled
@@ -98,8 +113,22 @@ window-absolute pixel coordinates - see
 below) and an owned list of child widgets. The base class provides:
 
 - `Draw(UiWindow&)` - draw self, then children (`DrawChildren()`)
-- `WantsInput()` / `OnPress`/`OnRelease`/`OnMotion`/`OnScroll` - mouse
+- `WantsInput()` / `OnPress`/`OnRelease`/`OnMotion` - click/drag
   interaction, opt-in per widget (a plain `Widget` wants none of it)
+- `WantsScroll()` / `OnScroll` - mouse-wheel interaction, a
+  *separate* opt-in from `WantsInput()` above (0.20.4): only
+  `ScrollView` returns `true`. `UiWindow` dispatches `Button4`/
+  `Button5` via a dedicated `HitTestForScroll()` traversal - not the
+  ordinary click `HitTest()` - specifically so a wheel event finds
+  the nearest enclosing scrollable container regardless of what
+  interactive widget (a `Slider`, a `Button`) is drawn on top of it
+  at that exact pixel. Before this split, scroll dispatch reused
+  `HitTest()`, which correctly resolves to the *most specific*
+  `WantsInput()` widget for a click - but for a wheel event that
+  meant the click target's own `OnScroll()` (a no-op, for everything
+  except `ScrollView`) fired instead of the enclosing list's, so
+  scrolling only worked over the "dead space" between rows. See
+  `CHANGELOG.md`'s 0.20.4 entry for the full root-cause chain.
 - `WantsFocus()` / `OnFocus`/`OnBlur`/`OnKeyInput` - keyboard focus,
   added for `TextField` (see below); every other existing widget's
   defaults mean this doesn't affect them
@@ -126,7 +155,12 @@ sit packed inside a shared `Card` alongside sibling rows - the shape
 `kohiko-audio`'s device lists, `kohiko-network`'s network list, and
 `kohiko-bluetooth`'s device lists all use). `UiScrollView.h`/`.cpp`
 has `ScrollView` (mouse-wheel scrolling over a single content
-`Widget`, replaced wholesale via `SetContent()`). `UiSidebar.h`/`.cpp`
+`Widget`, replaced wholesale via `SetContent()`; draws a thin overlay
+scrollbar thumb, via the separately-testable pure-geometry
+`ComputeThumbRect()`, whenever content actually overflows - added
+0.20.4 as the visual half of the scroll-routing fix above, since a
+working wheel with no indicator that there's more content below the
+fold is still effectively undiscoverable). `UiSidebar.h`/`.cpp`
 has `Sidebar` (a vertical list of selectable items - currently used by
 `kohiko-audio`/`kohiko-network`/`kohiko-bluetooth`'s Advanced Settings
 sub-navigation, and by earlier layouts before the mockup-driven
@@ -486,7 +520,19 @@ property `WindowManager::Manage()` checks for (via
 `CHANGELOG.md`'s 0.20.2 entry for why that check exists at all (a real
 regression: through 0.20.1, it didn't, and tray icon windows could get
 fully tiled/tracked in a race against `SystemTray` reparenting them
-away).
+away). That check is a *fast path*, not a permanent veto, as of 0.20.4
+- see that version's own `CHANGELOG.md` entry for the regression it
+was itself causing (any window carrying `_XEMBED_INFO`, tray icon or
+not, that never actually received a real `SYSTEM_TRAY_REQUEST_DOCK`
+stayed invisible forever) and the bounded-timeout fallback that fixed
+it: `Manage()` still holds off immediately, but `Tick()`-driven
+`CheckPendingXEmbedWindows()` manages the window normally after ~2
+seconds if nothing has actually claimed it by then. A genuine
+`TrayIconClient`-based icon is unaffected by this - it's claimed well
+inside that window - but it means the fast path is now correctly a
+*hint*, not something a new tray-adjacent window can rely on as a
+guarantee it'll never be tiled if something else about its own startup
+sequence goes wrong.
 
 **A new full companion app** (a settings page of its own, like
 `kohiko-audio`) - build on the shared UI toolkit

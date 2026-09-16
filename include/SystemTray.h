@@ -58,8 +58,18 @@ public:
     // Routes SYSTEM_TRAY_REQUEST_DOCK messages sent to the tray
     // window. Safe to call with any ClientMessage - messages not
     // addressed to the tray window, or with an opcode this class
-    // doesn't implement, are ignored.
-    void HandleClientMessage(
+    // doesn't implement, are ignored (returning 0/None).
+    //
+    // Returns the window ID that was just docked, or 0/None if this
+    // particular message didn't result in one - WindowManager needs
+    // this (rather than a plain bool) to know *which* window might
+    // need Unmanage()'d if it had already been tiled as an ordinary
+    // window before this dock request arrived (see
+    // WindowManager::HandleClientMessage() and CHANGELOG.md's 0.20.4
+    // entry on the XEmbed dock-timeout fallback this pairs with) -
+    // deliberately not this class's own concern, since SystemTray has
+    // no reason to know what a "tile" even is.
+    ::Window HandleClientMessage(
         const XClientMessageEvent& event
     );
 
@@ -70,6 +80,16 @@ public:
     );
 
     ::Window ContainerWindow() const;
+
+    // Whether `icon` is currently a docked tray icon - added
+    // alongside WindowManager's XEmbed dock-timeout fallback (see
+    // CHANGELOG.md's 0.20.4 entry): it needs to tell "this window was
+    // claimed by the tray in the meantime" apart from "the dock
+    // request never came" before deciding whether to fall back to
+    // managing a window normally.
+    bool IsDocked(
+        ::Window icon
+    ) const;
 
 private:
 

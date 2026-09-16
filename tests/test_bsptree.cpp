@@ -8,6 +8,7 @@
 #include "LayoutEngine.h"
 #include "ManagedWindow.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cstdio>
 #include <memory>
@@ -489,6 +490,259 @@ int main()
         Check(dAfter.width > (bBefore.width / 2),
               "D (C's sibling, previously side-by-side with C) is the one window that "
               "actually grew, expanding sideways to fill C's freed slot");
+    }
+
+    std::printf(
+        "\n-- Collapse-on-remove re-derives direction inside a PROMOTED "
+        "SPLIT, not just a promoted leaf - the actual narrow-strip bug "
+        "(user-reported, live-reproduced under Xvfb - see CHANGELOG) --\n");
+
+    {
+        // A | (B / (C|D)): unlike the two tests just above, this
+        // removes B - the direct sibling of the WHOLE (C|D) split, not
+        // one of C/D themselves. C and D share a short, wide slot
+        // under B, so they're naturally side by side. Promoting (C|D)
+        // as a unit into B's old (much taller) slot is exactly the
+        // shape that produces two unnaturally narrow columns without
+        // the fix.
+        auto buildTree = [&](ManagedWindow* wA, ManagedWindow* wB, ManagedWindow* wC, ManagedWindow* wD)
+        {
+            auto t = std::make_unique<BSPTree>();
+            t->Insert(wA, area, 4, 50, 50);
+            t->Focus(wA);
+            t->Insert(wB, area, 4, 50, 50);
+            t->Focus(wB);
+            t->Insert(wC, area, 4, 50, 50);
+            t->Focus(wC);
+            t->Insert(wD, area, 4, 50, 50);
+            t->Focus(wD);
+            layout.Apply(t->Root(), area, params);
+            return t;
+        };
+
+        ManagedWindow* wA = makeWindow(27);
+        ManagedWindow* wB = makeWindow(28);
+        ManagedWindow* wC = makeWindow(29);
+        ManagedWindow* wD = makeWindow(30);
+
+        std::unique_ptr<BSPTree> fixedTree = buildTree(wA, wB, wC, wD);
+
+        Rect cBefore = wC->Geometry();
+        Rect dBefore = wD->Geometry();
+        Rect aBefore = wA->Geometry();
+
+        Check(cBefore.y == dBefore.y && cBefore.x != dBefore.x,
+              "setup sanity: C and D start out side by side (same y, different x)");
+        Check(cBefore.width < cBefore.height,
+              "setup sanity: side by side in B's short, wide leftover slot means "
+              "C (and D) each start out narrower than they are tall");
+
+        fixedTree->Remove(wB, area, 4);
+        layout.Apply(fixedTree->Root(), area, params);
+
+        Rect cFixed = wC->Geometry();
+        Rect dFixed = wD->Geometry();
+
+        Check(fixedTree->Count() == 3, "3 windows remain after closing B");
+        Check(cFixed.x == dFixed.x && cFixed.y != dFixed.y,
+              "THE FIX: with the placement-aware Remove() overload, C and D come "
+              "out STACKED (same x, different y) - re-derived against the new, "
+              "much taller area they actually inherited, not left side by side");
+        Check(cFixed.width > cBefore.width * 1.8,
+              "...and consequently each is now close to the FULL column width, "
+              "not still squeezed to roughly half of it");
+        Check(wA->Geometry().x == aBefore.x && wA->Geometry().y == aBefore.y &&
+              wA->Geometry().width == aBefore.width && wA->Geometry().height == aBefore.height,
+              "A - outside the promoted subtree entirely - is still completely "
+              "untouched, exactly like the two simpler collapse tests above");
+
+        // Same structural scenario, replayed against the OLD,
+        // geometry-agnostic Remove(window) overload, to demonstrate
+        // this is genuinely what the placement-aware overload fixes -
+        // not some incidental side effect of the test setup.
+        ManagedWindow* wA2 = makeWindow(31);
+        ManagedWindow* wB2 = makeWindow(32);
+        ManagedWindow* wC2 = makeWindow(33);
+        ManagedWindow* wD2 = makeWindow(34);
+
+        std::unique_ptr<BSPTree> buggyTree = buildTree(wA2, wB2, wC2, wD2);
+
+        buggyTree->Remove(wB2);
+        layout.Apply(buggyTree->Root(), area, params);
+
+        Rect c2 = wC2->Geometry();
+        Rect d2 = wD2->Geometry();
+
+        Check(c2.y == d2.y && c2.x != d2.x,
+              "confirmed: the plain structural Remove(window) overload (unchanged, "
+              "still used by simple/legacy callers) reproduces the original bug - "
+              "C2/D2 stay side by side, now unnaturally narrow in the taller slot");
+        Check(c2.width < c2.height,
+              "...narrower than tall, exactly the reported symptom - this is what "
+              "the placement-aware overload above fixes");
+    }
+
+    std::printf(
+        "\n-- Collapse-on-remove: no spurious flip when the promoted "
+        "split's direction already suits its new area --\n");
+
+    {
+        ManagedWindow* wA = makeWindow(35);
+        ManagedWindow* wB = makeWindow(36);
+        ManagedWindow* wC = makeWindow(37);
+        ManagedWindow* wD = makeWindow(38);
+
+        BSPTree tree2;
+
+        tree2.Insert(wA, area, 4, 50, 50);
+        tree2.Focus(wA);
+        tree2.Insert(wB, area, 4, 50, 50);
+        tree2.Focus(wB);
+        tree2.Insert(wC, area, 4, 50, 50);
+        tree2.Focus(wC);
+        tree2.Insert(wD, area, 4, 50, 50);
+        tree2.Focus(wD);
+        layout.Apply(tree2.Root(), area, params);
+
+        // C|D starts out Vertical (side by side, see the reproduction
+        // above) - manually rotate it to Horizontal first, which is
+        // already what it would need to become once promoted, so the
+        // fix has nothing to correct.
+        tree2.Rotate(wC);
+        layout.Apply(tree2.Root(), area, params);
+
+        Rect cBefore = wC->Geometry();
+        Rect dBefore = wD->Geometry();
+        Check(cBefore.x == dBefore.x && cBefore.y != dBefore.y,
+              "setup sanity: manually rotated to stacked before B is ever removed");
+
+        tree2.Remove(wB, area, 4);
+        layout.Apply(tree2.Root(), area, params);
+
+        Rect cAfter = wC->Geometry();
+        Rect dAfter = wD->Geometry();
+        Check(cAfter.x == dAfter.x && cAfter.y != dAfter.y,
+              "still stacked after removal - already correct, so nothing needed "
+              "flipping, and nothing did");
+    }
+
+    std::printf(
+        "\n-- Collapse-on-remove preserves a manually-resized ratio "
+        "across the flip, just applied to the other axis --\n");
+
+    {
+        ManagedWindow* wA = makeWindow(39);
+        ManagedWindow* wB = makeWindow(40);
+        ManagedWindow* wC = makeWindow(41);
+        ManagedWindow* wD = makeWindow(42);
+
+        BSPTree tree3;
+
+        tree3.Insert(wA, area, 4, 50, 50);
+        tree3.Focus(wA);
+        tree3.Insert(wB, area, 4, 50, 50);
+        tree3.Focus(wB);
+        tree3.Insert(wC, area, 4, 50, 50);
+        tree3.Focus(wC);
+        tree3.Insert(wD, area, 4, 50, 50);
+        tree3.Focus(wD);
+        layout.Apply(tree3.Root(), area, params);
+
+        // C|D is Vertical (side by side) here - drag the divider so C
+        // gets roughly 70% of the shared width instead of 50%.
+        int combinedWidth = wC->Geometry().width + wD->Geometry().width;
+        tree3.Resize(wC, static_cast<int>(combinedWidth * 0.2), 0);
+        layout.Apply(tree3.Root(), area, params);
+
+        Rect cRatioBefore = wC->Geometry();
+        Rect dRatioBefore = wD->Geometry();
+        float widthShareBefore =
+            static_cast<float>(cRatioBefore.width) /
+            static_cast<float>(cRatioBefore.width + dRatioBefore.width);
+
+        Check(widthShareBefore > 0.6f,
+              "setup sanity: C now holds noticeably more than half the shared "
+              "width (manually resized, roughly 70/30)");
+
+        tree3.Remove(wB, area, 4);
+        layout.Apply(tree3.Root(), area, params);
+
+        Rect cAfter = wC->Geometry();
+        Rect dAfter = wD->Geometry();
+
+        Check(cAfter.x == dAfter.x && cAfter.y != dAfter.y,
+              "flipped to stacked, same as the undisturbed-ratio case above");
+
+        float heightShareAfter =
+            static_cast<float>(cAfter.height) /
+            static_cast<float>(cAfter.height + dAfter.height);
+
+        Check(heightShareAfter > 0.6f,
+              "the ~70/30 split survives the flip, now expressed as height "
+              "share instead of width share - the user's manual resize wasn't "
+              "silently discarded, just re-applied to the axis that now matters");
+    }
+
+    std::printf(
+        "\n-- Collapse-on-remove: no leaf ends up unnaturally stretched "
+        "in a several-levels-deep tree, before or after a removal that "
+        "promotes a nested split --\n");
+
+    {
+        // Six windows, inserted one after another exactly the way a
+        // user opening one application after another would (each new
+        // window anchored on whichever one was focused last) - the
+        // same sequence, and the same live Xvfb reproduction, used to
+        // first confirm the *insertion* side of this algorithm was
+        // already sound before concluding the bug was specifically in
+        // Remove()'s collapse step (see the 0.20.4 CHANGELOG entry).
+        std::vector<ManagedWindow*> ws;
+        for (WindowID id = 43; id <= 48; ++id)
+            ws.push_back(makeWindow(id));
+
+        BSPTree deepTree;
+
+        for (ManagedWindow* w : ws)
+        {
+            deepTree.Insert(w, area, 4, 50, 50);
+            deepTree.Focus(w);
+            layout.Apply(deepTree.Root(), area, params);
+        }
+
+        auto worstAspectRatio = [&]()
+        {
+            float worst = 1.0f;
+            for (ManagedWindow* w : ws)
+            {
+                if (!w->OccupiesTreeSlot())
+                    continue;
+
+                Rect g = w->Geometry();
+                float longSide = static_cast<float>(std::max(g.width, g.height));
+                float shortSide = static_cast<float>(std::max(1, std::min(g.width, g.height)));
+                worst = std::max(worst, longSide / shortSide);
+            }
+            return worst;
+        };
+
+        Check(worstAspectRatio() < 3.0f,
+              "after inserting all 6 windows one after another: no window's "
+              "longer side is more than 3x its shorter side");
+
+        // Close two of the middle windows (not the most- or
+        // least-nested), which forces at least one promoted subtree to
+        // contain further nested splits of its own - the deep case the
+        // top-level-only version of this fix wouldn't have covered.
+        deepTree.Remove(ws[1], area, 4);
+        layout.Apply(deepTree.Root(), area, params);
+        deepTree.Remove(ws[3], area, 4);
+        layout.Apply(deepTree.Root(), area, params);
+
+        Check(deepTree.Count() == 4, "4 windows remain after closing 2 of the 6");
+        Check(worstAspectRatio() < 3.0f,
+              "...and still true after two removals that each promote a "
+              "subtree somewhere in the middle of the tree - nothing was left "
+              "unnaturally stretched or narrow at any depth");
     }
 
     std::printf(

@@ -132,6 +132,15 @@ Point XConnection::QueryPointer() const
     return Point{rootX, rootY};
 }
 
+void XConnection::WarpPointer(int x, int y)
+{
+    // Root-relative, matching QueryPointer()'s own return coordinates
+    // (root_x/root_y) - src_w=None means "don't confine to any
+    // particular source window", the usual form for an absolute,
+    // screen-wide warp.
+    XWarpPointer(m_display, None, m_root, 0, 0, 0, 0, x, y);
+}
+
 int XConnection::Screen() const
 {
     return m_screen;

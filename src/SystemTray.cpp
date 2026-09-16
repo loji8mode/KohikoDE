@@ -183,14 +183,14 @@ int SystemTray::Width() const
            static_cast<int>(m_icons.size() - 1) * m_iconSpacing;
 }
 
-void SystemTray::HandleClientMessage(
+::Window SystemTray::HandleClientMessage(
     const XClientMessageEvent& event)
 {
     if (!m_ownsSelection || event.window != m_container)
-        return;
+        return 0;
 
     if (event.message_type != m_trayOpcodeAtom || event.format != 32)
-        return;
+        return 0;
 
     if (event.data.l[1] == kSystemTrayRequestDock)
     {
@@ -200,12 +200,14 @@ void SystemTray::HandleClientMessage(
             std::find(m_icons.begin(), m_icons.end(), icon) == m_icons.end())
         {
             DockIcon(icon);
+            return icon;
         }
     }
 
     // SYSTEM_TRAY_BEGIN_MESSAGE / SYSTEM_TRAY_CANCEL_MESSAGE (balloon
     // popups) are intentionally left unhandled - see the class
     // comment in SystemTray.h.
+    return 0;
 }
 
 void SystemTray::HandleWindowDestroyed(
@@ -217,6 +219,11 @@ void SystemTray::HandleWindowDestroyed(
 ::Window SystemTray::ContainerWindow() const
 {
     return m_container;
+}
+
+bool SystemTray::IsDocked(::Window icon) const
+{
+    return std::find(m_icons.begin(), m_icons.end(), icon) != m_icons.end();
 }
 
 void SystemTray::DockIcon(

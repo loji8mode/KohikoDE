@@ -259,7 +259,7 @@ public:
 
 private:
 
-    void Manage(WindowID id);
+    void Manage(WindowID id, bool skipXEmbedCheck = false);
     void Unmanage(WindowID id);
 
     // Startup-only: walks the root window's existing children and
@@ -307,6 +307,25 @@ private:
     // holds - the display's own configured timeout keeps counting
     // down completely normally the rest of the time.
     void CheckSleepInhibition();
+
+    // Windows Manage() left unmapped because IsXEmbedWindow() found
+    // _XEMBED_INFO on them (see Manage()'s own comment, and
+    // CHANGELOG.md's 0.20.4 entry for the full investigation) -
+    // provisionally treated as a soon-to-be-docked tray icon, with a
+    // deadline to actually get claimed via a real
+    // SYSTEM_TRAY_REQUEST_DOCK before CheckPendingXEmbedWindows()
+    // (called once per Tick()) gives up on that and manages the
+    // window normally instead. Removed from this list the instant a
+    // dock request actually arrives too (HandleClientMessage()) - the
+    // Tick()-driven sweep is the fallback for "never arrived", not
+    // the primary way a successful, fast dock gets noticed.
+    struct PendingXEmbedWindow
+    {
+        WindowID id;
+        std::chrono::steady_clock::time_point deadline;
+    };
+    std::vector<PendingXEmbedWindow> m_pendingXEmbedWindows;
+    void CheckPendingXEmbedWindows();
 
     // Whether any window that's actually being displayed right now
     // (not just marked fullscreen on some other, currently-hidden
@@ -381,6 +400,30 @@ private:
     // the two. A no-op if the pointer is transiently outside every
     // known monitor rect (e.g. mid-hotplug) or already on the focused one.
     void UpdateFocusedMonitorFromPointer(const Point& pointer);
+
+    // Focus/mouse consistency: several transitions - a workspace
+    // switch, a Swap/Rotate/Flip/Resize rearranging the tiled layout,
+    // and adopting whatever session survived a restart - can all leave
+    // a *different* window than whatever's now visibly under the
+    // pointer still marked focused, because none of them are triggered
+    // by an actual pointer crossing (the pointer, in absolute screen
+    // terms, never moved - only the content under it did), so neither
+    // HandleEnterNotify() nor HandlePointerMotion() ever fires to
+    // reconcile the two. This is the deliberate, explicit fix: query
+    // the pointer's real current position directly (QueryPointer(),
+    // same reasoning as Initialize()'s own use of it) and focus
+    // whatever's actually there right now - floating over tiled,
+    // matching every other hit-test in this file - the instant a
+    // caller believes such a mismatch might just have opened up.
+    // A no-op under every one of HandleEnterNotify()'s own guards
+    // (general.focus_follows_mouse disabled, Launcher/Notepad holding
+    // input focus, nothing at all under the pointer, or the window
+    // there is already focused) - deliberately not called after a
+    // brand new window opens, since a fresh window grabbing focus
+    // regardless of pointer position is itself the intended, ordinary
+    // policy there, not a bug this should "correct" back onto
+    // whatever the pointer happens to be resting on instead.
+    void SyncFocusToPointer();
 
     // `focusmonitor`/`movetomonitor` remain fully functional commands
     // (kohikoctl, or a bind someone adds back themselves) - they're

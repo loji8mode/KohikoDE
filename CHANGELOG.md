@@ -1,5 +1,755 @@
 # Changelog
 
+## Version 0.20.4
+
+Release date: 2026-08-20
+
+### Fixed
+- **The bar's clock (and everything else `WindowManager::Tick()`
+  drives - idle-lock/sleep-inhibition checks, launcher/notepad cursor
+  blink, notification expiry) could go arbitrarily long without
+  updating on a real, ordinarily-busy desktop session, while every
+  genuine X11 event kept being handled completely normally in the
+  meantime.** Root cause: `EventLoop::Run()`'s `select()` timeout was
+  reset to a fresh full interval (1s idle, ~8ms during an animation)
+  on *every* loop iteration, regardless of why that iteration ran.
+  `Tick()` only ever fired when `select()` returned 0 - a full,
+  uninterrupted interval with zero file descriptor activity of any
+  kind. Any other fd going ready before that interval elapsed - the
+  IPC socket, the app-dir watcher, the lock bridge, the wallpaper file
+  watch, and especially `ScreenSaverInhibitor`'s own D-Bus connection,
+  which deliberately subscribes bus-wide to every `NameOwnerChanged`
+  signal on the session bus rather than filtering to names it actually
+  cares about (so it can notice and clean up after a crashed inhibitor
+  automatically) - caused the loop to dispatch that fd and restart the
+  wait from a full interval again, with no memory of how much real
+  time had already passed. `NameOwnerChanged` traffic is ordinary,
+  frequent background noise on any real, living session bus (systemd
+  user session activation, portals, various helper daemons), so this
+  was easy to hit on an actual desktop and easy to miss in a minimal
+  test sandbox with almost nothing else on the bus - which is exactly
+  why earlier live-session testing in this project's own sandbox never
+  caught it. Fixed by tracking an absolute deadline
+  (`std::chrono::steady_clock::time_point`) for the next `Tick()`
+  call instead of resetting a relative timeout: the pure scheduling
+  logic behind this (`TickSchedule::PullForward()`/`IsDue()`/
+  `TimeUntilDue()`) was pulled out into small, header-only `inline`
+  functions in `EventLoop.h` specifically so it's unit-testable
+  without linking the rest of `EventLoop.cpp`'s dependency chain.
+  Other fd activity can still make an individual `select()` call
+  return early exactly as before, but can no longer push the deadline
+  itself later - only real elapsed time reaching it does that.
+  Directly demonstrated, not just reasoned about: a live `kohiko-session`
+  was run under synthetic D-Bus churn (a background process
+  claiming/releasing a bus name every ~150ms, generating a
+  `NameOwnerChanged` signal each cycle). Against the pre-fix code, the
+  clock stayed frozen at the exact same time across 70+ real seconds
+  of continuous churn; against the fixed code, under identical churn,
+  the clock advanced correctly by the full real elapsed time (e.g.
+  `10:12:52` → `10:14:13` across 81 real seconds).
+- **An application launched onto a workspace nothing is currently
+  displaying looked exactly like it had failed to open at all** - a
+  real process, a real X11 window, correctly tiled/placed and fully
+  functional the moment you happened to switch to that workspace, but
+  with zero on-screen signal that it had opened anywhere. Root cause:
+  `Manage()`'s "a plain top-level window landing on a background
+  workspace stays unmapped and unfocused" behaviour is itself correct
+  and deliberate (a `workspace<N>=` autostart line, a
+  `windowrule=workspace:N`, or a learned adaptive-placement habit is
+  specifically meant to open quietly without stealing focus from
+  whatever the user is doing right now - see Window Placement in
+  `README.md`) - but unlike a transient/dialog, which always gets
+  pulled into view because it needs its parent to make sense, an
+  ordinary top-level window had no equivalent "at least let the user
+  know" step at all. Reproduced directly against the shipped default
+  config, not a contrived case: `config/default.conf` already
+  autostarts multiple applications via one shared line,
+  `workspace2=discord Telegram`, onto workspace 2, while a fresh
+  session opens showing workspace 1 - the exact "affects several
+  different applications that all launch the same way" shape
+  originally reported. Confirmed live under Xvfb: adding a third
+  application to that identical config line and starting a clean
+  session left it running (confirmed via `ps`) but completely absent
+  from workspace 1's screenshot; switching to workspace 2 showed it
+  sitting there, fully rendered and normal. Fixed by adding a bar
+  notification (`WindowManager::ShowNotificationOnMonitor()`, already
+  used elsewhere for exactly this class of "something happened
+  silently, the user should know" situation - see
+  `SwitchWorkspaceOnMonitor()`'s own use of it) whenever a non-
+  transient window lands on a workspace nothing is showing: reran the
+  identical live reproduction afterward and the bar on workspace 1
+  now reads "XTerm opened on workspace 2" for the notification's
+  usual ~2.5s window. The placement decision itself is unchanged -
+  this fixes the silence, not the (correct, existing) behaviour.
+- **Closing a window could leave its surviving neighbours unnaturally
+  narrow or stretched**, specifically whenever the neighbour being
+  promoted into the freed space was itself a further-split pair, not
+  a single window. Root cause, found from a direct user report and
+  reproduced exactly as described before any code changed: `A |
+  (B / (C|D))` - C and D side by side, sharing a short, wide slot
+  under B - closing B promotes the whole `(C|D)` pair as a unit into
+  B's old slot. `BSPTree::Remove()`'s collapse step has always
+  promoted a survivor straight into its freed slot verbatim, which is
+  exactly right when the survivor is a single leaf (see the two
+  existing Collapse-on-remove tests in `tests/test_bsptree.cpp`, both
+  still passing unmodified), but when the survivor is itself a split,
+  its own internal direction was left exactly as it was, even though
+  the area it now occupies can be a completely different shape - here,
+  B's old slot is much *taller* than the short, wide space C and D
+  were originally sized for, so they stayed side by side, each
+  squeezed to roughly half the width they should have. Investigated
+  the *insertion* side of the algorithm first, deliberately, before
+  assuming the fix belonged there: six windows opened one after
+  another (both in the natural most-recently-focused pattern and
+  forcibly re-anchored to a single fixed window each time) produced
+  sensible, non-degenerate proportions throughout, live under Xvfb -
+  `DirectionForRect()`'s existing wide-slot-splits-vertically/
+  tall-slot-splits-horizontally rule already self-corrects fine on
+  fresh inserts. The defect was specifically in collapse, not
+  insertion. Fixed with a new placement-aware `BSPTree::Remove(window,
+  tilingArea, innerGap)` overload (the original geometry-agnostic
+  `Remove(window)` is unchanged and still used wherever geometry
+  genuinely isn't available) that, after promoting a survivor,
+  recursively re-derives the direction of every split *within* that
+  survivor - at any depth - against the area it actually inherited,
+  using the exact same `DirectionForRect()` rule fresh inserts already
+  use, via the same direction-toggle `Rotate()` uses. Ratios are never
+  touched, only direction, so a manually-resized pair keeps its
+  relative proportions, just applied to whichever axis now applies.
+  All 6 `WindowManager.cpp` call sites updated to the new overload.
+  Reproduced live under Xvfb exactly as reported - closing B in `A |
+  (B / (C|D))` - before and after: before, C and D stayed side by
+  side, each about half their column's width; after, they came out
+  stacked top/bottom, each spanning the column's full width, visually
+  confirmed via screenshot. 16 new checks in `tests/test_bsptree.cpp`
+  cover the exact reported scenario (including a direct side-by-side
+  comparison against the old overload, to confirm the fix - not
+  incidental test setup - is what changes the outcome), a manually-
+  resized ratio surviving the flip, a case where no flip is needed
+  (confirming nothing spurious happens), and a 6-window,
+  multiple-removal scenario asserting no leaf's aspect ratio ever
+  exceeds 3:1 at any depth.
+- **Focus could end up on a different window than whatever the mouse
+  was actually resting over**, whenever the mismatch was caused by a
+  transition where the pointer's own screen position never moved -
+  only the content under it did - so neither `HandleEnterNotify()` nor
+  `HandlePointerMotion()` ever had anything to react to and reconcile
+  the two. Investigated (and live-reproduced under Xvfb, moving the
+  pointer to a specific window first, then triggering the transition
+  without moving it again) five specific cases, per the original
+  report: opening a new window (checked, and deliberately left alone -
+  a fresh window grabbing focus regardless of pointer position is
+  itself the intended policy, not a bug); switching workspaces
+  (confirmed: switching away from and back to a workspace restored
+  whichever window was focused *before* leaving, discarding a pointer
+  move made in between - `SwitchWorkspaceOnMonitor()`); rearranging
+  via a Swap drag (confirmed: `EndSwapDrag()` never touched focus at
+  all, so whichever window held it before the drag simply kept it,
+  regardless of where the two swapped windows ended up); session
+  restore (confirmed: `AdoptExistingWindows()` re-manages each
+  surviving window in root's own child z-order, focusing each in turn
+  exactly like any freshly opened window, so whichever happened to be
+  *last* in that order - not the pointer, and not necessarily whatever
+  was focused before Kohiko last exited, which nothing records - is
+  what ends up focused); and switching monitors (not empirically
+  reproducible in this sandbox's single-output Xvfb, but confirmed by
+  code reading: `FocusMonitorCommand()` never moved the pointer, so
+  under focus-follows-mouse the very next incidental bit of mouse
+  motion on the monitor just switched *away* from would immediately
+  switch focus straight back, silently undoing the switch). Fixed with
+  a new `WindowManager::SyncFocusToPointer()`, called explicitly right
+  after each of the four confirmed transitions: queries the pointer's
+  real current position directly (`XConnection::QueryPointer()`, the
+  same reasoning already established for `Initialize()`'s and
+  `HandleMonitorTopologyChanged()`'s own pre-existing use of it, both
+  of which this also upgrades to reconcile *window* focus, not only
+  monitor focus, while it's there) and focuses whichever window is
+  actually there - floating over tiled, matching every other hit-test
+  in this file - under the exact same guards `HandleEnterNotify()`
+  itself already uses (`general.focus_follows_mouse`, and Launcher/
+  Notepad holding input focus for typing). The monitor-switch case
+  needed the opposite direction instead - moving the *pointer* to
+  match an explicit focus change, not focus to match the pointer,
+  since syncing focus to wherever the pointer already is would just
+  undo the very switch being made - so `FocusMonitorCommand()` now
+  warps the pointer (`XConnection::WarpPointer()`, new) to the center
+  of the newly-focused monitor instead, under the same
+  `focus_follows_mouse` guard. Re-verified all three empirically
+  testable cases live under Xvfb after the fix, each against an
+  explicit before/after or default-baseline comparison, not just "it
+  changed to *something*": workspace switch and session restore both
+  now correctly focus whichever window the still-stationary pointer
+  was actually resting over (session restore specifically checked
+  against a same-pointer-position default-adoption baseline first, to
+  rule out coincidence); the swap-drag case now correctly focuses
+  whichever of the two swapped windows the drop point actually landed
+  on. Also confirmed `general.focus_follows_mouse=false` correctly
+  suppresses every one of these (session restore checked directly:
+  focus stayed on the adoption-order default even with the pointer
+  resting over a different window).
+- **A Swap drag (rearranging tiled windows) could show a visible
+  rendering glitch during the slide-into-place animation** - a chunk
+  of one or both windows missing, cut off well short of where it
+  should reach, briefly exposing bare wallpaper that neither window
+  was actually covering yet. Root cause: the dragged window's
+  animation starts from `m_dragCurrentRect`, which tracks the cursor
+  at a fixed grab-offset for the whole drag - correct and expected
+  while actually dragging (a window carried this way can legitimately
+  extend partially off-screen if grabbed away from its own edge and
+  dragged far enough - harmless in the moment, since nothing renders
+  past the screen edge regardless), but wrong as an animation's
+  *starting* rect: the clipped, off-screen portion isn't "there" for
+  the tween to visibly grow out of, so its early frames render
+  noticeably smaller than they should, and since the swap target is
+  sliding in from the opposite direction at the same time, the two can
+  visibly fail to meet in the middle. Confirmed live under Xvfb before
+  writing any fix: a rapid burst of screenshots taken immediately after
+  a drop (this needed catching a ~160ms window, not something a single
+  screenshot after a `sleep` would ever show) caught it precisely -
+  precise pixel measurement of the captured frame confirmed the dragged
+  window's visible edge cut off well short of the screen edge, with a
+  gap of untouched wallpaper on the far side. Fixed by clamping
+  `fromRect` to the drop monitor's own work area
+  (`Rect::ClampedTo()`, pre-existing, already used elsewhere for
+  floating windows - this is its first use here) before either
+  animation starts, in both the successful-swap and the
+  no-valid-target snap-back branches of `EndSwapDrag()`, which share
+  the same underlying rect. Re-verified with the identical live
+  reproduction afterward: the dragged window's visible width now
+  matches its true width from the very first captured frame, with no
+  gap anywhere - confirmed by the same precise pixel measurement, not
+  just a visual glance. Also specifically re-checked the snap-back
+  case (drag far off-screen, release over no valid target) - clean
+  there too.
+- **A startup/autostart application opening while the screen was
+  locked could completely cover Kohiko's own LockScreen** - not
+  partially, not a corner peeking through, but the entire lock surface
+  (clock, username, password field, all of it) hidden behind an
+  ordinary application window, with nothing on screen indicating the
+  session was even locked anymore. Confirmed live under Xvfb before
+  writing any fix, and it was worse than the report alone suggested: a
+  single plain `xterm` opened after locking was enough to hide the
+  lock screen completely. Root cause: `LockScreen::Lock()` raises
+  itself once, at the moment the screen locks, but nothing ever raised
+  it again afterward - `RaiseModalWindows()`, called at the end of
+  every `Arrange()` (which `Manage()` itself calls before mapping any
+  newly-opened window, autostart included) specifically to give
+  something the "last word" on stacking order, only ever considered
+  Launcher and Notepad, never LockScreen. Real keystrokes were never
+  actually at risk either way - `Lock()`'s exclusive `XGrabKeyboard`/
+  `XGrabPointer` (see its own comment for why a cooperative focus
+  model isn't enough for a lock screen specifically) means input goes
+  to LockScreen regardless of what's stacked where - but a user who
+  can't *see* the password field they're typing into is exactly the
+  kind of broken this was supposed to prevent. Fixed by having
+  `RaiseModalWindows()` check `LockScreen::IsLocked()` first,
+  unconditionally, and return immediately if so - nothing else gets a
+  say in stacking order while locked, Launcher/Notepad included (never
+  reachable while locked in the first place given the exclusive grab,
+  but this is the belt to that braces). Re-verified with the identical
+  live reproduction afterward, plus the multi-application case the
+  original report specifically called for: three separate windows
+  opened one after another while locked, lock screen fully intact and
+  visible throughout every single one. Also verified end to end past
+  where the original report stopped: a real, PAM-authenticated unlock
+  correctly restores full normal desktop stacking and focus afterward
+  - the window that had been hidden underneath the whole time appeared
+  correctly tiled and focused the moment the screen unlocked.
+- **A Kohiko that crashed (or was killed) while the screen was locked
+  resumed into a completely unlocked desktop** on the automatic
+  restart `kohiko-session` performs - no lock screen, no password
+  prompt, nothing on screen to say a crash had even happened.
+  Discovered while verifying the LockScreen stacking fix just above,
+  investigating startup ordering more broadly rather than stopping
+  once that specific report was closed: confirmed directly by locking,
+  then `kill -9`-ing the running Kohiko process to simulate a crash,
+  and watching kohiko-session's own automatic restart come up fully
+  exposed - workspaces, bar, everything. Root cause: a restarted
+  Kohiko process has no memory of its own of what state the previous
+  one was in: `SessionStore` saves window/workspace layout but never
+  lock state, and `RecoveryMode`'s own existing crash marker (see its
+  header comment) is specifically scoped to startup - it's cleared the
+  moment a session reaches a stable running state, long before a much
+  later crash mid-session would ever happen. Fixed with a new,
+  narrowly-scoped `LockRecovery` class, deliberately the same shape as
+  `RecoveryMode` itself: a small marker file, written whenever
+  `LockScreen` locks (any trigger - keybind, `kohikoctl`, idle
+  suspend, `loginctl lock-session`) and removed whenever it unlocks
+  again normally, via the lock-state-changed callback `Initialize()`
+  already wires up for an unrelated purpose (relaying to logind). If
+  the marker is still there the next time Kohiko starts - the previous
+  process ended without ever reaching the "removed" half - Kohiko
+  locks again immediately, independent of the `lockscreen.after`
+  config setting entirely (this is a safety recovery, not a matter of
+  preference). Also cleared unconditionally on a clean
+  `WindowManager::Shutdown()`, so a deliberate logout while still
+  locked doesn't cause the next, entirely fresh login to come up
+  pre-locked for no reason - this is purely about surviving a crash,
+  not about remembering lock state across an intentional session end.
+  Re-verified live in both directions, not just the one the bug
+  report described: locking, then crashing, correctly resumes locked
+  (log confirms: "the screen was locked when the previous session
+  ended unexpectedly - locking again"); unlocking normally, then
+  crashing, correctly resumes unlocked, with no spurious re-lock. 5
+  new checks in `tests/test_lockrecovery.cpp`.
+- **Mouse-wheel scrolling in kohiko-audio's device list (and,
+  sharing the same `ScrollView`, kohiko-network's/kohiko-bluetooth's
+  lists) only worked over the sliver of "dead space" between rows -
+  hovering over a volume `Slider`, a "Mute"/"Unmute" `Button`, or a
+  device row itself and scrolling did nothing.** On a window short
+  enough for a device list to overflow (easy to hit well above the
+  documented ~420x360 floor with more than two or three devices
+  present), this made rows below the fold effectively unreachable:
+  input devices, "Advanced Settings", anything past whatever fit in
+  the visible area. Root cause, confirmed by instrumenting the actual
+  dispatch path in a live Xvfb session rather than assumed from
+  reading the code: `UiWindow::HandleEvent()`'s `Button4`/`Button5`
+  branch reused the same `HitTest()` ordinary clicks use, which -
+  correctly, for a click - always resolves to the *most specific*
+  `WantsInput()` widget under the pointer, and called `OnScroll()` on
+  that widget. Only `ScrollView` overrides `OnScroll()`; every other
+  widget (`Slider`, `Button`, `ListRow`, `TextField`) silently no-ops
+  it via the `Widget` base class default. Debug logging added
+  temporarily to both the dispatch site and `ScrollView::OnScroll()`
+  itself showed the real sequence directly: scrolling over a "Mute"
+  button produced a valid, non-null hit target and zero
+  `ScrollView::OnScroll()` calls; scrolling over genuine dead space
+  produced a null target (a *different*, previously-unnoticed gap -
+  see below) and also zero calls. Fixed with a second, purpose-built
+  traversal, `Widget::WantsScroll()` (default `false`, overridden
+  `true` only by `ScrollView`) and `UiWindow::HitTestForScroll()`,
+  which looks for the nearest enclosing widget with `WantsScroll()`
+  instead of the deepest `WantsInput()` one - so a wheel event finds
+  the scrollable container regardless of what's drawn on top of it at
+  that exact pixel. Both traversals are `static` (they never touched
+  `UiWindow`'s own state to begin with) and made public specifically
+  so they're callable from a test without a live X11 `Display`.
+  Separately, `ScrollView` had no visual indicator of any kind that
+  content overflowed - even with scrolling now working, a user had no
+  way to *discover* there was more below the fold except by trying it
+  blindly. Added a minimal overlay scrollbar thumb (`ScrollView::
+  ComputeThumbRect()` - pure geometry, factored out for the same
+  testability reason as the traversal above - drawn in `Draw()` only
+  when content actually overflows), sized proportionally to the
+  visible fraction and positioned by scroll offset, with no drag
+  interaction of its own (a cue, not a second scrolling mechanism to
+  keep in sync with `OnScroll()`'s own clamping). Live-verified in
+  Xvfb against a real `kohiko-audio` with actual PipeWire nodes (three
+  `Audio/Sink` + two `Audio/Source` virtual devices created via
+  `pw-loopback`, not the empty "no devices" state): before the fix,
+  eight scroll-wheel events over the "Mute" button at 420x500 produced
+  an unchanged screenshot; after, the same input scrolled the list
+  down far enough to reveal "USB Condenser Microphone" and "Advanced
+  Settings", scrolled back up cleanly, and ordinary clicks (confirmed
+  separately: "Mute" correctly flips to a red-toned "Unmute") were
+  unaffected, since the click path itself was never touched. 13 new
+  checks in `tests/test_scrollhittest.cpp`, covering the exact
+  Button-inside-ScrollView reproduction, the dead-space case, a point
+  genuinely outside the `ScrollView`, a `Button` with no enclosing
+  `ScrollView` at all, and the thumb geometry (no-thumb-when-it-fits,
+  top/bottom clamping, and the minimum-size floor for an extreme
+  content/viewport ratio).
+- **kohiko-network's "Connect" button prompted for a Wi-Fi password on
+  every single manual connect to a secured network, even when
+  NetworkManager already had a saved, working secret for it - the
+  prompt had to be clicked/typed through (even submitting it blank
+  happened to work, but only after going through it) every time,
+  while an autoconnect reconnection to the same network worked
+  silently in the background.** A prior report that the password
+  field itself was numeric-only was checked directly against the
+  restored source rather than assumed, and found false again, exactly
+  as an earlier phase's own investigation already concluded (see this
+  same version's "Investigated, not changed" section):
+  `PromptForPassword()`'s `KeyPress`
+  handling accepts any byte `XLookupString()` returns that isn't a C0
+  control character, confirmed both by reading the code and, this
+  time, by direct live input - typing `abCD123!@#` into a real modal
+  under Xvfb produced ten masked characters, not a truncated/rejected
+  result. The *actual* reported behavior traced to
+  `NetworkWindow.cpp`'s connect handler, not the field: it called
+  `PromptAndConnect()` for literally every access point with
+  `secured == true`, with nothing checking whether NetworkManager
+  could already supply a secret for that exact SSID. The backend half
+  of this - `ConnectToAccessPoint()` reusing an existing saved
+  connection's secret when given an empty password rather than
+  creating a duplicate - has worked correctly since 0.20.3's
+  `BytesToString()` fix; the UI simply never took advantage of it,
+  showing the prompt unconditionally regardless of whether anything
+  meaningful would happen with what the user typed into it. Fixed
+  with `NetworkManagerClient::HasUsableSavedSecret(ssid)`: finds a
+  saved `802-11-wireless` connection matching `ssid` the same way
+  `ConnectToAccessPoint()` already does, then calls the connection's
+  own `GetSecrets("802-11-wireless-security")` - a separate,
+  permission-gated D-Bus call NetworkManager deliberately excludes
+  from `GetSettings()` for the same reason a settings file wouldn't
+  normally embed its own passwords in plain sight - and returns
+  whether a non-empty `psk` actually came back. The connect handler
+  now only calls `PromptAndConnect()` when this returns false;
+  otherwise it takes the same direct-connect path an open network
+  already used. Separately, and part of the same "letters, digits,
+  symbols, **and pasted text**" requirement: the password modal had no
+  paste support of any kind - no `SelectionNotify` handling existed at
+  all. Added both conventional X11 paste gestures (Ctrl+V from
+  CLIPBOARD, middle-click from PRIMARY), sharing a
+  `FilterPastedPasswordText()` helper (pulled out as pure logic, not
+  inlined into the X11 handler, specifically so it's testable without
+  a live selection round trip) that strips C0 control characters and
+  DEL - a trailing newline, near-universal when copying from a
+  terminal or password manager, would otherwise become a literal
+  character in the password - while passing multi-byte UTF-8 through
+  untouched. Live-verified end to end against a purpose-built mock
+  NetworkManager D-Bus service (`tests/mock_networkmanager.py`, a real
+  `dbus-python`/GLib service on a private, throwaway system bus - not
+  a real NetworkManager or any real Wi-Fi hardware) with two saved
+  connections (one with a usable secret, one without) and four scanned
+  access points: connecting to the one with a saved secret produced no
+  second window at all and the call log showed `GetSecrets` -in
+  `ActivateConnection` directly; connecting to the one without a
+  usable secret produced a real second top-level window (found by
+  diffing the X11 window tree - the modal, it turns out, sets no
+  `_NET_WM_NAME`/`XStoreName` at all, so searching for it by name finds
+  nothing, a real if inconsequential gap noted below); typing directly
+  into that modal, pasting into it from a real `xclip`-owned CLIPBOARD
+  selection, and middle-clicking a real PRIMARY selection into it all
+  correctly appended masked characters matching the source text's
+  length. 8 new checks in `tests/test_networkwindow.cpp`
+  (`FilterPastedPasswordText()` - control characters, a trailing
+  `\r\n`, embedded tabs, UTF-8, DEL, empty input) and 7 new checks in
+  `tests/test_networkmanager_live.sh` (a genuine round trip through
+  the mock covering all four cases this fix needs to get right: an
+  existing usable secret skips the prompt and reuses without a
+  duplicate profile; a saved-but-unusable secret still prompts; a
+  freshly typed password is persisted via `Update()` on the *same*
+  connection rather than a new one; a genuinely new network still
+  correctly uses `AddAndActivateConnection()`), gracefully skipped if
+  `python3-dbus`/PyGObject aren't available rather than failing the
+  suite over missing optional infrastructure.
+- **Telegram, FeatherPad, Flameshot, and any other application
+  launched the same way could fail to open a usable window at all -
+  not a layout glitch, a completely invisible, unmanaged X11 window,
+  permanently.** Not assumed to be Telegram-specific, and it wasn't:
+  the actual mechanism, once found, applies identically to any
+  application, confirmed with a synthetic reproduction rather than
+  any specific real one (see the note at the end of this entry on
+  why). Root cause, traced through `WindowManager::Manage()` down to
+  `XConnection::IsXEmbedWindow()`: 0.20.2's fix for a real, separate
+  problem (a soon-to-be-docked system tray icon flashing into a full
+  tile for a few frames before `SystemTray::DockIcon()` reparents it
+  away) checked only whether a window carried the `_XEMBED_INFO`
+  property, and treated that as *permanent, unconditional* proof a
+  dock request was coming - if it never actually arrived, `Manage()`
+  had already returned early, before adding the window to the
+  repository or calling `MapWindow()`, and nothing else in the
+  codebase would ever revisit that decision. Confirmed directly: a
+  small, configurable, real X11 client
+  (`tests/live/x11_test_client.cpp`, built for this investigation, not
+  a mock of anything) creating an ordinary top-level window was
+  correctly tiled full-screen by a real `kohiko` WM under Xvfb; an
+  otherwise byte-for-byte identical window additionally carrying
+  `_XEMBED_INFO` stayed frozen at its original creation geometry,
+  invisible, indefinitely. Reading `SystemTray.cpp` confirmed the
+  *actual* trigger for real tray docking is a separate, asynchronous
+  `SYSTEM_TRAY_REQUEST_DOCK` `ClientMessage` sent to the
+  `_NET_SYSTEM_TRAY_S<screen>` selection owner - nothing to do with
+  the `MapRequest`/`Manage()` path at all - so the property's presence
+  was never actually proof a dock request would follow: `_XEMBED_INFO`
+  is a general-purpose X11 embedding protocol, not exclusive to system
+  trays, and even a genuine tray icon's dock message is a fundamentally
+  separate, asynchronous event that nothing guarantees will ever
+  arrive (no tray host, a slow/buggy client, a race). Fixed with a
+  bounded fallback rather than either extreme: `Manage()` still holds
+  off mapping a window carrying `_XEMBED_INFO` immediately (preserving
+  the original, legitimate no-flash behavior for the common, fast-dock
+  case - proven still necessary, not just assumed, per the "what
+  breaks" check below), but now records it with a 2-second deadline
+  (`m_pendingXEmbedWindows`, checked once per `Tick()` via the new
+  `CheckPendingXEmbedWindows()`); if a real dock request hasn't
+  claimed it by then, it falls back to managing the window normally
+  (`Manage(id, /*skipXEmbedCheck=*/true)`). The reverse race - a dock
+  request arriving *after* the timeout already tiled the window - is
+  also handled: `WindowManager::HandleClientMessage()` now unmanages a
+  window `SystemTray::HandleClientMessage()` (whose return type
+  changed from `void` to the docked window, or `0`/`None`) reports as
+  just-docked, if it finds that window already sitting in the
+  repository; `Unmanage()` only ever touches Kohiko's own bookkeeping,
+  never the window's actual X11 state, so calling it after
+  `DockIcon()` has already reparented the same window elsewhere is
+  safe. A new `SystemTray::IsDocked()` lets the timeout sweep
+  recognize a window that got claimed in the meantime, as a second,
+  redundant line of defense alongside the immediate cleanup in
+  `HandleClientMessage()`. Per this investigation's own explicit
+  instruction not to simply remove the original check without proving
+  what breaks: temporarily disabled it (`if (false && ...)`) and
+  re-ran the genuine-dock scenario with sequencing debug logs at both
+  `m_repository.Add()` and `DockIcon()` - confirmed directly, not
+  reasoned about, that the tray icon window really does get added to
+  the repository (tiled as an ordinary window) *before* `DockIcon()`
+  ever runs on it, exactly the cosmetic regression the original check
+  existed to prevent, and exactly why this fix keeps the fast path
+  rather than replacing it outright. Live-verified (real `kohiko`
+  under Xvfb, three real windows: an ordinary control, an
+  `_XEMBED_INFO` window that never receives a dock request, and a
+  genuine tray icon that sends a real `SYSTEM_TRAY_REQUEST_DOCK` via
+  `XSendEvent`): the control tiles immediately; the never-docked
+  window stays untouched for the first second, then is correctly
+  tiled once the timeout fires - no longer permanently invisible;
+  the genuine tray icon is correctly reparented into the tray
+  container, resized to fit (confirmed via `xwininfo -id`, parented
+  under the tray's own container window, `Map State: IsViewable`,
+  resized from its 24px request down to the tray's icon size), never
+  once observed at the root level at its raw creation size, and
+  *stays* correctly docked even after the same 2-second window
+  elapses - the fallback doesn't second-guess a dock that already
+  succeeded. One test-tooling bug turned up and was fixed along the
+  way, worth naming so it isn't mistaken for a Kohiko bug later: the
+  first version of `x11_test_client` closed itself on *any*
+  `ClientMessage`, not just a real `WM_DELETE_WINDOW` - which meant it
+  exited the instant `DockIcon()` correctly sent it a spec-compliant
+  `XEMBED_EMBEDDED_NOTIFY`, briefly looking like docking had crashed
+  the client rather than succeeded. 6 new checks in the live-session
+  `tests/test_xembed_dock_timeout.sh` (gracefully skipped if
+  Xvfb/xwininfo aren't available), covering exactly the scenarios
+  above against a real WM. On testing the specific named applications:
+  Telegram, FeatherPad, and Flameshot aren't available in this
+  environment (no network access to install them, and Telegram/
+  FeatherPad are heavy GUI binaries beyond what a minimal
+  reproduction needs) - instructed, at the top of this same
+  investigation, to look at the common mechanism first rather than
+  assume anything Telegram-specific, and that mechanism (a window
+  carrying `_XEMBED_INFO` with no dock request following it) is what
+  was actually reproduced and fixed, independent of which application
+  triggers it. Whether any of these three specifically hit this exact
+  path (rather than some other cause) is not something this
+  environment can confirm directly - flagged here rather than claimed.
+
+### Changed
+- **The bar no longer displays the focused window's title.** This was
+  a deliberate, working, intentional feature (`Bar::SetTitle()`/
+  `Redraw()` drawing `m_title`), not a bug - confirmed by direct
+  testing (mouse moved to multiple positions along the bar produced no
+  text tied to cursor position anywhere, ruling out genuine *hover*
+  text) and by reading the code, which shows it as a straightforward
+  status-bar display of `_NET_WM_NAME` for whichever window currently
+  holds real X input focus. Removed per explicit request, since it
+  read as unwanted "what's under the mouse" information rather than
+  the intended status display. The change is deliberately minimal and
+  reversible: `Bar::SetTitle()` and `m_title` are both left in place -
+  `WindowManager` still calls `SetTitle()` on every focus/title change
+  via `UpdateAllBars()`, it's just a harmless no-op as far as anything
+  visible goes now - so no call sites needed touching, and the display
+  can be wired back into `Redraw()` again in one line if this is ever
+  wanted back. `_NET_WM_NAME` itself is still read and still used
+  internally (`windowrule=title:` matching, and to know when a redraw
+  is worth triggering); only the on-screen display in the bar changed.
+
+### Added
+- `tests/test_eventloop.cpp` (9 checks, part of `make test`/`ctest`,
+  unconditional - no X11/D-Bus dependency): covers
+  `TickSchedule::PullForward()`/`IsDue()`/`TimeUntilDue()` directly
+  with synthetic, offset-based timestamps, in a fraction of a second.
+  It cannot exercise `EventLoop::Run()` itself (a real, blocking,
+  X11-connected loop), which is why the live-session churn test
+  described above, not this unit test alone, is what actually confirms
+  the fix end to end.
+- `tests/test_windowplacementnotice.cpp` (6 checks, unconditional): the
+  new `WindowPlacementNotice::BackgroundPlacementText()` is a small,
+  free, header-only function (`include/WindowPlacementNotice.h`) with
+  no `WindowManager`/X11 dependency, deliberately factored out the
+  same way `TickSchedule` was, purely so this is directly testable.
+  It covers the text formatting only, including the empty-`WM_CLASS`
+  fallback and a multi-word app name; it cannot exercise the actual
+  *decision* of when `Manage()` calls it, which is what the live
+  Xvfb reproduction described above under `### Fixed` confirms
+  instead.
+- 16 new checks in `tests/test_bsptree.cpp` (unconditional, no X11
+  dependency, pure tree/geometry logic) for the collapse-on-remove
+  direction fix above: the exact reported scenario end to end, a
+  direct comparison against the unmodified old `Remove(window)`
+  overload confirming the fix (not incidental test setup) is what
+  changes the outcome, a manually-resized ratio surviving the flip
+  onto the other axis, a case that needs no flip at all, and a
+  6-window/2-removal scenario asserting no leaf's aspect ratio exceeds
+  3:1 at any depth in the tree.
+- `tests/test_rect_clamping.cpp` (11 checks, unconditional, pure
+  struct/arithmetic logic - no dependency beyond `Types.h` itself):
+  the first dedicated test coverage for `Rect::ClampedTo()`, which
+  already existed and was already used elsewhere (floating windows)
+  but had none before - written primarily to lock in the exact
+  scenario behind the Swap-drag animation fix above (an off-screen
+  position whose size already fits gets repositioned, never resized),
+  plus the right/bottom-edge equivalent, a genuinely oversized rect
+  actually needing a resize, and `borderWidth` being accounted for.
+
+### Investigated, not changed
+- The login/autologin architecture (`AutologinConfigurator`,
+  `Authenticator`, `LockScreen`'s username handling) was checked
+  end to end against the intended flow - display-manager/autologin
+  starts Kohiko with no username prompt of its own, Kohiko's own
+  LockScreen gates access with a password only - and found already
+  correct, not requiring a code change. Confirmed by direct code
+  reading (`LockScreen` resolves its displayed username via
+  `getpwuid(getuid())` once at lock time, purely for display - never
+  an editable field anywhere; no second username prompt exists
+  anywhere in the codebase outside of `kohikoctl configure-autologin`
+  itself, which is a one-time *administrative* setup command run once
+  with `sudo` to tell the display manager which user to auto-login as,
+  not something an end user sees during ordinary day-to-day login, and
+  therefore not "the DM's user-selection functionality" being
+  replaced) and then verified live end to end via the actual entry
+  point a display manager invokes (`kohiko-session`, not a shortcut):
+  with `lockscreen.after=always` set, launching `kohiko-session`
+  showed the lock screen immediately, with "kohikouser" already
+  correctly filled in with no prompt of any kind, and a real,
+  PAM-authenticated password-only unlock completed the flow correctly.
+  See the LockRecovery fix above for what this same investigation did
+  turn up.
+- The bar's clock cannot itself "run fast" independent of the
+  system clock, and does not here: `Bar::Redraw()` calls
+  `std::time(nullptr)` fresh on every single redraw (`src/Bar.cpp`)
+  with no counter or incremental state anywhere in the display path -
+  read directly, then confirmed empirically, not just by inspection:
+  five screenshots of the running bar's clock taken at 5-second
+  intervals under a live Xvfb session matched `date -u`'s own output
+  exactly every time, with zero drift across the whole 20-second
+  window. A report that the displayed clock runs fast almost always
+  means the underlying *system* clock is the thing drifting - a
+  common symptom in virtualized/sandboxed environments specifically,
+  where the guest's timekeeping can lag or run ahead of real time
+  under CPU contention - which is outside anything a window manager
+  reads or controls; Kohiko only ever displays whatever the OS clock
+  currently says. The standard fix lives at the OS level: confirming
+  a time-sync service (`systemd-timesyncd`, `chrony`, or `ntpd`) is
+  installed, enabled, and actually synchronized - `timedatectl status`
+  on any systemd-based system shows this directly (`System clock
+  synchronized: yes/no`). No Kohiko code change would address this
+  even if made, since the reported symptom sits entirely upstream of
+  anything Kohiko reads.
+- A document accompanying this release's original request described
+  investigating a "Telegram Desktop regression between Kohiko 0.20.1
+  and 0.20.3" starting from `git diff <0.20.1> <0.20.3>`. Checked
+  directly: this project has never been a git repository at any point
+  across its whole history (`git status`/`git log --all`/a full-
+  filesystem `find -iname .git` all confirm this, independently,
+  multiple times), so that specific investigation step could never
+  have been carried out on this project as described. The user
+  subsequently clarified they meant changes made on their own end, not
+  by a prior session. Whether 0.20.2's `IsXEmbedWindow()` early-return
+  in `WindowManager::Manage()` could plausibly affect a real
+  application that also uses XEmbed for its own purposes (e.g. Qt's
+  system-tray-icon implementation, which Telegram Desktop does use) is
+  a genuine, still-open question, not confirmed true or false - it
+  needs real evidence (`xprop`/debug output from an affected machine)
+  to investigate further, which wasn't available this release.
+- A separate claim that a prior Kohiko session had added
+  double-buffering to `Bar.cpp`/`Bar.h` that "removed visible flicker"
+  but "did not preserve correct redraw behavior" was also checked
+  directly: `Bar`'s existing backing-`Pixmap` double-buffering
+  predates this project's entire multi-session engagement (present
+  in the original 0.20.0 archive, before any work described in this
+  changelog's history began) - no session recorded here ever touched
+  `Bar.cpp`/`Bar.h` before the real fix described above under
+  `### Fixed`. The actual, real, current redraw behavior of
+  `Bar`/`EventLoop` was investigated on its own merits regardless,
+  independent of this disputed premise, and is what turned up the
+  genuine tick-scheduling bug above.
+- A claim that the Wi-Fi password field in `NetworkWindow.cpp`
+  "accepts only numeric input" was checked directly against
+  `PromptForPassword()`, which uses `XLookupString()` and already
+  accepts any printable character (any byte `>= 0x20`). A
+  codebase-wide search found the only numeric-only input validation
+  anywhere is in `SettingsWindow.cpp`, for an unrelated window-rule
+  workspace-number field. No fix was needed or made for this specific
+  claim.
+- Of the five focus/mouse consistency cases investigated above, one -
+  a newly opened window grabbing focus regardless of where the pointer
+  happens to be resting - was deliberately left as-is after checking
+  it live: this is itself the intended, ordinary policy (matching
+  essentially every tiling WM's own convention, Kohiko's own included),
+  confirmed by moving the pointer over an existing window first and
+  then opening a second one elsewhere - the new window correctly took
+  focus, with internal state and real X11 input focus agreeing the
+  whole time. Forcing focus back onto whatever the pointer happens to
+  be resting on instead would have been the actual regression here,
+  not a fix.
+- A first look at `kohiko-audio` at an enlarged (1600x950) window
+  size, by eye, suggested the content column had drifted off-center -
+  a visibly larger gap on the right than the left. Measured precisely
+  instead of going on that impression (`PIL`, scanning for the
+  leftmost/rightmost non-background pixel on several content rows):
+  the actual margins were 350px and 351px - centered, matching
+  `AudioWindow.h`'s documented "content width is capped and centered
+  past ~900-960px" design. No fix was needed or made; the discrepancy
+  was in the eyeballed read, not the layout.
+- Long device/network names (`AudioWindow`'s device rows, and by the
+  same shared `DrawTextClipped()` primitive, `NetworkWindow`'s/
+  `BluetoothWindow`'s own lists) are hard-clipped at the row's right
+  edge with no ellipsis, cutting off mid-word at narrow widths (e.g.
+  "Kohiko USB Gaming Headset with a Genuinely Long Product Name"
+  becomes "...with a Genui" at 420px). Confirmed live, not fixed:
+  `UiWindow::DrawTextClipped()` has no truncation-with-ellipsis logic
+  at all - it draws the full string and relies entirely on the X11
+  clip region to cut it off. This is a real, pre-existing gap, but in
+  a primitive shared across every widget in every one of kohiko-audio/
+  network/bluetooth/settings, not something specific to audio's own
+  layout - fixing it well (ellipsis truncation against actual text
+  metrics) belongs as its own change against `UiWindow`/`Font`, not
+  folded into an audio-scoped responsiveness pass. Left as a known,
+  documented gap for now rather than expanding this task's blast
+  radius into a shared rendering primitive.
+- kohiko-network's Wi-Fi password modal (`PromptForPassword()`)
+  creates its window with `XCreateWindow()` but never calls
+  `XStoreName()`/sets `_NET_WM_NAME` - the "Password for ..." text
+  visible in the dialog is only ever drawn as canvas content, not set
+  as the window's actual X11 name. Noticed only because it broke the
+  first attempt at finding the window for live testing (`xdotool
+  search --name "Password for"` found nothing even though the modal
+  was genuinely open and working - diffing the full window tree by
+  geometry instead confirmed it was there). Left alone: the window
+  grabs the keyboard and pointer for as long as it's open, so there's
+  nothing to alt-tab to or list in a taskbar regardless of what name
+  it has, and giving it one is a cosmetic change unrelated to either
+  half of this task (layout or credential handling).
+- **kohiko-bluetooth's GUI responsiveness, unlike Audio's and
+  Network's own turns, checked out clean with no bug to fix.** Live
+  Xvfb testing against a purpose-built mock BlueZ D-Bus service
+  (`tests/mock_bluez.py` - the same `dbus-python`/GLib approach as
+  `mock_networkmanager.py`, one adapter and five devices spanning
+  connected/paired-but-out-of-range/freshly-discovered, one with a
+  deliberately long advertised name) at five window sizes (420x600
+  narrow, 680x700 - between the toolbar-wrap and list/details-split
+  breakpoints, 1500x900 enlarged, 500x950 tall-narrow, 820x380 short
+  enough to overflow) found no overlapping widgets, no clipping, and
+  no unexplained empty space at any of them - the toolbar wraps its
+  Discoverable toggle and Scan button cleanly below 640px, the device
+  list/details panel stacks below 720px, content caps and centers
+  past 960px, and (confirmed directly, not assumed from the shared
+  code) this same version's scroll-routing fix already applies here
+  too: scrolling with the pointer directly over the "Disconnect"
+  button in a short window moved the whole list rather than doing
+  nothing. The Advanced Settings/Trusted-devices page was checked
+  too, at both a normal and a narrow width, with the same result.
+  One real, if currently harmless, thing did turn up along the way:
+  `AppendDeviceSection()` had to know the details panel's height
+  *before* `BuildDetailsPanel()` builds it (to size the card's own
+  bounds up front), which meant two independently-maintained copies
+  of the same "18 + 40 + 18 + 3\*30 + 10 + buttonsHeight + 18"
+  arithmetic - one in each function, currently in agreement but with
+  nothing stopping a future edit to one from silently not being made
+  to the other, which is exactly the shape a real clipping/excess-
+  space bug in this exact spot would take. Not a bug today, so not
+  written up as a fix - but replaced both copies with a single
+  `BluetoothWindow::ComputeDetailsPanelHeight()` both call, a
+  behavior-preserving change confirmed via pixel diff (`PIL.
+  ImageChops.difference`, empty bounding box) against a live
+  screenshot taken before the change. 12 new checks in
+  `tests/test_bluetoothwindow.cpp`, for all three paired/connected
+  button-count states: not a fresh re-derivation of the same formula,
+  but construction of the *actual* widget tree `BuildDetailsPanel()`
+  produces, checked against `ComputeDetailsPanelHeight()`'s own
+  output for both failure modes this task cares about - nothing
+  extends past the computed height (clipping), and nothing falls
+  meaningfully short of it either (excess unused space).
+
 ## Version 0.20.3
 
 Release date: 2026-08-16

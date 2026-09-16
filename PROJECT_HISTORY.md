@@ -1,7 +1,7 @@
 # Kohiko Project History
 
 This document traces the evolution of Kohiko, a C++20 / X11 tiling window
-manager, across its released versions from 0.1.0 through 0.20.3. It is
+manager, across its released versions from 0.1.0 through 0.20.4. It is
 derived from a direct comparison of the source, configuration, and
 documentation of each released version against the one before it.
 
@@ -874,6 +874,331 @@ number or patch to point to.
 
 --------------------------------------------------------------------------
 
+## Phase 16 — An Absolute-Deadline Fix for a Starved Clock, and Two False Premises Declined (0.20.4)
+
+**Versions:** 0.20.4
+
+**Goals:**
+Diagnose a live report that the taskbar/clock could go stale until
+some unrelated event forced a repaint, from a real screenshot and a
+`startx`-launched-session detail, while separately evaluating two
+other claims presented alongside the original request against the
+actual repository before acting on either of them.
+
+**Major developments:**
+- Both accompanying premises were checked directly against the
+  repository and found not to hold, before any related code was
+  touched: this project has never been a git repository at any point
+  in its recorded history, so a `git diff`-based investigation method
+  proposed for a suspected Telegram Desktop regression could not have
+  been carried out as described; and `Bar.cpp`/`Bar.h`'s existing
+  backing-`Pixmap` double-buffering predates this project's entire
+  multi-session engagement (present already in the original 0.20.0
+  archive), so no session recorded here ever touched those files
+  before this phase's own fix below. Both findings were reported
+  plainly rather than acted on or silently set aside, and the
+  underlying concern - the taskbar genuinely misbehaving - was
+  investigated on its own merits regardless of the disputed backstory.
+- That investigation found a real, previously-unknown bug:
+  `EventLoop::Run()`'s `select()` timeout was reset to a fresh
+  interval on every loop iteration regardless of what triggered it, so
+  `WindowManager::Tick()` - the only thing driving every bar's
+  periodic redraw, the clock chief among what it drives - only ever
+  ran when a full second passed with zero file descriptor activity of
+  any kind. Ordinary background D-Bus traffic (in particular
+  `ScreenSaverInhibitor`'s deliberately bus-wide `NameOwnerChanged`
+  subscription, needed so it can clean up after a crashed inhibitor
+  automatically) could starve it indefinitely on a real desktop
+  session, while every genuine X11 event kept being serviced
+  completely normally in the meantime - matching the reported shape
+  exactly: workspace and focus changes redrew instantly, since neither
+  depends on `Tick()`, but the clock specifically could freeze for a
+  long time. Directly demonstrated with a live session under synthetic
+  D-Bus churn, not just reasoned about from reading the code: 70+ real
+  seconds of continuous churn against the pre-fix code left the clock
+  showing the exact same frozen time throughout; the identical test
+  against the fix showed the clock advancing correctly by the full
+  real elapsed time.
+- Fixed by tracking an absolute deadline for the next tick instead of
+  resetting a relative timeout every iteration, with the pure
+  scheduling logic factored into small, header-only, unit-tested
+  functions (`TickSchedule::PullForward()`/`IsDue()`/`TimeUntilDue()`
+  in `EventLoop.h`) specifically so the fix's core correctness
+  property - other fd activity can delay a due tick by however long it
+  takes to service it, but can never postpone it indefinitely - is
+  checked independently of a real, blocking, X11-connected event loop.
+- Separately, per explicit request, the bar stopped displaying the
+  focused window's title. Confirmed first, via direct testing (moving
+  the mouse to several positions along the bar produced no text tied
+  to cursor position anywhere), that this was an intentional existing
+  feature rather than genuine hover text - then removed it in a
+  deliberately minimal, reversible way: `Bar::SetTitle()` and
+  `m_title` are both left in place, `Redraw()` simply no longer draws
+  either.
+- The proposed git-diff-based Telegram Desktop investigation method
+  itself was never viable (see above), but the underlying "Telegram
+  and several other applications look like they fail to open" concern
+  was picked back up later the same phase, once the user clarified it
+  wasn't about tray icons/XEmbed at all but full application windows -
+  ruling out the earlier `IsXEmbedWindow()` hypothesis outright, since
+  that early-return only ever applies to a window carrying
+  `_XEMBED_INFO`, not an application's actual main window. Investigated
+  from `Manage()`'s own logic outward rather than from Telegram
+  inward, and found a real, reproducible mechanism: a plain top-level
+  window landing on a workspace nothing is currently displaying (via
+  `workspace<N>=` autostart, `windowrule=workspace:N`, or a learned
+  adaptive-placement habit) stays unmapped and unfocused - correct,
+  deliberate, documented behaviour - but with no on-screen signal
+  that it happened at all, unlike a transient/dialog, which always
+  gets pulled into view. Confirmed directly against the shipped
+  `config/default.conf` itself, not a contrived case: it already
+  autostarts multiple applications via one shared `workspace2=discord
+  Telegram` line, onto a workspace not visible at session start - the
+  exact "several different applications, all launching the same way"
+  shape originally reported. Reproduced live under Xvfb (a third
+  application added to that identical line came up alive per `ps` but
+  entirely absent from the visible workspace's screenshot, then
+  present and normal on switching to workspace 2) and fixed with a bar
+  notification reusing the existing `ShowNotificationOnMonitor()`
+  mechanism, re-verified against the same live reproduction afterward.
+- A separate, new report the same phase - "the clock is running fast"
+  - was investigated and found not to be a Kohiko defect at all:
+  `Bar::Redraw()` reads `std::time(nullptr)` fresh on every redraw,
+  with no counter or accumulated state anywhere in the path, so the
+  displayed value cannot itself drift from whatever the OS clock
+  currently reports - confirmed both by reading the code and
+  empirically, five live screenshots at 5-second intervals matching
+  `date -u` exactly throughout. A "clock runs fast" report almost
+  always points at the underlying *system* clock (common in
+  virtualized/sandboxed environments under CPU contention), which sits
+  entirely outside anything a window manager reads or controls -
+  documented as such, with the actual OS-level check (`timedatectl
+  status`) pointed to, rather than inventing a Kohiko-side change that
+  couldn't address a cause it has no access to.
+- A third report the same phase, this time accompanied by a concrete
+  screenshot rather than only a description: a BSP layout with two
+  windows sharing a short, wide slot under a third stayed side by
+  side - now visibly, unnaturally narrow - once closing that third
+  window promoted the pair into a much taller freed column.
+  Investigated the *insertion* algorithm first, deliberately, before
+  assuming that's where the fix belonged: six windows opened one after
+  another, live under Xvfb, in both the natural most-recently-focused
+  pattern and forcibly re-anchored to one fixed window each time,
+  produced sensible, non-degenerate proportions throughout -
+  `BSPTree`'s existing insert-time direction heuristic was already
+  sound. The actual defect was narrower and specific to
+  `BSPTree::Remove()`'s collapse step: promoting a survivor straight
+  into its freed slot is exactly right when that survivor is a single
+  leaf (both existing Collapse-on-remove tests cover this and still
+  pass unmodified), but when the survivor is itself a further-split
+  pair, its own internal direction was left completely untouched, even
+  though the area it now occupies can be a very different shape than
+  whatever it was originally tuned for. Fixed with a new
+  placement-aware `Remove()` overload that recursively re-derives
+  direction within a promoted subtree, at any depth, against the area
+  it actually inherits - reusing the same heuristic fresh inserts
+  already use, and the same direction-toggle `Rotate()` already uses -
+  while leaving ratios untouched. Reproduced the user's exact reported
+  scenario live under Xvfb both before and after the fix (before:
+  narrow side-by-side strips; after: stacked, full-width panes,
+  confirmed by screenshot), and added 16 new checks covering the exact
+  scenario, a direct comparison against the unchanged old overload
+  (confirming the fix itself, not incidental test setup, is what
+  changes the outcome), ratio preservation across the flip, a
+  no-flip-needed case, and a 6-window/2-removal scenario asserting no
+  leaf's aspect ratio exceeds 3:1 at any depth.
+- A fourth report the same phase, framed broadly ("focus and the mouse
+  cursor get out of sync") but with five specific cases named to check:
+  opening a new window, switching workspaces, switching monitors,
+  rearranging windows, and restoring a session. Investigated each on
+  its own, live under Xvfb wherever that was possible, rather than
+  assuming all five shared one cause or all five were even genuinely
+  broken. One (a new window grabbing focus regardless of pointer
+  position) turned out to already be correct, intended policy -
+  confirmed directly, not assumed - and was deliberately left alone.
+  Three reproduced cleanly: switching workspaces away from and back to
+  one without moving the pointer restored whichever window had been
+  focused *before* leaving rather than whatever the still-stationary
+  pointer was now resting over; a Swap drag left focus on whichever
+  window held it before the drag started, regardless of where the two
+  swapped windows ended up (`EndSwapDrag()` never touched focus at
+  all); and restoring a session after a restart focused whichever
+  survived window happened to be last in the root's own child z-order,
+  matching neither the pointer nor any saved "was this focused" state
+  (nothing records one). The fifth - switching monitors - couldn't be
+  reproduced empirically in this sandbox's single-output Xvfb, but code
+  reading surfaced something more specific than the other four: since
+  Kohiko never warps the pointer, an explicit monitor switch under
+  focus-follows-mouse would get silently undone by the very next
+  incidental mouse movement on the monitor just switched away from.
+  Fixed the first four with one new `WindowManager::SyncFocusToPointer()`,
+  called explicitly right after each transition, reusing
+  `HandleEnterNotify()`'s own existing guards; fixed the fifth in the
+  opposite direction - moving the *pointer* to match an explicit focus
+  change via a new `XConnection::WarpPointer()`, rather than moving
+  focus to match the pointer, since the latter would have just undone
+  the switch. Re-verified all three empirically reproducible fixes live
+  afterward, each against an explicit baseline rather than merely "it
+  changed to something" - the session-restore check in particular first
+  established what the pointer-*less* default outcome was, then showed
+  the pointer-aware result differed from it with the identical pointer
+  position, to rule out coincidence.
+- A fifth report the same phase: a visible rendering glitch during a
+  Swap drag's slide-into-place animation, described as a stale-image
+  trail. Ordinary floating-window dragging was ruled out first, tested
+  directly and thoroughly - both a slow and a rapid many-step drag,
+  against both a solid colour and the actual varied wallpaper image
+  specifically so any staleness would be impossible to miss visually -
+  and came back completely clean every time, which redirected the
+  investigation toward the one thing structurally different about a
+  Swap: the ~160ms eased slide `Animator` plays after a drop, rather
+  than the window just snapping straight to its new tile. Confirmed
+  live rather than assumed: catching a 160ms transition needed a rapid
+  burst of screenshots fired immediately after the drop rather than a
+  single capture after a `sleep` (which would only ever show the
+  already-settled end state) - the very first capture in that burst
+  caught it, and precise pixel measurement (not just a visual glance)
+  confirmed the dragged window's edge was cut off well short of the
+  screen edge, with a gap of bare wallpaper neither window was
+  covering yet. Root cause: the dragged window's animation starts from
+  wherever it visually was under the cursor at the moment of the drop
+  - correct and, once traced through, deliberately chosen so the
+  transition reads as "it settles where you dropped it" rather than
+  teleporting back to its old tile first - but that rect is tracked at
+  a fixed grab-offset from the cursor for the whole drag, so it can
+  legitimately extend off-screen if grabbed away from its own edge and
+  dragged far enough, which is harmless while actually dragging
+  (nothing renders past the screen edge regardless) but wrong as an
+  animation's own starting point. Fixed with `Rect::ClampedTo()` -
+  pre-existing logic, already used elsewhere for floating windows, but
+  never covered by a test of its own until this same fix added one -
+  applied to that rect before either animation starts, in both of
+  `EndSwapDrag()`'s branches (a successful swap, and the no-target
+  snap-back) since both draw from the same rect. Re-verified with the
+  identical rapid-burst-of-screenshots reproduction afterward, and the
+  snap-back branch specifically re-checked too, not just the swap case
+  the original report described.
+- A sixth report the same phase: startup applications visually
+  covering Kohiko's own lock screen. Confirmed live under Xvfb before
+  writing any fix, and worse than the report implied - a single plain
+  `xterm` opened after locking hid the entire lock surface, not just
+  part of it, with nothing left on screen to show the session was even
+  still locked. Root cause, found by reading `RaiseModalWindows()`
+  (called at the end of every `Arrange()`, itself called by `Manage()`
+  before mapping any newly-opened window, autostart included, "to give
+  something the last word on stacking order" per its own existing
+  comment): it only ever considered Launcher and Notepad, never
+  LockScreen, which only ever raised itself once, at the moment of
+  locking. Keystroke safety itself was never actually at risk either
+  way - `LockScreen::Lock()`'s exclusive `XGrabKeyboard`/`XGrabPointer`
+  routes input to it regardless of what's stacked where, a deliberately
+  stronger guarantee than the cooperative stacking+focus model
+  Launcher/Notepad get away with (see that class's own header comment)
+  - but a lock screen a user can't *see* is a real problem independent
+  of that. Fixed by having `RaiseModalWindows()` check
+  `LockScreen::IsLocked()` first and unconditionally win if so. Verified
+  beyond the original report's own scope: re-ran the identical live
+  reproduction, then specifically tested the multi-application case the
+  report called for (three windows opened one after another while
+  locked, lock screen intact throughout all three), and finally tested
+  past locking entirely - a real, PAM-authenticated unlock (which
+  needed correcting this sandbox's own PAM stack for Ubuntu, a
+  pre-documented distro difference in `pam/kohiko` itself, not a Kohiko
+  defect) correctly restored full normal stacking and focus, the
+  window that had been hidden underneath the whole time appearing
+  properly tiled and focused the instant the screen unlocked.
+- A seventh item the same phase, framed as verification rather than a
+  known bug: the login/autologin architecture, checked end to end
+  against its intended shape (display-manager/autologin starts Kohiko
+  with no username prompt of its own; Kohiko's own LockScreen gates
+  access with a password only) and found already correct - confirmed
+  by code reading (no second username prompt anywhere; the one place a
+  username gets typed, `kohikoctl configure-autologin`, is a one-time
+  administrative command run once with `sudo`, not something an end
+  user sees during ordinary login) and then by live end-to-end testing
+  through the actual entry point a display manager would invoke
+  (`kohiko-session`, not a shortcut), including a real,
+  PAM-authenticated unlock completing the flow. That same live testing
+  - specifically, testing past where the architecture check alone
+  would have stopped - surfaced a real, separate, security-relevant
+  bug that had nothing to do with usernames at all: a Kohiko that
+  crashed while locked resumed, on `kohiko-session`'s own automatic
+  restart, into a completely exposed desktop, confirmed by directly
+  locking, then `kill -9`-ing the running process to simulate a crash.
+  Root cause: nothing about a restarted process remembers what state
+  the previous one was in - `SessionStore` never saved lock state, and
+  `RecoveryMode`'s own existing crash marker is deliberately scoped to
+  startup alone, cleared long before a much later crash mid-session
+  would happen. Fixed with a new `LockRecovery` class, the same shape
+  as `RecoveryMode` itself: a marker written on lock and removed on a
+  normal unlock (via the lock-state-changed callback `Initialize()`
+  already had wired up for an unrelated purpose), checked once at
+  startup to decide whether to lock again immediately - independent of
+  `lockscreen.after` entirely, since this is safety recovery rather
+  than a preference. Verified live in both directions specifically so
+  the fix couldn't be mistaken for a blanket "always relock on any
+  crash" over-correction: crashing while locked resumes locked (the
+  log confirms it explicitly); crashing while unlocked resumes
+  unlocked, with nothing spurious.
+
+**Lessons visible from the repository:**
+This phase is as much about what wasn't changed as what was. Two
+specific, plausible-sounding premises accompanying the original
+request - a git-diff-based investigation method, and a "some earlier
+session already touched `Bar.cpp` for this" backstory - both failed
+direct inspection against the actual repository, and the response
+demonstrated here was neither blind compliance nor blanket dismissal:
+check the claim against the code, report the discrepancy plainly, and
+keep investigating the underlying concern - which was genuine - on its
+own merits. That discipline is arguably what surfaced the real bug:
+had the "some previous fix broke this" framing been accepted
+uncritically, the actual cause - a starvation bug with no prior fix to
+have broken anything - would likely have gone unfound entirely. The
+empirical churn test is worth calling out on its own too: reasoning
+about the bug from reading `EventLoop.cpp` alone would have been
+plausible but unconfirmed; actually reproducing the freeze under
+synthetic load, then confirming its absence under identical load after
+the fix, is what turned a plausible theory into a verified one -
+consistent with this project's established pattern (0.20.1's tray
+icons, 0.20.2's `BadPixmap`/heap-corruption reproduction, 0.20.3's
+`BytesToString()` before/after test) of trusting direct execution over
+code review alone wherever a real environment makes that possible. The
+same discipline cut two directions on the two reports investigated
+later in the phase: it led *toward* a real code change for the
+"applications won't open" report (once the original XEmbed hypothesis
+was ruled out by the user's own clarification, following the evidence
+to a different, genuine mechanism instead of forcing the original
+theory to fit), and *away* from one for the "clock runs fast" report,
+where the same live-verification standard applied honestly pointed
+outside the codebase entirely. Treating "investigate thoroughly" and
+"a code change is the correct outcome" as two separate questions,
+rather than assuming the second follows automatically from the first,
+is what made both calls right instead of just one of them. The BSP
+layout report that followed adds a third variant of the same
+discipline: not "does this need a fix" (a screenshot already settled
+that) but "where, specifically" - checking the *insertion* algorithm
+first against six windows opened live under Xvfb before touching any
+code, finding it already sound, and only then locating the actual
+defect one layer over, in collapse. A less targeted response might
+have taken "the BSP layout has a narrowness problem" as licence to
+rewrite the insertion heuristic too, on the reasonable-sounding theory
+that a "real redesign" ought to touch the whole algorithm - which
+would have risked the two already-passing Collapse-on-remove tests and
+the six-window live reproduction's own good behaviour for no actual
+benefit, since neither was where the reported problem came from. The
+focus/mouse report that followed splits five named cases three ways
+rather than two: one investigated and found already correct, three
+investigated and confirmed broken (fixed with the same mechanism
+applied uniformly), and one confirmed broken by reasoning rather than
+live reproduction, fixed with the *opposite* mechanism once it became
+clear "make focus match the pointer" was actually the wrong direction
+for that specific case - a good reminder that a single fix pattern
+found to work for most of a family of related reports isn't
+guaranteed to be right for all of them, and checking that at each
+individual case matters more than the convenience of one uniform rule.
+
+--------------------------------------------------------------------------
+
 ## Current Direction
 
 As of 0.20.0, Kohiko adds persistence, recovery, and desktop-session
@@ -939,6 +1264,196 @@ this project's own "Extension points" section in
 `docs/ARCHITECTURE.md` is deliberately source-level, not dynamically
 loaded - worth revisiting only if a concrete need for genuine runtime
 plugin loading materializes, not preemptively.
+
+0.20.4 (Phase 16) fixed a defect in the same family as the last three
+phases' - a real bug (`Tick()`'s scheduling starving under ordinary
+background D-Bus traffic) that had gone unnoticed because nothing had
+exercised the event loop under realistic load before, only in a
+comparatively quiet sandbox - while also, twice in the same phase,
+declining to act on a plausible-sounding premise that didn't survive
+checking against the actual repository. Several items remain open
+after this phase, carried forward rather than resolved: the
+git-diff-based Telegram Desktop investigation was never actually
+carried out (the git-repository premise it was framed around doesn't
+hold, but the underlying question - whether 0.20.2's XEmbed
+early-return interacts with Qt's own system-tray-icon usage - is
+still real and still needs actual evidence from an affected machine,
+not further reasoning from this repository alone); `Launcher.cpp`'s
+own, separate Imlib2 usage for app icons (`DrawIcon()`, not routed
+through the `UiIconCache`/`SvgRenderer` path 0.20.2 fixed) remains an
+open question first raised in Phase 14 and still not investigated;
+and 0.20.3's incomplete mocked-D-Bus-service integration test for
+`NetworkManagerClient`'s full `Update()`+`ActivateConnection()` round
+trip is still just started, not finished. None of these three are
+new to this phase - they're listed here specifically so they don't
+quietly drop out of view the way an unrepeated to-do item can.
+
+Two more open items from later in the same phase, for the same
+reason. First, the monitor-switch half of the focus/mouse consistency
+fix (`FocusMonitorCommand()` warping the pointer onto the
+newly-focused monitor under `general.focus_follows_mouse`) is verified
+by code reading and by the fact that it builds and the rest of the
+suite still passes, not by actually watching it happen - this
+sandbox's Xvfb only ever exposes a single RandR output, so a genuine
+two-monitor `focusmonitor left`/`right` switch has never actually been
+run. The other four focus/mouse cases (and the BSP collapse fix
+before them) were all confirmed by watching them happen, with an
+explicit before/after or baseline comparison each time; this one
+wasn't, purely on account of the environment, and is worth an explicit
+live check the next time a real or better-emulated multi-monitor
+session is available, rather than resting on reasoning alone
+indefinitely. Second, the placement-aware `BSPTree::Remove()` overload
+only re-derives direction *within* the promoted subtree, deliberately
+never touching the grandparent split it gets promoted into (preserving
+the existing "everything above the grandparent is left completely
+untouched" guarantee the two original Collapse-on-remove tests already
+lock in) - whether a grandparent's *own* direction could, in some
+tree shape not yet hit in practice, also end up poorly suited to
+what's now on either side of it after a promotion is a real, if
+narrower, question the same fix deliberately didn't attempt to answer.
+
+Continuing the same phase into the next round of reported work, the
+first item handed over was framed as "Task 1: BSP rewrite" - and
+turned out to be a third instance of the pattern the two items above
+already established, checked the same way before any code was
+touched: `CHANGELOG.md`'s own 0.20.4 entry already describes the
+narrow-strip collapse defect as fixed, with a targeted `Remove()`
+overload rather than a rewrite, and 82/82 checks in `test_bsptree`
+(rebuilt and run directly from the restored source, not assumed from
+the changelog's own claim) confirmed that's still true in this exact
+checkpoint. A "rewrite" would have put 16 checks specifically written
+to lock in that fix at risk for a problem that no longer exists;
+asked directly rather than guessed at, the answer was to skip it and
+move on to the next item, which is what happened.
+
+That next item - kohiko-audio's GUI responsiveness - is where testing
+several real window sizes, as asked for rather than skipped, actually
+earned its keep: the layout/reflow work itself (from 0.19.1/0.20.0)
+held up cleanly at every size tried, no overlap or clipping anywhere,
+but scrolling a device list short enough to overflow turned out to be
+close to unusable, for a reason the original report never
+mentioned and that only showed up by actually resizing a live window
+with real PipeWire nodes behind it rather than the empty "no devices"
+state. See the CHANGELOG entry for the full root-cause chain (debug
+instrumentation added temporarily to confirm it, not just reasoned
+about from reading `HitTest()`) and the fix. Two things about it are
+worth carrying forward rather than letting drop. First, `ScrollView`
+is shared by kohiko-network's and kohiko-bluetooth's own lists, so
+this same fix already applies to both the next time either is built -
+confirmed only as far as a clean launch under Xvfb with no crash after
+the change, not with the kind of dedicated resize/scroll testing
+Tasks 7/8 still owe each app individually with its own real backend
+data (mocked NetworkManager, mocked BlueZ). Second, a real but
+separate gap turned up in the same investigation and was deliberately
+left alone rather than folded in: long device/network names are
+hard-clipped with no ellipsis, but the primitive responsible
+(`UiWindow::DrawTextClipped()`) is shared across every widget in every
+one of these apps, not something specific to audio's own layout -
+fixing it properly belongs as its own change, not scope creep into a
+task framed around resizing.
+
+kohiko-network's own turn - GUI responsiveness plus the actual Wi-Fi
+credential behaviour - repeated the "numeric-only password field"
+claim from the handoff almost verbatim, and it was checked directly
+against the restored source again rather than taken on faith, exactly
+as it already had been once before this same version (see this
+version's CHANGELOG entry): still false. What the report was actually
+describing turned out to be one level up from the field itself -
+`NetworkWindow.cpp`'s connect handler called the password prompt for
+every secured access point unconditionally, with nothing checking
+whether NetworkManager could already supply a secret for that SSID,
+so the field being perfectly capable of accepting a real password was
+beside the point when the user had to sit through the prompt every
+time regardless. The fix needed a way to ask NetworkManager that
+question directly - `GetSecrets()`, deliberately a separate,
+permission-gated call from `GetSettings()` in NetworkManager's own
+D-Bus API - and verifying it actually worked needed more than reading
+the code: a small mock NetworkManager D-Bus service
+(`tests/mock_networkmanager.py`) was written from scratch, running on
+a private throwaway system bus a real `NetworkManagerClient` could
+talk to for real, with a saved network that has a working secret, one
+that doesn't, and a brand new one. It caught a real bug in itself
+within the first few minutes - a `dbus.service.BusName` handle
+constructed but never assigned to anything gets garbage-collected
+immediately, silently releasing the service name before a single call
+could arrive - which is worth remembering the shape of: the failure
+looked exactly like the fix under test not working, and would have
+been easy to misdiagnose as such rather than as a bug in the test
+harness. Once fixed, the same mock also stood in for live GUI
+testing - real fake access points, a real `xclip`-owned CLIPBOARD
+selection to paste from - since the "must also accept pasted text"
+half of the request turned out to name a feature that plainly did not
+exist at all (no `SelectionNotify` handling anywhere), not a
+restriction to loosen. Confirming *that* fix meant watching the actual
+masked-character count in a screenshot change by exactly the length of
+what was pasted, both from Ctrl+V and from a middle click - the kind
+of check that only means something once you've also confirmed a
+different point (a Slider or Button) produces no change, which is
+what most of the equivalent audio work the task before this one was
+about besides.
+
+kohiko-bluetooth's own responsiveness pass closed out the run of
+three, and - after a BSP task that turned out not to need a rewrite,
+an audio task that found a real scroll-routing bug, and a network task
+that found a real credential-prompting bug - came back clean. That
+outcome deserved the same live-testing effort as the other two rather
+than less: a third mock service (`mock_bluez.py`, following BlueZ's
+own ObjectManager-based `GetManagedObjects()` shape rather than
+NetworkManager's per-object Properties calls, since that's genuinely
+how the two D-Bus APIs differ), real devices with a deliberately long
+name, five window sizes including one short enough to force scrolling.
+Nothing overlapped, nothing clipped, nothing sat in unexplained empty
+space, and the scroll-routing fix from two tasks earlier - built and
+tested against kohiko-audio's own device list, never against a
+Bluetooth-shaped one specifically - turned out to already cover this
+app too, confirmed rather than assumed. Reporting "this already works"
+honestly, backed by the same live evidence a real bug would have
+needed, is a different kind of finding than the two before it, not a
+lesser one - manufacturing a fix here to have something to report
+would have repeated the exact mistake the BSP task's own handoff
+almost caused two tasks ago. The one thing worth changing wasn't a bug
+at all: the details panel's height was computed twice, once to size
+its card ahead of time and once implicitly by the sequence of widgets
+actually built into it, agreeing today with nothing enforcing that
+they keep agreeing tomorrow. Collapsing that into one function both
+call, checked against a pixel-diff of the live screenshot before and
+after to confirm the change genuinely changed nothing a user could
+see, is the kind of change worth making even when nothing is currently
+wrong - the same reasoning as writing a regression test for a fix,
+aimed one step earlier, at a duplication that has the *shape* of a
+future bug rather than an actual one yet.
+
+The Telegram investigation was a different kind of task from the six
+before it in this same version - not a GUI-responsiveness pass through
+one of the three new apps, but a real window-manager bug, and the
+CHANGELOG's own 0.20.3 entry had already half-solved it before this
+phase began, in the sense that mattered most: it named
+`IsXEmbedWindow()`'s early return as the specific suspect and recorded,
+honestly, that it couldn't be checked without a real machine to run a
+window manager on. That's exactly what this phase had that the last
+one didn't. Confirming the suspicion turned out to be the easy half -
+a small real X11 client, one property added or not, told the story in
+two screenshots. The harder half was the same question this whole
+version keeps circling back to in different clothes: once you know
+*why* a check exists, is removing it actually safe, or does it just
+trade one bug for the one it was written to prevent? Reading
+`SystemTray.cpp` answered that a check on `_XEMBED_INFO` alone was
+never really testing the right thing - the real signal was always the
+separate `SYSTEM_TRAY_REQUEST_DOCK` message, arriving on its own
+schedule - but proving a *timeout* was the right shape of fix, rather
+than just deleting the check and hoping, meant deliberately breaking
+things on purpose: disabling the check, watching a genuine tray icon
+get tiled before it got docked, in a log, in black and white. That's
+the same discipline as the BSP task's 82 passing checks or the
+scroll-routing fix's before/after screenshots, pointed at a question
+those techniques don't usually have to answer - not "does my fix work"
+but "am I confident I understand what the code I'm about to stop
+relying on was actually doing." A test client bug (closing itself on
+any `ClientMessage`, not just the one that meant "please close") made
+a working fix look broken for a few minutes before the log line under
+it - `DockIcon()` sending a real `XEMBED_EMBEDDED_NOTIFY` - explained
+why. Worth remembering: a "the fix isn't working" moment is sometimes
+about the fix, and sometimes about the thing watching it.
 
 --------------------------------------------------------------------------
 

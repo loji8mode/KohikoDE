@@ -49,6 +49,15 @@ public:
         int current
     );
 
+    // Records the focused window's title - kept (WindowManager still
+    // calls this on every focus/title change, via UpdateAllBars())
+    // purely so that plumbing doesn't need touching too, but Redraw()
+    // no longer draws m_title anywhere: showing it in the bar read as
+    // unwanted "what's under the mouse" info rather than the deliberate
+    // status-bar feature it actually was, so the on-screen display was
+    // removed. A harmless no-op call as far as anything visible goes -
+    // easy to wire back up to Redraw() again (see m_title's own
+    // comment) if that's ever wanted back.
     void SetTitle(
         const std::string& title
     );
