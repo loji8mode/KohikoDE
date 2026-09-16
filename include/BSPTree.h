@@ -96,6 +96,19 @@ public:
 
     // Removes `window`'s leaf and collapses its parent Split away,
     // promoting the sibling into the parent's old place.
+    //
+    // This only ever touches the removed leaf's own immediate sibling
+    // subtree - every other node in the tree (its ratio, its own
+    // children, everything above the grandparent) is left completely
+    // untouched. Concretely: closing one of two windows stacked
+    // top/bottom inside a side-by-side layout (A | B/C) always
+    // expands the survivor into the freed half in place (A | C,
+    // still side by side) - it never re-collapses the outer split
+    // into a full top/bottom stack of the two survivors, since the
+    // sibling relationship (and therefore the split direction that
+    // gets promoted) is exactly what's already on screen. See the
+    // "Collapse-on-remove" cases in tests/test_bsptree.cpp for the
+    // exact guarantee this locks in.
     void Remove(ManagedWindow* window);
 
     // Bookkeeping only: remembers `window`'s leaf as the insert
@@ -154,6 +167,55 @@ public:
     // Debug / IPC dump (`kohikoctl tree`).
     std::string Serialize() const;
 
+    // Session-restore-only placement rule: `window` was, as of
+    // whenever CollectPlacementRules() ran, spliced in immediately
+    // next to `neighbor`'s leaf, dividing that space in `direction`.
+    struct PlacementRule
+    {
+        WindowID window = 0;
+        WindowID neighbor = 0;
+        SplitDirection direction = SplitDirection::Vertical;
+    };
+
+    // Walks the whole tree once and returns one PlacementRule per
+    // tiled window except the single leftmost leaf (which needs no
+    // neighbor at all - see InsertNextTo()'s comment for what that
+    // means for the caller). Rules come back in an order that's
+    // always safe to replay front-to-back through InsertNextTo():
+    // parent splits are emitted before the splits nested inside
+    // either of their two sides, so by the time a rule's `neighbor`
+    // is needed, it was either the implicit leftmost seed or was
+    // itself placed by a strictly earlier rule in the same list - a
+    // caller that simply walks the list in order, skipping any rule
+    // whose neighbor hasn't actually reappeared yet this session (see
+    // InsertNextTo()), always has a valid, already-placed anchor to
+    // work from whenever a rule does apply. Used by SessionStore::
+    // Save() once per workspace.
+    std::vector<PlacementRule> CollectPlacementRules() const;
+
+    // Session-restore-only insert: splices `window` in next to
+    // `neighbor`'s own leaf using exactly the split `direction` given,
+    // producing precisely what SpliceIn(window, neighbor's leaf,
+    // direction) always would - unlike either Insert() overload above,
+    // this never derives its own anchor or direction from whatever's
+    // currently focused, and never checks floor sizes against
+    // general.min_tile_width/height: a best-effort restore of a
+    // previous session's layout is expected to win over the usual
+    // "protect every tile's minimum size" caution that governs a
+    // brand new placement. LayoutEngine still lays the result out
+    // validly either way, just possibly smaller than the configured
+    // floor would normally allow for one shutdown-to-startup round
+    // trip. Returns false, touching nothing, if `neighbor` isn't
+    // actually in this tree right now - the caller (see
+    // WindowManager::TryRestoreSessionPosition()) falls back to the
+    // ordinary placement-aware Insert() in that case, exactly as if
+    // this window had no recorded neighbor at all.
+    bool InsertNextTo(
+        ManagedWindow* window,
+        ManagedWindow* neighbor,
+        SplitDirection direction
+    );
+
 private:
 
     BSPLeaf* FindLeaf(BSPNode* node, ManagedWindow* window) const;
@@ -188,6 +250,27 @@ private:
     ) const;
 
     void CollectLeaves(BSPNode* node, std::vector<BSPLeaf*>& out) const;
+
+    // The window you'd reach by starting at `node` and always taking
+    // the first/left child until hitting a leaf - `node` itself if
+    // it's already a leaf. Used by CollectPlacementRulesRecursive()
+    // below to name a whole subtree by a single window inside it.
+    ManagedWindow* Representative(BSPNode* node) const;
+
+    // Recursive engine behind CollectPlacementRules() - see that
+    // method's comment for the overall scheme. Pre-order: for a Split
+    // node, this emits "the right subtree's representative goes next
+    // to the left subtree's representative" *before* recursing into
+    // either subtree - which matters, because a deeper rule inside
+    // the right subtree may itself need that same right-subtree
+    // representative as ITS neighbor, and it has to already have been
+    // placed by the time that happens. Post-order would emit the
+    // deeper rule first and break replay; see the regression test in
+    // tests/test_bsptree.cpp this ordering is locked in by.
+    void CollectPlacementRulesRecursive(
+        BSPNode* node,
+        std::vector<PlacementRule>& out
+    ) const;
 
     static SplitDirection DirectionForRect(const Rect& rect);
 

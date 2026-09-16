@@ -75,6 +75,19 @@ const std::vector<ConfigOption>& ConfigSchema::All()
             "for yet.",
             {"config", "session"}
         },
+        {
+            "General", "Session Restore", "general.adaptive_placement", ConfigValueType::Boolean, "true",
+            "Learns, per application, which workspace and which side of the "
+            "tiling layout you repeatedly move its windows to by hand, and "
+            "starts placing new windows of that application there "
+            "automatically once the pattern is clear and consistent - during "
+            "an ordinary session, not just after a restart. Never overrides "
+            "an explicit windowrule= or a precise Session Restore match; only "
+            "fills in when neither has an opinion. Turn off to open every "
+            "new window using only the ordinary placement rules, with no "
+            "learned habits at all.",
+            {}
+        },
 
         // ==================================================================
         // Appearance
@@ -285,6 +298,31 @@ const std::vector<ConfigOption>& ConfigSchema::All()
             "'suspend'. Recommended: suspend, unless another locker is "
             "already handling this, or you deliberately don't want one.",
             {"never", "manual", "suspend", "always"}
+        },
+        {
+            "Power", "Suspend Integration", "lockscreen.idle_timeout_minutes", ConfigValueType::Int, "0",
+            "Automatically locks the screen after this many minutes with no "
+            "keyboard/mouse input anywhere on the display, independent of "
+            "lockscreen.after's own Suspend/startup triggers above. 0 "
+            "disables idle-timeout locking entirely (the default). Still "
+            "fully subject to lockscreen.after=never, which disables "
+            "locking altogether, on-demand or automatic.",
+            {}
+        },
+        {
+            "Power", "Display Sleep", "general.inhibit_sleep_during_playback", ConfigValueType::Boolean, "true",
+            "Keeps the display from powering off via DPMS while there's a "
+            "reason it shouldn't: primarily, any application actively "
+            "holding a standard D-Bus screen-inhibit request (most video/"
+            "media players and browsers - a YouTube tab, VLC, mpv - and "
+            "presentation software use this whether or not their window is "
+            "fullscreen), with a plain X11 check for a visible fullscreen "
+            "window as a fallback for content that doesn't make that "
+            "request itself. Never disables DPMS itself, and never "
+            "prevents the display from sleeping once genuinely idle - "
+            "turn off only if you'd rather the display's own configured "
+            "timeout applied unconditionally, even during playback.",
+            {}
         },
 
         // ==================================================================

@@ -33,6 +33,7 @@ a full compositor.
 - [Autostart](#autostart)
 - [Keyboard layouts / languages](#keyboard-layouts--languages)
 - [Default keybindings](#default-keybindings)
+- [System tray](#system-tray)
 - [EWMH support](#ewmh-support)
 - [The mouse: swap, move, and resize](#the-mouse-swap-move-and-resize)
 - [The launcher (Super+D)](#the-launcher-superd)
@@ -40,6 +41,7 @@ a full compositor.
 - [The power menu](#the-power-menu)
 - [Native lock screen](#native-lock-screen)
 - [Suspend integration](#suspend-integration)
+- [Display sleep](#display-sleep)
 - [Fonts and languages](#fonts-and-languages)
 - [kohikoctl / IPC](#kohikoctl--ipc)
 - [Architecture](#architecture)
@@ -66,6 +68,11 @@ sudo apt install build-essential libx11-dev libimlib2-dev \
                   libxft-dev libfontconfig-dev libpam0g-dev fonts-dejavu-core
 # optional, for multi-monitor geometry:
 sudo apt install libxrandr-dev
+# optional, for idle-timeout locking and the X11 fallback half of
+# display-sleep inhibition (see Display sleep):
+sudo apt install libxss-dev
+# optional, for the primary (D-Bus) half of display-sleep inhibition:
+sudo apt install libdbus-1-dev
 ```
 
 Also install the lock screen's PAM service file - without it, every
@@ -83,7 +90,7 @@ Two build systems are provided; pick whichever you'd rather have installed.
 
 ```sh
 make -j$(nproc)          # -> ./kohiko, ./kohikoctl, ./kohiko-settings
-make test                 # unit tests for the BSP tree (no X server needed)
+make test                 # BSP tree, launcher scoring, adaptive-placement unit tests (no X server needed)
 make test-monitors        # MonitorManager/XRandr tests (needs a real X server - skips gracefully without one)
 sudo make install          # installs to /usr/local, incl. Kohiko Settings' .desktop entry + icon
 ```
@@ -102,7 +109,12 @@ or package.
 If `libxrandr-dev` is present, both build systems automatically compile in
 XRandr-based monitor detection (`KOHIKO_HAVE_XRANDR`); if it isn't, Kohiko
 falls back to treating the whole X display as one monitor, which is
-correct for the common single-monitor case regardless.
+correct for the common single-monitor case regardless. `libxss-dev`
+(`KOHIKO_HAVE_XSS`) and `libdbus-1-dev` (`KOHIKO_HAVE_DBUS`) are
+detected and compiled in the same way, independently of each other and
+of XRandr - see [Native lock screen](#native-lock-screen) and
+[Display sleep](#display-sleep) for exactly what's disabled (gracefully -
+never a build failure) without each one.
 
 ### Arch Linux: one-command install
 
@@ -246,42 +258,59 @@ What it gives you, on top of hand-editing `kohiko.conf`:
   expected syntax gets a red outline and a short error message right
   there, rather than silently writing something Kohiko wouldn't
   understand.
-- **Apply**, **Save**, and **Reset to Default** at the bottom. Apply
-  writes every valid, changed setting to `kohiko.conf` and asks a
+- **Click-to-position caret** - clicking anywhere inside any text
+  field, in a plain setting or a structured row alike, places the
+  caret exactly where you clicked rather than always jumping to the
+  start or end; arrow keys/Home/End/Tab still work exactly as before.
+- **Save** and **Reset to Default** at the bottom. Save validates,
+  writes every valid, changed setting to `kohiko.conf`, and asks a
   currently-running Kohiko to pick it up immediately (`kohikoctl
-  reload`), without closing the window; Save does the same and then
-  closes; Reset to Default resets whatever's currently in view (the
-  selected category, or the current search results) back to its shipped
-  default - nothing is written to disk until you Apply or Save
+  reload`) - all without closing the window, so there's never a
+  reason to restart Kohiko, or even leave Settings, after changing
+  something; Reset to Default resets whatever's currently in view
+  (the selected category, or the current search results) back to its
+  shipped default - nothing is written to disk until you Save
   afterward.
 
-The four repeatable directives - `bind=`, `exec.<name>=`, `windowrule=`,
-`monitor=` (see [Window rules](#window-rules) and
-[Multi-monitor](#multi-monitor)) - are each edited as their own small
-block of raw config syntax (one entry per line, exactly like you'd write
-it in the file) rather than pretending every repeated line is an
-individually-typed field: `windowrule=` lives under Window Rules,
-`monitor=` under Monitors, `bind=` under Input's "Keybindings" group, and
-`exec.<name>=` under Developer. `workspace<N>=` autostart, on the other
-hand, *is* a plain per-workspace text field (one per workspace, right
-under `workspace.count` in the Workspaces category) since each is
-genuinely its own distinct key rather than one repeated one.
+`windowrule=` (under Window Rules) and `monitor=` (under Monitors) each
+get a **structured, row-based editor**: one row per rule, with a
+click-to-cycle action button (float/tile/fullscreen/no-fullscreen/
+workspace for a window rule) plus a text field per selector
+(`class:`/`instance:`/`title:`, or an output name and a workspace
+number for a monitor rule) rather than needing to know that syntax by
+hand even inside the GUI - Tab moves between a row's fields and on to
+the next row, and each row gets its own `x` to remove it, plus an
+"+ Add rule" button below the last one. What actually gets saved to
+`kohiko.conf` is still exactly that same `class:foo instance:bar`/
+`HDMI-1,workspace=2` syntax - the structured editor is purely a
+friendlier way to produce it, never a different underlying format.
 
-Throughout, **`kohiko.conf` remains the actual source of truth**: Apply/
-Save edit the file's existing lines in place - preserving every comment,
+`bind=` (under Input's "Keybindings" group) and `exec.<name>=` (under
+Developer) are, by contrast, each edited as their own small block of
+raw config syntax (one entry per line, exactly like you'd write it in
+the file) - a keybinding or a named command doesn't decompose into a
+handful of independent selector fields the way a window/monitor rule
+does, so a structured editor wouldn't actually be simpler than typing
+the line itself. `workspace<N>=` autostart, on the other hand, *is* a
+plain per-workspace text field (one per workspace, right under
+`workspace.count` in the Workspaces category) since each is genuinely
+its own distinct key rather than one repeated one.
+
+Throughout, **`kohiko.conf` remains the actual source of truth**: Save
+edits the file's existing lines in place - preserving every comment,
 blank line, and setting you haven't touched through the GUI at all -
 rather than regenerating it, so hand-editing the same file before, after,
 or interleaved with using Kohiko Settings is always fully supported. A
 setting the GUI has never touched keeps its exact original text (`yes`
 stays `yes` rather than being silently rewritten to `true` the next time
-you click Apply, for instance); a genuinely new key Kohiko Settings adds
+you click Save, for instance); a genuinely new key Kohiko Settings adds
 that didn't already have an active line gets appended under a clearly
 marked `# --- Added by Kohiko Settings ---` section at the end of the
 file instead of guessing where else it might belong.
 
 Reload after editing `kohiko.conf` by hand without restarting: `kohikoctl
 reload` (also bound to `Super+Shift+C` by default, and what Kohiko
-Settings' own Apply/Save do automatically). `auto_start_programs` and
+Settings' own Save does automatically). `auto_start_programs` and
 `workspace<N>=` are the one exception - both only ever run right after
 Kohiko itself starts, never on reload, so reloading the config doesn't
 relaunch every autostart program.
@@ -714,12 +743,29 @@ anything. Whether Suspend locks the screen first is governed by
 
 ## Native lock screen
 
-`Super+Shift+L`, `kohikoctl dispatch lock`, or automatically right before
-Suspend (depending on `lockscreen.after` - see below) locks the screen:
-full-screen on every monitor, a password field with hidden input,
-`Escape` clears whatever's typed (it never unlocks), `Enter`
+`Super+Shift+L`, `kohikoctl dispatch lock`, automatically right before
+Suspend, or automatically after a period of no input (depending on
+`lockscreen.after`/`lockscreen.idle_timeout_minutes` - see below) locks
+the screen: full-screen on every monitor, a password field with hidden
+input, `Escape` clears whatever's typed (it never unlocks), `Enter`
 authenticates. No dependency on `i3lock`, `betterlockscreen`, or any
 other external locker.
+
+`lockscreen.idle_timeout_minutes` (0 by default, disabled) locks
+automatically after that many minutes with no keyboard/mouse input
+anywhere on the display, independent of `lockscreen.after`'s own
+Suspend/startup triggers - so, for instance, `lockscreen.after=manual`
+plus `lockscreen.idle_timeout_minutes=10` locks after 10 idle minutes
+or on request, but never merely for suspending. Idle time is measured
+via the X11 XScreenSaver extension (`XScreenSaverQueryInfo` - not
+Kohiko watching its own windows' input, which would miss activity in
+any other application entirely), checked roughly once a second; if
+that extension isn't available at build or run time, idle-timeout
+locking simply never fires; every other lock trigger is unaffected.
+Watching a video (see [Display sleep](#display-sleep) below) keeps the
+*display* on, but doesn't by itself reset this timer or keep the
+session unlocked forever. Still fully subject to `lockscreen.after=
+never`, which disables locking altogether, on-demand or automatic.
 
 Authentication goes through PAM, using a service named `kohiko` - install
 `pam/kohiko` from this repo as `/etc/pam.d/kohiko` first (see
@@ -796,6 +842,48 @@ the machine (a VT switch, physically power-cycling it, or ptrace-level
 access to the process from another account), which is a limitation of
 the X11 security model generally, not something specific to Kohiko's own
 implementation.
+
+## Display sleep
+
+By default (`general.inhibit_sleep_during_playback=true`), Kohiko keeps
+the display from powering off via DPMS while there's a reason it
+shouldn't, and otherwise leaves DPMS's own configured timeout (set with
+`xset dpms <standby> <suspend> <off>`, same as on any other X11 window
+manager - Kohiko doesn't set or manage that timeout itself) completely
+alone:
+
+- **D-Bus inhibit (the primary mechanism).** Kohiko provides the
+  standard `org.freedesktop.ScreenSaver` and `org.freedesktop.
+  PowerManagement` `Inhibit(application_name, reason) -> cookie`/
+  `UnInhibit(cookie)` interfaces on the session bus - the same ones
+  browsers (a YouTube tab in Firefox or Chromium), video players (VLC,
+  mpv), and presentation software already call into on every major
+  desktop specifically to keep the screen awake while they're actively
+  playing, whether or not their window happens to be fullscreen. If
+  something else - a full GNOME/KDE session's own screensaver service,
+  say - already owns those names, Kohiko backs off entirely rather
+  than fight over them; it only becomes the provider on a session that
+  doesn't already have one (a bare `startx`, for instance). If an
+  inhibiting application crashes without calling `UnInhibit`, its
+  inhibit is released automatically the moment Kohiko notices that
+  application disappear from the bus, so a crash can never wedge the
+  display awake indefinitely.
+- **Fullscreen fallback.** Whether or not the D-Bus service above is
+  available, Kohiko also inhibits sleep any time a currently-visible
+  window is fullscreen - covering content that doesn't (or, running an
+  older version, can't yet) make the D-Bus call itself.
+
+Either way, inhibiting works by periodically telling the X server
+"activity just happened" (`XResetScreenSaver`) - exactly what real
+keyboard/mouse input would do, and exactly the same idle counter DPMS's
+own power-down timers are driven by - rather than ever touching DPMS's
+configuration directly. The moment neither condition above still holds
+(the video stops, the fullscreen window closes, every D-Bus inhibit is
+released), this simply stops happening, and whatever idle time has
+genuinely elapsed since resumes counting completely normally toward the
+display's real timeout - the display still sleeps right on schedule once
+you're actually away from the keyboard, exactly as if this feature
+didn't exist at all.
 
 ## Fonts and languages
 
@@ -943,14 +1031,34 @@ into a tile it's already shown it won't render into correctly.
   (`windowrule=`), per-monitor rules (`monitor=...,workspace=N`), and
   keyboard layout switching - see their own sections above.
 - **Session restore** - every window's workspace, tiled/floating
-  state, floating geometry, monitor, and fullscreen state are
-  remembered across a restart and reapplied when it comes back up,
-  keyed off the window's own X11 ID (stable across a Kohiko-only
+  state, floating geometry, monitor, fullscreen state, and - for a
+  tiled window - its actual position in the BSP layout relative to
+  its neighbours are all remembered across a restart and reapplied
+  when it comes back up, so the layout you see right after logging
+  back in closely resembles what you actually had before logging out.
+  Keyed off the window's own X11 ID (stable across a Kohiko-only
   restart - see `session.restore_priority` in `config/default.conf`
   for how a conflicting `windowrule=` and saved session are
-  reconciled). Also covers being stopped via `SIGTERM`/`SIGINT` (a
-  session manager restarting it, or a plain `pkill kohiko`), not just
-  a clean `kohikoctl quit`.
+  reconciled). Restoring a tiled window's exact former position is
+  necessarily best-effort: if the window it was next to hasn't
+  reopened yet this session, it's placed the ordinary way instead,
+  same as any other new window. Also covers being stopped via
+  `SIGTERM`/`SIGINT` (a session manager restarting it, or a plain
+  `pkill kohiko`), not just a clean `kohikoctl quit`.
+- **Adaptive placement** - learns, per application, which workspace
+  and which side of the tiling layout you repeatedly move its windows
+  to by hand (Super+Shift+`<N>`, a Super+LMB drag, or
+  Super+Shift+`h`/`j`/`k`/`l`), and starts placing new windows of that
+  application there automatically once the pattern is clear and
+  consistent - during an ordinary session, not just after a restart.
+  A one-off manual move never immediately becomes a habit; it takes a
+  genuinely repeated, consistent pattern (see `general.
+  adaptive_placement` in `config/default.conf`) before Kohiko starts
+  predicting anything, and it only ever fills in when neither an
+  explicit `windowrule=` nor a precise Session Restore match already
+  has an opinion. Turn off with `general.adaptive_placement=false` to
+  place every new window using only the ordinary rules, with no
+  learned habits at all.
 - **A power menu on every bar** - shutdown/restart/suspend, nothing
   else - see [The power menu](#the-power-menu).
 - **A native lock screen** - PAM-authenticated, no `i3lock`/
@@ -965,29 +1073,51 @@ into a tile it's already shown it won't render into correctly.
   `.desktop` entry and icon: a category sidebar, settings grouped under
   sub-headings, search, an (i) info icon per setting (description,
   default, allowed values, recommendation), inline validation, and
-  Apply/Save/Reset to Default - editing `kohiko.conf`'s existing lines
+  Save/Reset to Default - editing `kohiko.conf`'s existing lines
   in place rather than regenerating the file, so hand-editing the same
   file remains fully supported alongside it. See
-  [Kohiko Settings](#kohiko-settings).
+  [Kohiko Settings](#kohiko-settings). Every text field - a plain
+  setting, or a structured row below - places the caret exactly where
+  you click, not just at the start or end.
+- **Structured `windowrule=`/`monitor=` editors in Kohiko Settings** -
+  each rule is its own row (an action button you click to cycle
+  through float/tile/fullscreen/no-fullscreen/workspace, plus
+  `class:`/`instance:`/`title:` text fields for a window rule, or an
+  output-name field and a workspace number for a monitor rule), with
+  its own "+ Add rule" button and a `x` to remove a row - no need to
+  remember the underlying syntax by hand, even though what actually
+  gets saved to `kohiko.conf` is exactly that same syntax.
+- **Idle-timeout locking** - `lockscreen.idle_timeout_minutes` locks
+  the screen automatically after that many minutes with no keyboard/
+  mouse input anywhere on the display, independent of `lockscreen.
+  after`'s own Suspend/startup triggers, and of whether anything is
+  actively inhibiting display sleep (see the next item) - watching a
+  video keeps the *display* on, but doesn't by itself keep the session
+  unlocked forever. 0 (the default) disables it; still fully subject
+  to `lockscreen.after=never`.
+- **Display-sleep inhibition** - Kohiko provides the standard
+  `org.freedesktop.ScreenSaver`/`org.freedesktop.PowerManagement`
+  D-Bus `Inhibit`/`UnInhibit` interfaces itself (whenever nothing
+  else - a full desktop environment's own session services, say - is
+  already providing them), so any application that already knows how
+  to ask a desktop not to sleep the screen while it's active - browsers
+  playing video (a YouTube tab in Firefox or Chromium), VLC, mpv,
+  presentation software - keeps the display awake for exactly as long
+  as it says to, whether or not its window happens to be fullscreen.
+  If an inhibiting application crashes without releasing its inhibit,
+  it's released automatically the moment Kohiko notices that
+  application disappear from the bus, so a crash can never wedge the
+  display awake indefinitely. A plain X11 check ("is a currently-
+  visible window fullscreen") is the fallback for content that isn't
+  D-Bus-aware. Never disables DPMS itself, and never delays a genuinely
+  idle display from sleeping on schedule - turn off with `general.
+  inhibit_sleep_during_playback=false` if you'd rather the display's
+  configured timeout applied completely unconditionally.
 
 ## Planned
 
-- **Click-to-position the text caret in Kohiko Settings.** Right now,
-  clicking a text field focuses it (caret at the end); moving the caret
-  anywhere else within it is keyboard-only (arrow keys/Home/End) -
-  functional, but not as immediate as clicking directly where you want
-  to type.
-- **Structured editors for window rules and monitor rules in Kohiko
-  Settings**, beyond the current raw-syntax text block (one
-  `windowrule=`/`monitor=` line per row, freely typed) - e.g. a
-  selector-type dropdown plus a plain text field per rule, rather than
-  needing to know the `class:`/`instance:`/`title:` syntax by hand even
-  inside the GUI.
-- **Idle-timeout locking** - `lockscreen.after=always` currently covers
-  "on Suspend" and "at startup"; a genuine idle-timeout trigger (lock
-  automatically after N minutes of no input, independent of Suspend)
-  isn't implemented yet, since it needs an idle-detection mechanism
-  Kohiko doesn't have any other use for today.
+Nothing currently planned - see [Done](#done) for what shipped most
+recently.
 
 ## Intentionally unsupported
 

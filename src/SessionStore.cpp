@@ -3,9 +3,12 @@
 #include "ManagedWindow.h"
 #include "Monitor.h"
 #include "MonitorManager.h"
+#include "Workspace.h"
+#include "WorkspaceManager.h"
 #include "Xdg.h"
 
 #include <fstream>
+#include <unordered_map>
 
 namespace Kohiko
 {
@@ -26,6 +29,20 @@ std::filesystem::path SessionFilePath()
 // be empty.
 const char* const kNoMonitorName = "-";
 
+// Same idea for "no recorded BSP neighbor" (a floating window, or
+// whichever tiled window happened to be the leftmost leaf on its
+// workspace - see BSPTree::CollectPlacementRules()).
+constexpr WindowID kNoNeighbor = 0;
+const char* const kNoDirection = "-";
+
+// First line of the file, purely a format marker. Bumped from the
+// pre-BSP-position format (see CHANGELOG) so a session file written
+// by an older Kohiko - which has no such line, and starts straight
+// in with a numeric window ID - is recognized as unusable rather than
+// having its first record's fields silently misread as this format's
+// extra neighbor/direction columns. See Load()'s comment.
+const char* const kFormatVersion = "KOHIKO_SESSION_V2";
+
 }
 
 SessionStore::SessionStore()
@@ -39,16 +56,35 @@ void SessionStore::Load()
 
     std::ifstream file(SessionFilePath());
 
+    if (!file)
+        return;
+
+    std::string header;
+    std::getline(file, header);
+
+    if (header != kFormatVersion)
+    {
+        // Either there was no session file yet, or it's in the format
+        // a pre-BSP-position Kohiko wrote (see kFormatVersion's
+        // comment) - either way there's nothing safe to parse here.
+        // Session restore just sits this one restart out, exactly as
+        // if Kohiko had never run before; nothing is lost beyond this
+        // one round trip's worth of placement memory.
+        return;
+    }
+
     WindowID id;
     int workspace;
     int floating;
     int fullscreen;
     Rect geometry;
     std::string monitorName;
+    WindowID neighborId;
+    std::string directionToken;
 
     while (file >> id >> workspace >> floating >> fullscreen >>
                    geometry.x >> geometry.y >> geometry.width >> geometry.height >>
-                   monitorName)
+                   monitorName >> neighborId >> directionToken)
     {
         SessionWindowState state;
         state.workspace = workspace;
@@ -56,6 +92,10 @@ void SessionStore::Load()
         state.fullscreen = fullscreen != 0;
         state.floatingGeometry = geometry;
         state.monitorName = (monitorName == kNoMonitorName) ? std::string() : monitorName;
+        state.hasNeighbor = (neighborId != kNoNeighbor) && (directionToken != kNoDirection);
+        state.neighborId = neighborId;
+        state.neighborDirection =
+            (directionToken == "h") ? SplitDirection::Horizontal : SplitDirection::Vertical;
 
         m_records[id] = state;
     }
@@ -70,9 +110,24 @@ const SessionWindowState* SessionStore::Find(
 
 void SessionStore::Save(
     const std::vector<ManagedWindow*>& windows,
-    const MonitorManager& monitors)
+    const MonitorManager& monitors,
+    const WorkspaceManager& workspaces)
 {
+    // One BSPTree::PlacementRule per tiled window, across every
+    // workspace, keyed by the window it's *about* (not its neighbor) -
+    // exactly the lookup the per-window loop below needs. A window
+    // with no entry here is either floating or was the leftmost leaf
+    // on its workspace (see CollectPlacementRules()'s comment) -
+    // either way it's saved with kNoNeighbor/kNoDirection below.
+    std::unordered_map<WindowID, BSPTree::PlacementRule> neighborOf;
+
+    for (int id = 1; id <= workspaces.Count(); ++id)
+        for (const BSPTree::PlacementRule& rule : workspaces.Get(id).Tree().CollectPlacementRules())
+            neighborOf[rule.window] = rule;
+
     std::ofstream file(SessionFilePath(), std::ios::trunc);
+
+    file << kFormatVersion << '\n';
 
     for (ManagedWindow* window : windows)
     {
@@ -86,6 +141,9 @@ void SessionStore::Save(
         Monitor* monitor = monitors.Find(window->Monitor());
         const std::string& monitorName = monitor ? monitor->Name() : std::string();
 
+        auto neighborIt = neighborOf.find(window->Id());
+        bool hasNeighbor = window->IsTiled() && neighborIt != neighborOf.end();
+
         file << static_cast<unsigned long>(window->Id()) << ' '
              << window->Workspace() << ' '
              << (window->IsFloating() ? 1 : 0) << ' '
@@ -94,7 +152,12 @@ void SessionStore::Save(
              << window->FloatingGeometry().y << ' '
              << window->FloatingGeometry().width << ' '
              << window->FloatingGeometry().height << ' '
-             << (monitorName.empty() ? kNoMonitorName : monitorName.c_str()) << '\n';
+             << (monitorName.empty() ? kNoMonitorName : monitorName.c_str()) << ' '
+             << (hasNeighbor ? static_cast<unsigned long>(neighborIt->second.neighbor) : kNoNeighbor) << ' '
+             << (hasNeighbor
+                     ? (neighborIt->second.direction == SplitDirection::Horizontal ? "h" : "v")
+                     : kNoDirection)
+             << '\n';
     }
 }
 

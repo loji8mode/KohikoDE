@@ -9,6 +9,7 @@
 #include <X11/keysym.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -40,6 +41,30 @@ constexpr int kInfoIconSize     = 16;
 constexpr int kRawBlockLineH    = 20;
 constexpr int kRawBlockMinLines = 4;
 constexpr int kRawBlockMaxLines = 10;
+
+// --- structured windowrule=/monitor= row editor (see LayoutAndDrawStructuredBlock()) ---
+
+constexpr int kStructuredRowH        = 30; // one rule per row, plus a little breathing room
+constexpr int kStructuredRowGap      = 6;
+constexpr int kStructuredActionW     = 108; // WindowRule's click-to-cycle action button
+constexpr int kStructuredRemoveW     = 24;  // the "x" remove button, every row
+constexpr int kStructuredWorkspaceW  = 56;  // narrow - just a couple of digits
+constexpr int kStructuredFieldGap    = 6;
+constexpr int kStructuredAddButtonW  = 140;
+constexpr int kStructuredAddButtonH  = 26;
+
+// index into both arrays below; also SettingsWindow::WindowRuleDraft::
+// actionIndex's own valid range is 0..kWindowRuleActionCount (that
+// last one, kWindowRuleActionCount itself, is the sentinel "action is
+// workspace:<N>" state - it has no *fixed* token of its own, hence
+// living just past the end of these two arrays rather than in them).
+constexpr int kWindowRuleActionCount = 4;
+constexpr int kWindowRuleWorkspaceAction = kWindowRuleActionCount;
+
+const std::array<const char*, kWindowRuleActionCount> kWindowRuleActionTokens =
+    {"float", "tile", "fullscreen", "nofullscreen"};
+const std::array<const char*, kWindowRuleActionCount> kWindowRuleActionLabels =
+    {"Float", "Tile", "Fullscreen", "No Fullscreen"};
 
 unsigned long ParseColorLiteral(
     const std::string& text,
@@ -404,34 +429,38 @@ void SettingsWindow::BuildRawBlocks()
         const char* title;
         const char* prefix;
         const char* help;
+        RawBlockPanel::Kind kind;
     };
 
     static const Spec kSpecs[] =
     {
         {
             "windowrule", "Window Rules", "Window rules", "windowrule=",
-            "<action> <selector> per line. Actions: float, tile, fullscreen, "
-            "nofullscreen, workspace:N. Selectors (space-separated, any "
-            "combination): class:, instance:, title: - case-insensitive "
-            "substring match. `kohikoctl dispatch client` shows a window's "
-            "actual class/instance/title."
+            "One rule per row: an action, plus whichever of class:/instance:/"
+            "title: you want it to match on (any combination - a blank field "
+            "is left out entirely). `kohikoctl dispatch client` shows a "
+            "window's actual class/instance/title to match against.",
+            RawBlockPanel::Kind::WindowRule
         },
         {
             "monitor", "Monitors", "Monitor rules", "monitor=",
-            "<output name>,workspace=<N> per line - pins a specific output to "
-            "always start on workspace N. Run `kohikoctl monitors` (with "
-            "Kohiko running) to see your output names."
+            "One rule per row: pins a specific output to always start on a "
+            "given workspace. Run `kohikoctl monitors` (with Kohiko running) "
+            "to see your output names.",
+            RawBlockPanel::Kind::Monitor
         },
         {
             "bind", "Input", "Keybindings", "bind=",
             "<MODS+KEY> <command> [args] per line. See the README's \"Default "
-            "keybindings\" section for the full command list."
+            "keybindings\" section for the full command list.",
+            RawBlockPanel::Kind::RawText
         },
         {
             "exec", "Developer", "Named commands", "exec.",
             "<name>=<command> per line - referenced elsewhere as `exec <name>` "
             "(a bind= line, or `kohikoctl dispatch exec <name>`). \"terminal\" "
-            "and \"browser\" are used by Kohiko's default keybindings."
+            "and \"browser\" are used by Kohiko's default keybindings.",
+            RawBlockPanel::Kind::RawText
         },
     };
 
@@ -443,9 +472,13 @@ void SettingsWindow::BuildRawBlocks()
         panel.title = spec.title;
         panel.prefix = spec.prefix;
         panel.helpText = spec.help;
+        panel.kind = spec.kind;
         panel.loadedLines = m_writer.GetRawBlock(spec.prefix);
         panel.lines = panel.loadedLines;
         panel.lineErrors.assign(panel.lines.size(), "");
+
+        for (std::size_t i = 0; i < panel.lines.size(); ++i)
+            ValidateRawBlockLine(panel, panel.lines[i], panel.lineErrors[i]);
 
         m_rawBlocks.push_back(std::move(panel));
     }
@@ -580,6 +613,17 @@ void SettingsWindow::HandleKeyPress(
             else
                 ClearFocus();
         }
+        else if (m_focusedRawBlock && m_focusedRawBlock->kind != RawBlockPanel::Kind::RawText)
+        {
+            // A structured windowrule=/monitor= row has its own,
+            // finer-grained Tab order across its individual cells -
+            // see MoveStructuredFocus(). Only once that runs out (its
+            // own last cell, on its own last row) does plain Tab
+            // fall through to defocusing, same as every other case
+            // here - there's nothing after the raw blocks to tab
+            // into.
+            MoveStructuredFocus(*m_focusedRawBlock, +1);
+        }
         else
         {
             ClearFocus();
@@ -593,6 +637,8 @@ void SettingsWindow::HandleKeyPress(
         HandleSearchKey(event, keysym, cleanTyped);
     else if (m_focusedField)
         HandleFieldKey(event, keysym, cleanTyped);
+    else if (m_focusedRawBlock && m_focusedRawBlock->kind != RawBlockPanel::Kind::RawText)
+        HandleStructuredBlockKey(event, keysym, cleanTyped);
     else if (m_focusedRawBlock)
         HandleRawBlockKey(event, keysym, cleanTyped);
     else
@@ -638,7 +684,6 @@ void SettingsWindow::HandleButtonPress(
     }
 
     // Bottom bar buttons
-    if (m_applyButtonRect.Contains(click)) { Apply(); return; }
     if (m_saveButtonRect.Contains(click))  { Save();  return; }
     if (m_resetButtonRect.Contains(click)) { ResetVisibleToDefault(); return; }
 
@@ -671,7 +716,7 @@ void SettingsWindow::HandleButtonPress(
                     break;
 
                 default:
-                    FocusField(field, true);
+                    FocusFieldAtClick(field, click);
                     break;
             }
 
@@ -682,9 +727,20 @@ void SettingsWindow::HandleButtonPress(
 
     for (RawBlockPanel* panel : VisibleRawBlocks())
     {
+        if (panel->kind != RawBlockPanel::Kind::RawText)
+        {
+            if (HandleStructuredBlockClick(*panel, click))
+            {
+                Redraw();
+                return;
+            }
+
+            continue;
+        }
+
         if (panel->textAreaRect.Contains(click))
         {
-            FocusRawBlock(panel);
+            FocusRawBlockAtClick(panel, click);
             Redraw();
             return;
         }
@@ -729,6 +785,162 @@ void SettingsWindow::ClearFocus()
     m_focusedRawBlock = nullptr;
     m_fieldCaret = 0;
     m_searchFocused = false;
+}
+
+std::size_t SettingsWindow::CaretIndexForClick(
+    const std::string& text,
+    int textStartX,
+    int clickX) const
+{
+    std::size_t bestIndex = 0;
+    int bestDistance = std::abs(clickX - textStartX);
+
+    for (std::size_t pos = 0; pos <= text.size(); pos = Utils::Utf8NextBoundary(text, pos))
+    {
+        int width = textStartX + m_font.TextWidth(text.substr(0, pos));
+        int distance = std::abs(clickX - width);
+
+        // <= (not <): a click past the last character should land
+        // after it, not get stuck on some earlier equally-close
+        // boundary from a previous, narrower candidate.
+        if (distance <= bestDistance)
+        {
+            bestDistance = distance;
+            bestIndex = pos;
+        }
+
+        if (pos == text.size())
+            break; // Utf8NextBoundary saturates at size() too, but avoid relying on that to terminate
+    }
+
+    return bestIndex;
+}
+
+void SettingsWindow::FocusFieldAtClick(
+    Field* field,
+    const Point& click)
+{
+    ClearFocus();
+    m_focusedField = field;
+
+    // Same left edge DrawField() itself starts text at - see its
+    // `int textX = widgetX + 8` (plus the color swatch's extra offset
+    // for ConfigValueType::Color fields specifically).
+    int textX = field->widgetRect.x + 8;
+
+    if (field->option->type == ConfigValueType::Color)
+        textX = field->widgetRect.x + 4 + 18 + 8;
+
+    m_fieldCaret = CaretIndexForClick(field->currentValue, textX, click.x);
+}
+
+void SettingsWindow::FocusRawBlockAtClick(
+    RawBlockPanel* panel,
+    const Point& click)
+{
+    ClearFocus();
+    m_focusedRawBlock = panel;
+
+    if (panel->lines.empty())
+        panel->lines.emplace_back();
+
+    // Mirrors LayoutAndDrawRawBlock()'s own line geometry exactly:
+    // first line's top at textAreaRect.y + 6, kRawBlockLineH per row.
+    int relativeY = click.y - (panel->textAreaRect.y + 6);
+    int row = relativeY / kRawBlockLineH;
+
+    panel->caretRow = static_cast<std::size_t>(
+        std::clamp(row, 0, static_cast<int>(panel->lines.size()) - 1));
+
+    int textX = panel->textAreaRect.x + 8;
+    panel->caretCol = CaretIndexForClick(panel->lines[panel->caretRow], textX, click.x);
+}
+
+bool SettingsWindow::HandleStructuredBlockClick(
+    RawBlockPanel& panel,
+    const Point& click)
+{
+    if (!panel.rect.Contains(click))
+        return false;
+
+    if (panel.addRowButtonRect.Contains(click))
+    {
+        panel.lines.push_back(DefaultStructuredLine(panel.kind));
+        panel.caretRow = panel.lines.size() - 1;
+        m_focusedRawBlock = &panel;
+        m_focusedCell = StructuredCellOrder(panel, panel.caretRow).front();
+        panel.caretCol = 0;
+
+        panel.lineErrors.assign(panel.lines.size(), std::string());
+
+        for (std::size_t i = 0; i < panel.lines.size(); ++i)
+            ValidateRawBlockLine(panel, panel.lines[i], panel.lineErrors[i]);
+
+        return true;
+    }
+
+    for (std::size_t i = 0; i < panel.rowRects.size() && i < panel.lines.size(); ++i)
+    {
+        const RawBlockPanel::RowRects& row = panel.rowRects[i];
+
+        if (row.removeRect.Contains(click))
+        {
+            panel.lines.erase(panel.lines.begin() + static_cast<long>(i));
+
+            if (i < panel.lineErrors.size())
+                panel.lineErrors.erase(panel.lineErrors.begin() + static_cast<long>(i));
+
+            if (m_focusedRawBlock == &panel && panel.caretRow == i)
+                ClearFocus();
+            else if (m_focusedRawBlock == &panel && panel.caretRow > i)
+                --panel.caretRow;
+
+            return true;
+        }
+
+        if (panel.kind == RawBlockPanel::Kind::WindowRule && row.actionRect.Contains(click))
+        {
+            CycleStructuredAction(panel, i);
+            return true;
+        }
+
+        struct CellHit { Rect rect; StructuredCell cell; };
+
+        std::vector<CellHit> cellHits;
+
+        if (panel.kind == RawBlockPanel::Kind::WindowRule)
+        {
+            cellHits.push_back({row.classRect, StructuredCell::Class});
+            cellHits.push_back({row.instanceRect, StructuredCell::Instance});
+            cellHits.push_back({row.titleRect, StructuredCell::Title});
+
+            if (ParseWindowRuleDraft(panel.lines[i]).actionIndex == kWindowRuleWorkspaceAction)
+                cellHits.push_back({row.workspaceRect, StructuredCell::Workspace});
+        }
+        else
+        {
+            cellHits.push_back({row.outputRect, StructuredCell::Output});
+            cellHits.push_back({row.workspaceRect, StructuredCell::Workspace});
+        }
+
+        for (const CellHit& hit : cellHits)
+        {
+            if (!hit.rect.Contains(click))
+                continue;
+
+            ClearFocus();
+            m_focusedRawBlock = &panel;
+            panel.caretRow = i;
+            m_focusedCell = hit.cell;
+
+            std::string cellText = StructuredCellText(panel, i, hit.cell);
+            panel.caretCol = CaretIndexForClick(cellText, hit.rect.x + 6, click.x);
+
+            return true;
+        }
+    }
+
+    return true; // inside the panel but not any one control - see this method's own header comment
 }
 
 void SettingsWindow::HandleFieldKey(
@@ -955,6 +1167,127 @@ void SettingsWindow::HandleRawBlockKey(
     }
 
     panel.lineErrors.assign(panel.lines.size(), "");
+
+    for (std::size_t i = 0; i < panel.lines.size(); ++i)
+        ValidateRawBlockLine(panel, panel.lines[i], panel.lineErrors[i]);
+}
+
+void SettingsWindow::HandleStructuredBlockKey(
+    const XKeyEvent&,
+    KeySym keysym,
+    const std::string& typed)
+{
+    RawBlockPanel& panel = *m_focusedRawBlock;
+
+    if (panel.lines.empty())
+        panel.lines.push_back(DefaultStructuredLine(panel.kind));
+
+    if (panel.caretRow >= panel.lines.size())
+        panel.caretRow = panel.lines.size() - 1;
+
+    if (keysym == XK_Escape)
+    {
+        ClearFocus();
+        return;
+    }
+
+    if (keysym == XK_Return || keysym == XK_KP_Enter)
+    {
+        // Mirrors the raw editor's own Enter-adds-a-line behavior,
+        // but as a whole new *rule* rather than splitting text - a
+        // structured row has no equivalent of "split this class
+        // pattern in two".
+        panel.lines.insert(
+            panel.lines.begin() + static_cast<long>(panel.caretRow) + 1,
+            DefaultStructuredLine(panel.kind));
+
+        ++panel.caretRow;
+        m_focusedCell = StructuredCellOrder(panel, panel.caretRow).front();
+        panel.caretCol = 0;
+
+        panel.lineErrors.assign(panel.lines.size(), std::string());
+
+        for (std::size_t i = 0; i < panel.lines.size(); ++i)
+            ValidateRawBlockLine(panel, panel.lines[i], panel.lineErrors[i]);
+
+        return;
+    }
+
+    // Tab never reaches here - it's intercepted by HandleKeyPress()'s
+    // own top-level dispatcher (see its comment) before this function
+    // is even called, exactly like it already was for every other
+    // focus target.
+
+    std::string cellText = StructuredCellText(panel, panel.caretRow, m_focusedCell);
+
+    switch (keysym)
+    {
+        case XK_BackSpace:
+            if (panel.caretCol > 0)
+            {
+                std::size_t start = Utils::Utf8PrevBoundary(cellText, panel.caretCol);
+                cellText.erase(start, panel.caretCol - start);
+                panel.caretCol = start;
+            }
+            break;
+
+        case XK_Delete:
+            if (panel.caretCol < cellText.size())
+            {
+                std::size_t end = Utils::Utf8NextBoundary(cellText, panel.caretCol);
+                cellText.erase(panel.caretCol, end - panel.caretCol);
+            }
+            break;
+
+        case XK_Left:
+            if (panel.caretCol > 0)
+                panel.caretCol = Utils::Utf8PrevBoundary(cellText, panel.caretCol);
+            else
+                MoveStructuredFocus(panel, -1);
+            return; // MoveStructuredFocus already leaves the panel in a fully valid state
+
+        case XK_Right:
+            if (panel.caretCol < cellText.size())
+                panel.caretCol = Utils::Utf8NextBoundary(cellText, panel.caretCol);
+            else
+                MoveStructuredFocus(panel, +1);
+            return;
+
+        case XK_Home:
+            panel.caretCol = 0;
+            break;
+
+        case XK_End:
+            panel.caretCol = cellText.size();
+            break;
+
+        default:
+            for (char c : typed)
+            {
+                // Neither windowrule= nor monitor='s grammar can
+                // represent a space inside one whitespace-delimited
+                // token, so it's silently swallowed here rather than
+                // producing a value that would come back split/
+                // mangled the next time this line gets parsed.
+                if (c == ' ')
+                    continue;
+
+                // The two numeric-only cells (windowrule='s
+                // workspace:<N> action and monitor='s workspace=<N>)
+                // only ever accept digits.
+                if (m_focusedCell == StructuredCell::Workspace &&
+                    !std::isdigit(static_cast<unsigned char>(c)))
+                    continue;
+
+                cellText.insert(cellText.begin() + static_cast<long>(panel.caretCol), c);
+                ++panel.caretCol;
+            }
+            break;
+    }
+
+    SetStructuredCellText(panel, panel.caretRow, m_focusedCell, cellText);
+
+    panel.lineErrors.assign(panel.lines.size(), std::string());
 
     for (std::size_t i = 0; i < panel.lines.size(); ++i)
         ValidateRawBlockLine(panel, panel.lines[i], panel.lineErrors[i]);
@@ -1228,6 +1561,248 @@ void SettingsWindow::ValidateRawBlockLine(
     }
 }
 
+SettingsWindow::WindowRuleDraft SettingsWindow::ParseWindowRuleDraft(
+    const std::string& line) const
+{
+    WindowRuleDraft draft;
+
+    std::vector<std::string> tokens = Utils::SplitWhitespace(line);
+
+    if (!tokens.empty())
+    {
+        std::string actionLower = Utils::Lower(tokens[0]);
+
+        if (actionLower.rfind("workspace:", 0) == 0)
+        {
+            draft.actionIndex = kWindowRuleWorkspaceAction;
+            draft.workspaceText = tokens[0].substr(std::strlen("workspace:"));
+        }
+        else
+        {
+            for (int i = 0; i < kWindowRuleActionCount; ++i)
+            {
+                if (actionLower == kWindowRuleActionTokens[i])
+                {
+                    draft.actionIndex = i;
+                    break;
+                }
+            }
+            // An unrecognized first token (mid-edit, or a hand-typed
+            // line this editor's never seen before) just keeps the
+            // default (Tile) rather than rejecting anything - this is
+            // a lenient *editing* parser, not the strict one
+            // ValidateRawBlockLine() already runs separately.
+        }
+    }
+
+    for (std::size_t i = 1; i < tokens.size(); ++i)
+    {
+        std::size_t colon = tokens[i].find(':');
+
+        if (colon == std::string::npos || colon == 0)
+            continue;
+
+        std::string key = Utils::Lower(tokens[i].substr(0, colon));
+        std::string value = tokens[i].substr(colon + 1); // case preserved - see WindowRuleDraft's comment
+
+        if (key == "class")         draft.classText = value;
+        else if (key == "instance") draft.instanceText = value;
+        else if (key == "title")    draft.titleText = value;
+    }
+
+    return draft;
+}
+
+std::string SettingsWindow::SerializeWindowRuleDraft(
+    const WindowRuleDraft& draft) const
+{
+    std::string line = (draft.actionIndex == kWindowRuleWorkspaceAction)
+        ? ("workspace:" + draft.workspaceText)
+        : std::string(kWindowRuleActionTokens[draft.actionIndex]);
+
+    if (!draft.classText.empty())    line += " class:" + draft.classText;
+    if (!draft.instanceText.empty()) line += " instance:" + draft.instanceText;
+    if (!draft.titleText.empty())    line += " title:" + draft.titleText;
+
+    return line;
+}
+
+SettingsWindow::MonitorRuleDraft SettingsWindow::ParseMonitorRuleDraft(
+    const std::string& line) const
+{
+    MonitorRuleDraft draft;
+
+    std::size_t comma = line.find(',');
+
+    draft.outputText = Utils::Trim(comma == std::string::npos ? line : line.substr(0, comma));
+
+    if (comma != std::string::npos)
+    {
+        std::string rest = line.substr(comma + 1);
+        std::size_t eq = rest.find("workspace=");
+
+        if (eq != std::string::npos)
+            draft.workspaceText = Utils::Trim(rest.substr(eq + std::strlen("workspace=")));
+    }
+
+    return draft;
+}
+
+std::string SettingsWindow::SerializeMonitorRuleDraft(
+    const MonitorRuleDraft& draft) const
+{
+    return draft.outputText + ",workspace=" + draft.workspaceText;
+}
+
+std::string SettingsWindow::StructuredCellText(
+    const RawBlockPanel& panel,
+    std::size_t row,
+    StructuredCell cell) const
+{
+    if (row >= panel.lines.size())
+        return std::string();
+
+    if (panel.kind == RawBlockPanel::Kind::Monitor)
+    {
+        MonitorRuleDraft draft = ParseMonitorRuleDraft(panel.lines[row]);
+        return (cell == StructuredCell::Workspace) ? draft.workspaceText : draft.outputText;
+    }
+
+    WindowRuleDraft draft = ParseWindowRuleDraft(panel.lines[row]);
+
+    switch (cell)
+    {
+        case StructuredCell::Class:     return draft.classText;
+        case StructuredCell::Instance:  return draft.instanceText;
+        case StructuredCell::Title:     return draft.titleText;
+        case StructuredCell::Workspace: return draft.workspaceText;
+        default:                        return std::string();
+    }
+}
+
+void SettingsWindow::SetStructuredCellText(
+    RawBlockPanel& panel,
+    std::size_t row,
+    StructuredCell cell,
+    const std::string& value)
+{
+    if (row >= panel.lines.size())
+        return;
+
+    if (panel.kind == RawBlockPanel::Kind::Monitor)
+    {
+        MonitorRuleDraft draft = ParseMonitorRuleDraft(panel.lines[row]);
+
+        if (cell == StructuredCell::Workspace) draft.workspaceText = value;
+        else                                   draft.outputText = value;
+
+        panel.lines[row] = SerializeMonitorRuleDraft(draft);
+        return;
+    }
+
+    WindowRuleDraft draft = ParseWindowRuleDraft(panel.lines[row]);
+
+    switch (cell)
+    {
+        case StructuredCell::Class:     draft.classText = value;     break;
+        case StructuredCell::Instance:  draft.instanceText = value;  break;
+        case StructuredCell::Title:     draft.titleText = value;     break;
+        case StructuredCell::Workspace: draft.workspaceText = value; break;
+        default: break;
+    }
+
+    panel.lines[row] = SerializeWindowRuleDraft(draft);
+}
+
+std::vector<SettingsWindow::StructuredCell> SettingsWindow::StructuredCellOrder(
+    const RawBlockPanel& panel,
+    std::size_t row) const
+{
+    if (panel.kind == RawBlockPanel::Kind::Monitor)
+        return {StructuredCell::Output, StructuredCell::Workspace};
+
+    std::vector<StructuredCell> order = {StructuredCell::Class, StructuredCell::Instance, StructuredCell::Title};
+
+    if (row < panel.lines.size() &&
+        ParseWindowRuleDraft(panel.lines[row]).actionIndex == kWindowRuleWorkspaceAction)
+        order.push_back(StructuredCell::Workspace);
+
+    return order;
+}
+
+void SettingsWindow::MoveStructuredFocus(
+    RawBlockPanel& panel,
+    int direction)
+{
+    std::vector<StructuredCell> order = StructuredCellOrder(panel, panel.caretRow);
+    auto it = std::find(order.begin(), order.end(), m_focusedCell);
+    std::size_t index = (it != order.end()) ? static_cast<std::size_t>(it - order.begin()) : 0;
+
+    if (direction > 0)
+    {
+        if (index + 1 < order.size())
+        {
+            m_focusedCell = order[index + 1];
+            panel.caretCol = 0;
+            return;
+        }
+
+        if (panel.caretRow + 1 < panel.lines.size())
+        {
+            ++panel.caretRow;
+            m_focusedCell = StructuredCellOrder(panel, panel.caretRow).front();
+            panel.caretCol = 0;
+        }
+
+        return;
+    }
+
+    if (index > 0)
+    {
+        m_focusedCell = order[index - 1];
+        panel.caretCol = StructuredCellText(panel, panel.caretRow, m_focusedCell).size();
+        return;
+    }
+
+    if (panel.caretRow > 0)
+    {
+        --panel.caretRow;
+        m_focusedCell = StructuredCellOrder(panel, panel.caretRow).back();
+        panel.caretCol = StructuredCellText(panel, panel.caretRow, m_focusedCell).size();
+    }
+}
+
+void SettingsWindow::CycleStructuredAction(
+    RawBlockPanel& panel,
+    std::size_t row)
+{
+    if (row >= panel.lines.size())
+        return;
+
+    WindowRuleDraft draft = ParseWindowRuleDraft(panel.lines[row]);
+    draft.actionIndex = (draft.actionIndex + 1) % (kWindowRuleActionCount + 1);
+
+    // Cycling off of Workspace clears its now-hidden text so it
+    // doesn't silently reappear, stale, if the user cycles back to
+    // Workspace later - a fresh field is less surprising than a
+    // number they don't remember typing.
+    if (draft.actionIndex != kWindowRuleWorkspaceAction)
+        draft.workspaceText.clear();
+
+    panel.lines[row] = SerializeWindowRuleDraft(draft);
+
+    panel.lineErrors.assign(panel.lines.size(), std::string());
+
+    for (std::size_t i = 0; i < panel.lines.size(); ++i)
+        ValidateRawBlockLine(panel, panel.lines[i], panel.lineErrors[i]);
+}
+
+std::string SettingsWindow::DefaultStructuredLine(
+    RawBlockPanel::Kind kind) const
+{
+    return (kind == RawBlockPanel::Kind::Monitor) ? std::string(",workspace=1") : std::string("tile");
+}
+
 bool SettingsWindow::FieldDirty(
     const Field& field) const
 {
@@ -1257,7 +1832,7 @@ bool SettingsWindow::AnyDirty() const
 
 // --- commands -----------------------------------------------------------------
 
-void SettingsWindow::Apply()
+void SettingsWindow::Save()
 {
     int applied = 0;
     int skipped = 0;
@@ -1318,7 +1893,7 @@ void SettingsWindow::Apply()
         return;
     }
 
-    // workspace.count itself may just have been applied - regenerate
+    // workspace.count itself may just have been saved - regenerate
     // the per-workspace fields to match before the next redraw.
     BuildWorkspaceFields();
 
@@ -1327,23 +1902,22 @@ void SettingsWindow::Apply()
     std::ostringstream message;
 
     if (applied == 0 && skipped == 0)
-        message << "Nothing to apply.";
+        message << "Nothing to save.";
     else
     {
-        message << "Applied " << applied << " change" << (applied == 1 ? "" : "s") << ".";
+        message << "Saved " << applied << " change" << (applied == 1 ? "" : "s") << ".";
 
         if (skipped > 0)
             message << " " << skipped << " field" << (skipped == 1 ? " has" : "s have")
                     << " an error and " << (skipped == 1 ? "was" : "were") << " skipped.";
     }
 
+    // Deliberately no m_running = false here - Save keeps the window
+    // open (see this function's own header-comment: it replaces both
+    // the old Apply and Save actions, and the whole point of the
+    // merge was that you should never have to leave Settings, or
+    // restart Kohiko, just to confirm a change actually took).
     ShowStatus(message.str());
-}
-
-void SettingsWindow::Save()
-{
-    Apply();
-    m_running = false;
 }
 
 void SettingsWindow::ResetVisibleToDefault()
@@ -1367,7 +1941,7 @@ void SettingsWindow::ResetVisibleToDefault()
         panel->lineErrors.clear();
     }
 
-    ShowStatus("Reset to defaults - not yet saved. Click Apply or Save to write to disk.");
+    ShowStatus("Reset to defaults - not yet saved. Click Save to write to disk.");
 }
 
 void SettingsWindow::ReloadRunningKohiko() const
@@ -1853,6 +2427,12 @@ void SettingsWindow::LayoutAndDrawRawBlock(
     int width,
     int& outHeight)
 {
+    if (panel.kind != RawBlockPanel::Kind::RawText)
+    {
+        LayoutAndDrawStructuredBlock(panel, x, y, width, outHeight);
+        return;
+    }
+
     int titleY = y + m_boldFont.Ascent();
     DrawText(x, titleY, panel.title, m_foregroundPixel);
 
@@ -1935,6 +2515,158 @@ void SettingsWindow::LayoutAndDrawRawBlock(
     outHeight = (afterY - y) + 20;
 }
 
+void SettingsWindow::LayoutAndDrawStructuredBlock(
+    RawBlockPanel& panel,
+    int x,
+    int y,
+    int width,
+    int& outHeight)
+{
+    int titleY = y + m_boldFont.Ascent();
+    DrawText(x, titleY, panel.title, m_foregroundPixel);
+
+    if (RawBlockDirty(panel))
+    {
+        int tw = m_font.TextWidth(panel.title);
+        XSetForeground(m_display, m_gc, m_accentPixel);
+        XFillArc(m_display, m_window, m_gc, x + tw + 10, y + 4, 6, 6, 0, 360 * 64);
+    }
+
+    int helpY = titleY + 20;
+    std::vector<std::string> helpLines = WrapText(panel.helpText, width);
+
+    for (const std::string& line : helpLines)
+    {
+        DrawText(x, helpY, line, m_mutedPixel);
+        helpY += 16;
+    }
+
+    int rowY = helpY + 10;
+
+    panel.rowRects.assign(panel.lines.size(), RawBlockPanel::RowRects{});
+
+    // Draws one labelled text cell, with the caret if this exact
+    // (row, cell) is the one currently focused - shared by every
+    // text cell below, both WindowRule's and Monitor's.
+    auto drawCell = [&](const Rect& rect, const std::string& placeholder, const std::string& value,
+                         std::size_t row, StructuredCell cell)
+    {
+        bool focused = (m_focusedRawBlock == &panel) && (panel.caretRow == row) && (m_focusedCell == cell);
+
+        XSetForeground(m_display, m_gc, m_fieldPixel);
+        XFillRectangle(m_display, m_window, m_gc, rect.x, rect.y,
+            static_cast<unsigned int>(rect.width), static_cast<unsigned int>(rect.height));
+        XSetForeground(m_display, m_gc, focused ? m_accentPixel : m_borderPixel);
+        XDrawRectangle(m_display, m_window, m_gc, rect.x, rect.y,
+            static_cast<unsigned int>(rect.width - 1), static_cast<unsigned int>(rect.height - 1));
+
+        int textStartX = rect.x + 6;
+        bool showingPlaceholder = value.empty() && !focused;
+
+        XRectangle clip{
+            static_cast<short>(rect.x), static_cast<short>(rect.y),
+            static_cast<unsigned short>(rect.width), static_cast<unsigned short>(rect.height)};
+        XftDrawSetClipRectangles(m_xftDraw, 0, 0, &clip, 1);
+
+        DrawText(textStartX, rect.y + rect.height / 2 + m_font.Ascent() / 2,
+            showingPlaceholder ? placeholder : value,
+            showingPlaceholder ? m_mutedPixel : m_foregroundPixel);
+
+        if (focused)
+        {
+            int caretX = textStartX + m_font.TextWidth(value.substr(0, panel.caretCol));
+            XSetForeground(m_display, m_gc, m_foregroundPixel);
+            XFillRectangle(m_display, m_window, m_gc, caretX, rect.y + 4, 2,
+                static_cast<unsigned int>(rect.height - 8));
+        }
+
+        XRectangle contentClip{
+            static_cast<short>(m_contentRect.x), static_cast<short>(m_contentRect.y),
+            static_cast<unsigned short>(std::max(0, m_contentRect.width)),
+            static_cast<unsigned short>(std::max(0, m_contentRect.height))};
+        XftDrawSetClipRectangles(m_xftDraw, 0, 0, &contentClip, 1);
+    };
+
+    for (std::size_t i = 0; i < panel.lines.size(); ++i)
+    {
+        RawBlockPanel::RowRects rowRects;
+        int rx = x;
+
+        if (panel.kind == RawBlockPanel::Kind::WindowRule)
+        {
+            WindowRuleDraft draft = ParseWindowRuleDraft(panel.lines[i]);
+            bool showsWorkspace = (draft.actionIndex == kWindowRuleWorkspaceAction);
+
+            rowRects.actionRect = Rect{rx, rowY, kStructuredActionW, kStructuredRowH};
+            std::string actionLabel = showsWorkspace ? "Workspace" : kWindowRuleActionLabels[draft.actionIndex];
+            DrawButton(rowRects.actionRect, actionLabel, true, false);
+            rx += kStructuredActionW + kStructuredFieldGap;
+
+            if (showsWorkspace)
+            {
+                rowRects.workspaceRect = Rect{rx, rowY, kStructuredWorkspaceW, kStructuredRowH};
+                drawCell(rowRects.workspaceRect, "N", draft.workspaceText, i, StructuredCell::Workspace);
+                rx += kStructuredWorkspaceW + kStructuredFieldGap;
+            }
+
+            rowRects.removeRect = Rect{x + width - kStructuredRemoveW, rowY, kStructuredRemoveW, kStructuredRowH};
+
+            int fieldsRight = rowRects.removeRect.x - kStructuredFieldGap;
+            int fieldsTotalW = std::max(0, fieldsRight - rx);
+            int perFieldW = std::max(60, (fieldsTotalW - 2 * kStructuredFieldGap) / 3);
+
+            rowRects.classRect = Rect{rx, rowY, perFieldW, kStructuredRowH};
+            drawCell(rowRects.classRect, "class:", draft.classText, i, StructuredCell::Class);
+            rx += perFieldW + kStructuredFieldGap;
+
+            rowRects.instanceRect = Rect{rx, rowY, perFieldW, kStructuredRowH};
+            drawCell(rowRects.instanceRect, "instance:", draft.instanceText, i, StructuredCell::Instance);
+            rx += perFieldW + kStructuredFieldGap;
+
+            rowRects.titleRect = Rect{rx, rowY, std::max(60, fieldsRight - rx), kStructuredRowH};
+            drawCell(rowRects.titleRect, "title:", draft.titleText, i, StructuredCell::Title);
+
+            DrawButton(rowRects.removeRect, "x", true, false);
+        }
+        else // Monitor
+        {
+            rowRects.removeRect = Rect{x + width - kStructuredRemoveW, rowY, kStructuredRemoveW, kStructuredRowH};
+            rowRects.workspaceRect = Rect{
+                rowRects.removeRect.x - kStructuredFieldGap - kStructuredWorkspaceW,
+                rowY, kStructuredWorkspaceW, kStructuredRowH};
+
+            int outputW = std::max(80, rowRects.workspaceRect.x - kStructuredFieldGap - rx);
+            rowRects.outputRect = Rect{rx, rowY, outputW, kStructuredRowH};
+
+            MonitorRuleDraft draft = ParseMonitorRuleDraft(panel.lines[i]);
+            drawCell(rowRects.outputRect, "e.g. HDMI-1", draft.outputText, i, StructuredCell::Output);
+            drawCell(rowRects.workspaceRect, "WS", draft.workspaceText, i, StructuredCell::Workspace);
+
+            DrawButton(rowRects.removeRect, "x", true, false);
+        }
+
+        panel.rowRects[i] = rowRects;
+        rowY += kStructuredRowH;
+
+        bool lineHasError = i < panel.lineErrors.size() && !panel.lineErrors[i].empty();
+
+        if (lineHasError)
+        {
+            DrawText(x, rowY + 14, panel.lineErrors[i], m_errorPixel);
+            rowY += 20;
+        }
+
+        rowY += kStructuredRowGap;
+    }
+
+    panel.addRowButtonRect = Rect{x, rowY, kStructuredAddButtonW, kStructuredAddButtonH};
+    DrawButton(panel.addRowButtonRect, (panel.kind == RawBlockPanel::Kind::Monitor) ? "+ Add monitor rule" : "+ Add rule", true, false);
+    rowY += kStructuredAddButtonH;
+
+    panel.rect = Rect{x, y, width, rowY - y};
+    outHeight = (rowY - y) + 20;
+}
+
 void SettingsWindow::LayoutAndDrawBottomBar()
 {
     int barY = m_geometry.height - kBottomBarHeight;
@@ -1950,12 +2682,9 @@ void SettingsWindow::LayoutAndDrawBottomBar()
 
     m_saveButtonRect = Rect{bx, by, buttonW, buttonH};
     bx -= buttonW + gap;
-    m_applyButtonRect = Rect{bx, by, buttonW, buttonH};
-    bx -= buttonW + gap;
     m_resetButtonRect = Rect{bx, by, buttonW, buttonH};
 
     DrawButton(m_resetButtonRect, "Reset", true, false);
-    DrawButton(m_applyButtonRect, "Apply", true, false);
     DrawButton(m_saveButtonRect, "Save", true, true);
 
     std::string status = m_statusMessage;

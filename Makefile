@@ -36,6 +36,24 @@ ifeq ($(shell pkg-config --exists xrandr && echo yes),yes)
     LIBS     += $(shell pkg-config --libs xrandr)
 endif
 
+# XScreenSaver extension - idle-timeout locking and display-sleep
+# inhibition (see include/IdleWatcher.h). Same auto-detected,
+# gracefully-optional treatment as XRandr above.
+ifeq ($(shell pkg-config --exists xscrnsaver && echo yes),yes)
+    CXXFLAGS += -DKOHIKO_HAVE_XSS
+    LIBS     += $(shell pkg-config --libs xscrnsaver)
+endif
+
+# libdbus - the primary mechanism behind display-sleep inhibition (see
+# include/ScreenSaverInhibitor.h). NOT required: Kohiko still works
+# fine without it (falls back to the X11 fullscreen-window heuristic
+# alone in WindowManager::CheckSleepInhibition()).
+ifeq ($(shell pkg-config --exists dbus-1 && echo yes),yes)
+    CXXFLAGS += -DKOHIKO_HAVE_DBUS
+    CXXFLAGS += $(shell pkg-config --cflags dbus-1)
+    LIBS     += $(shell pkg-config --libs dbus-1)
+endif
+
 .PHONY: all clean test install
 
 all: kohiko kohikoctl kohiko-settings
@@ -62,9 +80,10 @@ kohiko-settings: $(SETTINGS_OBJ) build/kohiko-settings-main.o
 build/kohiko-settings-main.o: tools/kohiko-settings.cpp | build
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
-test: build/test_bsptree build/test_launcherscoring
+test: build/test_bsptree build/test_launcherscoring build/test_placementhabits
 	./build/test_bsptree
 	./build/test_launcherscoring
+	./build/test_placementhabits
 
 build/test_bsptree: tests/test_bsptree.cpp src/BSPTree.cpp src/BSPLeaf.cpp src/BSPSplit.cpp src/ManagedWindow.cpp src/LayoutEngine.cpp | build
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
@@ -73,6 +92,12 @@ build/test_bsptree: tests/test_bsptree.cpp src/BSPTree.cpp src/BSPLeaf.cpp src/B
 # same reasoning as test_bsptree above - so this is folded straight
 # into `make test` rather than kept separate like test-monitors is.
 build/test_launcherscoring: tests/test_launcherscoring.cpp src/LauncherScoring.cpp src/Utils.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
+
+# Same reasoning again - pure logic, plus a throwaway XDG_DATA_HOME
+# the test redirects itself to (see the file) so it never touches a
+# real user's actual learned habits.
+build/test_placementhabits: tests/test_placementhabits.cpp src/PlacementHabitStore.cpp src/Xdg.cpp | build
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
 
 # Needs a real X11/XRandr connection - gracefully skips the checks

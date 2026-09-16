@@ -497,6 +497,64 @@ std::string BSPTree::Serialize() const
     return m_root ? SerializeNode(m_root.get()) : "null";
 }
 
+ManagedWindow* BSPTree::Representative(BSPNode* node) const
+{
+    while (!node->IsLeaf())
+        node = static_cast<BSPSplit*>(node)->Left();
+
+    return static_cast<BSPLeaf*>(node)->Window();
+}
+
+void BSPTree::CollectPlacementRulesRecursive(
+    BSPNode* node,
+    std::vector<PlacementRule>& out) const
+{
+    if (node->IsLeaf())
+        return;
+
+    auto* split = static_cast<BSPSplit*>(node);
+
+    ManagedWindow* leftRep = Representative(split->Left());
+    ManagedWindow* rightRep = Representative(split->Right());
+
+    // Emitted *before* recursing: a rule nested inside the right
+    // subtree may itself need rightRep as its own neighbor, and this
+    // is the rule that actually puts rightRep in the tree in the
+    // first place. See this method's declaration in BSPTree.h for
+    // why post-order (rule-after-recursion) breaks replay.
+    out.push_back(PlacementRule{rightRep->Id(), leftRep->Id(), split->Direction()});
+
+    CollectPlacementRulesRecursive(split->Left(), out);
+    CollectPlacementRulesRecursive(split->Right(), out);
+}
+
+std::vector<BSPTree::PlacementRule> BSPTree::CollectPlacementRules() const
+{
+    std::vector<PlacementRule> rules;
+
+    if (m_root)
+        CollectPlacementRulesRecursive(m_root.get(), rules);
+
+    return rules;
+}
+
+bool BSPTree::InsertNextTo(
+    ManagedWindow* window,
+    ManagedWindow* neighbor,
+    SplitDirection direction)
+{
+    if (!window || !neighbor)
+        return false;
+
+    BSPLeaf* anchor = FindLeaf(m_root.get(), neighbor);
+
+    if (!anchor)
+        return false;
+
+    SpliceIn(window, anchor, direction);
+    return true;
+}
+
 BSPLeaf* BSPTree::FindLeaf(BSPNode* node, ManagedWindow* window) const
 {
     if (!node)

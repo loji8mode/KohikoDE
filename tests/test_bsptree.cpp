@@ -384,6 +384,171 @@ int main()
           "no large reserved-but-empty area is left over - the two survivors "
           "between them account for essentially the whole screen");
 
+    std::printf(
+        "\n-- Collapse-on-remove preserves the surrounding layout "
+        "(A|B/C -> close B -> A|C, never a full re-stack) --\n");
+
+    {
+        // Exactly the release-note example: A takes the left half, B/C
+        // stack top/bottom in the right half. Closing B must promote C
+        // to fill the whole right half (A|C, still side by side) -
+        // never collapse the *outer* split into a top/bottom stack of
+        // A over C.
+        ManagedWindow* wA = makeWindow(20);
+        ManagedWindow* wB = makeWindow(21);
+        ManagedWindow* wC = makeWindow(22);
+
+        BSPTree collapseTree;
+
+        collapseTree.Insert(wA, area, 4, 50, 50);
+        collapseTree.Focus(wA);
+        collapseTree.Insert(wB, area, 4, 50, 50);
+        collapseTree.Focus(wB);
+        collapseTree.Insert(wC, area, 4, 50, 50);
+        collapseTree.Focus(wC);
+
+        BSPNode* preRoot = collapseTree.Root();
+        Check(!preRoot->IsLeaf(), "A|B/C: root is a split before removal");
+        auto* preRootSplit = static_cast<BSPSplit*>(preRoot);
+        Check(preRootSplit->Direction() == SplitDirection::Vertical,
+              "A|B/C: outer split is side-by-side (A on the left)");
+        Check(static_cast<BSPLeaf*>(preRootSplit->Left())->Window() == wA,
+              "A|B/C: left side of the outer split is A");
+        Check(!preRootSplit->Right()->IsLeaf(),
+              "A|B/C: right side of the outer split is itself a split (B/C stacked)");
+
+        collapseTree.Remove(wB);
+        layout.Apply(collapseTree.Root(), area, params);
+
+        Check(collapseTree.Count() == 2, "A|C: two windows remain after closing B");
+
+        BSPNode* postRoot = collapseTree.Root();
+        Check(!postRoot->IsLeaf(), "A|C: root is still a split (not a single collapsed leaf)");
+
+        auto* postRootSplit = static_cast<BSPSplit*>(postRoot);
+        Check(postRootSplit->Direction() == SplitDirection::Vertical,
+              "A|C: the surviving split is side-by-side, exactly like the original outer "
+              "split - NOT a top/bottom stack of A over C");
+        Check(postRootSplit->Left()->IsLeaf() &&
+              static_cast<BSPLeaf*>(postRootSplit->Left())->Window() == wA,
+              "A|C: A is still the left/first child, untouched");
+        Check(postRootSplit->Right()->IsLeaf() &&
+              static_cast<BSPLeaf*>(postRootSplit->Right())->Window() == wC,
+              "A|C: C was promoted straight into B's old slot as the right/second child");
+
+        // C should now span the *entire* right half B and C used to
+        // share, not just B's old (smaller) top slice of it.
+        Check(wC->Geometry().height > wA->Geometry().height / 2,
+              "A|C: C actually expanded to fill the whole right half vertically, "
+              "rather than staying pinned to B's old (half-height) slot");
+    }
+
+    std::printf(
+        "\n-- Collapse-on-remove in a deeper tree only touches the removed "
+        "leaf's own sibling, nothing further up the tree --\n");
+
+    {
+        // A | (B / (C|D)): removing the deeply-nested C must only
+        // promote its sibling D into the C|D slot - A and B, and the
+        // ratio between A and the right column as a whole, must be
+        // completely undisturbed.
+        ManagedWindow* wA = makeWindow(23);
+        ManagedWindow* wB = makeWindow(24);
+        ManagedWindow* wC = makeWindow(25);
+        ManagedWindow* wD = makeWindow(26);
+
+        BSPTree deepTree;
+
+        deepTree.Insert(wA, area, 4, 50, 50);
+        deepTree.Focus(wA);
+        deepTree.Insert(wB, area, 4, 50, 50);
+        deepTree.Focus(wB);
+        deepTree.Insert(wC, area, 4, 50, 50);
+        deepTree.Focus(wC);
+        deepTree.Insert(wD, area, 4, 50, 50);
+        deepTree.Focus(wD);
+
+        layout.Apply(deepTree.Root(), area, params);
+
+        Rect aBefore = wA->Geometry();
+        Rect bBefore = wB->Geometry();
+
+        deepTree.Remove(wC);
+        layout.Apply(deepTree.Root(), area, params);
+
+        Check(deepTree.Count() == 3, "3 windows remain after closing the deeply-nested C");
+        Check(wA->Geometry().x == aBefore.x && wA->Geometry().y == aBefore.y &&
+              wA->Geometry().width == aBefore.width && wA->Geometry().height == aBefore.height,
+              "A's geometry is byte-for-byte unchanged - removing C two levels down "
+              "never touches an unrelated ancestor's split");
+        Check(wB->Geometry().x == bBefore.x && wB->Geometry().y == bBefore.y &&
+              wB->Geometry().width == bBefore.width && wB->Geometry().height == bBefore.height,
+              "B's geometry is likewise completely unchanged");
+
+        Rect dAfter = wD->Geometry();
+        Check(dAfter.width > (bBefore.width / 2),
+              "D (C's sibling, previously side-by-side with C) is the one window that "
+              "actually grew, expanding sideways to fill C's freed slot");
+    }
+
+    std::printf(
+        "\n-- Session Restore: CollectPlacementRules() produces an order "
+        "InsertNextTo() can actually replay --\n");
+
+    {
+        // A | (B / C): the same shape as the very first collapse test
+        // above, but this time exercising the *other* direction -
+        // reconstructing a tree from scratch via CollectPlacementRules()
+        // + InsertNextTo(), the way session restore rebuilds a
+        // workspace's BSP layout across a restart. Deliberately picked
+        // because it's the smallest tree where a naive post-order rule
+        // collection gets the replay order backwards: the B|C split
+        // sits *inside* the A|(B|C) split, so its own connecting rule
+        // must not be handed to InsertNextTo() before the outer rule
+        // that actually places one of B or C in the tree in the first
+        // place.
+        ManagedWindow* wA = makeWindow(30);
+        ManagedWindow* wB = makeWindow(31);
+        ManagedWindow* wC = makeWindow(32);
+
+        BSPTree original;
+        original.Insert(wA, area, 4, 50, 50);
+        original.Focus(wA);
+        original.Insert(wB, area, 4, 50, 50);
+        original.Focus(wB);
+        original.Insert(wC, area, 4, 50, 50);
+        original.Focus(wC);
+
+        std::vector<BSPTree::PlacementRule> rules = original.CollectPlacementRules();
+        Check(rules.size() == 2, "A|(B/C): exactly 2 placement rules for 3 windows");
+
+        // A has no rule about it anywhere - it's the implicit seed.
+        bool aHasNoRule = true;
+        for (const auto& r : rules)
+            if (r.window == wA->Id())
+                aHasNoRule = false;
+        Check(aHasNoRule, "A|(B/C): the leftmost window (A) needs no placement rule");
+
+        BSPTree rebuilt;
+        rebuilt.Insert(wA); // the implicit seed, placed the ordinary way
+        bool replayOk = true;
+        for (const auto& rule : rules)
+        {
+            ManagedWindow* w = (rule.window == wB->Id()) ? wB : wC;
+            ManagedWindow* n = (rule.neighbor == wA->Id()) ? wA
+                              : (rule.neighbor == wB->Id()) ? wB : wC;
+            if (!rebuilt.InsertNextTo(w, n, rule.direction))
+                replayOk = false;
+        }
+
+        Check(replayOk,
+              "A|(B/C): every rule replayed successfully in the order "
+              "CollectPlacementRules() returned it - this is the exact "
+              "case a naive post-order collection gets backwards, "
+              "failing to find B or C's neighbour still in the tree");
+        Check(rebuilt.Count() == 3, "A|(B/C): all 3 windows present after replay");
+    }
+
     std::printf("\nALL %d CHECKS PASSED.\n", g_pass);
     return 0;
 }

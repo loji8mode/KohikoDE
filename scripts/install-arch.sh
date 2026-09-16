@@ -47,6 +47,10 @@ echo "==> Installing dependencies (pacman)"
 #                   box - for CJK glyphs too, also install e.g. noto-fonts-cjk
 #                   (a large package, so not pulled in automatically here)
 # xorg-server     - to have an X server to run a window manager under at all
+# libxss          - optional idle-timeout locking, and the X11 fallback half
+#                   of display-sleep inhibition, auto-detected by the Makefile
+# dbus            - optional; provides libdbus, the primary (D-Bus) half of
+#                   display-sleep inhibition, auto-detected by the Makefile
 # flameshot       - default.conf's exec.screenshot, bound to Print - swap the
 #                   package here too if you point exec.screenshot at something else
 sudo pacman -S --needed --noconfirm \
@@ -57,6 +61,8 @@ sudo pacman -S --needed --noconfirm \
     libxft \
     ttf-dejavu \
     xorg-server \
+    libxss \
+    dbus \
     flameshot
 
 echo "==> Building (make -j\$(nproc))"

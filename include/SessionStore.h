@@ -11,6 +11,7 @@ namespace Kohiko
 
 class ManagedWindow;
 class MonitorManager;
+class WorkspaceManager;
 
 // One window's state as of the last clean shutdown. See
 // WindowManager::Manage() for how session.restore_priority decides
@@ -23,6 +24,19 @@ struct SessionWindowState
     bool fullscreen = false;
     Rect floatingGeometry{};   // width/height <= 0 means "none saved"
     std::string monitorName;   // XRandr output name; may be empty
+
+    // Where this window sat in its workspace's BSP tree, expressed
+    // relative to another window rather than as absolute coordinates
+    // (which wouldn't survive a resolution/monitor-count change
+    // anyway) - see BSPTree::CollectPlacementRules()/InsertNextTo()
+    // for how this gets produced and replayed. hasNeighbor is false
+    // for a floating window, and for whichever single tiled window in
+    // each workspace happened to be the leftmost leaf (it needs no
+    // neighbor - it's just however the ordinary Insert() places the
+    // first window into an empty tree).
+    bool hasNeighbor = false;
+    WindowID neighborId = 0;
+    SplitDirection neighborDirection = SplitDirection::Vertical;
 };
 
 // Persists every managed window's placement across a Kohiko restart,
@@ -50,13 +64,17 @@ public:
         WindowID id
     ) const;
 
-    // Snapshots every currently managed window and writes it to disk.
-    // Called once, from WindowManager::Shutdown(). Scratchpad windows
-    // are deliberately skipped - Scratchpad's own single-slot state
-    // isn't part of what session restore covers.
+    // Snapshots every currently managed window and writes it to disk -
+    // workspace/monitor/floating-geometry/fullscreen from `windows`
+    // directly, and each tiled window's BSP neighbor via `workspaces`
+    // (see BSPTree::CollectPlacementRules()). Called once, from
+    // WindowManager::Shutdown(). Scratchpad windows are deliberately
+    // skipped - Scratchpad's own single-slot state isn't part of what
+    // session restore covers.
     void Save(
         const std::vector<ManagedWindow*>& windows,
-        const MonitorManager& monitors
+        const MonitorManager& monitors,
+        const WorkspaceManager& workspaces
     );
 
 private:

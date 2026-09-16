@@ -1,7 +1,7 @@
 # Kohiko Project History
 
 This document traces the evolution of Kohiko, a C++20 / X11 tiling window
-manager, across its released versions from 0.1.0 through 0.16.0. It is
+manager, across its released versions from 0.1.0 through 0.18.0. It is
 derived from a direct comparison of the source, configuration, and
 documentation of each released version against the one before it.
 
@@ -296,25 +296,104 @@ scoped.
 
 --------------------------------------------------------------------------
 
+## Phase 9 — Polish and Predictive Placement (0.18.0)
+
+**Versions:** 0.18.0
+
+**Goals:**
+Follow through on 0.17.0's own stated direction — finish the three
+narrower Kohiko Settings/lock-screen refinements it had explicitly left
+as "Planned" — while also substantially deepening Session Restore and
+closing out a display-sleep gap that had never had dedicated support at
+all, all without touching the tiling/insertion algorithm itself.
+
+**Major developments:**
+- Kohiko Settings' Apply/Save/Reset trio collapsed to just Save/Reset:
+  Save now validates, writes, and tells a running Kohiko to reload, all
+  without closing the window — Apply and the old closing Save are now
+  the exact same action, so there's no longer a reason to leave Settings
+  just to confirm a change actually took.
+- Session Restore now remembers a tiled window's actual position in its
+  workspace's BSP tree relative to its neighbours (`BSPTree::
+  CollectPlacementRules()`/`InsertNextTo()`), not just which workspace
+  it was on — best-effort by nature, since it depends on whichever
+  neighbour a window was recorded against having already reappeared
+  this session.
+- Adaptive placement: a new, independent learning system
+  (`PlacementHabitStore`) that watches manual workspace moves and manual
+  tiled repositioning, and — once a genuinely repeated, consistent
+  pattern emerges, never from a single observation — starts placing new
+  windows of that same application accordingly, during an ordinary
+  session and not only after a restart.
+- Kohiko Settings: click-to-position text caret (mapping a click's pixel
+  position back to the nearest character boundary via the same font
+  metrics already used to draw the caret) in every text field, plus
+  structured, row-based editors for `windowrule=`/`monitor=` in place of
+  the raw one-line-per-rule text block — a click-to-cycle action button
+  and per-selector text fields that still write out the exact same
+  underlying config syntax.
+- `lockscreen.idle_timeout_minutes`: genuine idle-timeout locking,
+  independent of `lockscreen.after`'s Suspend/startup triggers, using
+  the X11 XScreenSaver extension to measure idle time server-wide.
+- Display-sleep inhibition: Kohiko now provides the standard
+  `org.freedesktop.ScreenSaver`/`org.freedesktop.PowerManagement` D-Bus
+  `Inhibit`/`UnInhibit` interfaces itself whenever nothing else on the
+  session bus already does, so browsers, video players, and
+  presentation software already built to ask a desktop not to sleep the
+  screen — regardless of whether their window is fullscreen — work with
+  Kohiko out of the box; a plain "is a visible window fullscreen" X11
+  check remains as a fallback for anything that isn't D-Bus-aware. Ties
+  into the exact same idle counter DPMS's own timers read, via
+  `XResetScreenSaver`, rather than touching DPMS configuration directly.
+- Two new optional, gracefully-degrading build dependencies following
+  the project's existing XRandr precedent: `libxss-dev` (idle detection
+  and the fullscreen-fallback half of sleep inhibition) and
+  `libdbus-1-dev` (the primary half of sleep inhibition) — Kohiko still
+  builds and runs completely normally without either, just without the
+  one feature each backs.
+
+**Lessons visible from the repository:**
+Every one of 0.17.0's three "Planned" refinements shipped in the very
+next release, in the order they were listed — a much tighter follow-
+through loop than several earlier phases, where a stated direction
+sometimes took multiple releases to materialize (multi-monitor support
+was flagged well before Phase 4 actually delivered it). Session Restore
+and adaptive placement were not on the "Planned" list at all, suggesting
+this release's scope came from two different sources at once: closing
+out a known backlog item and independently deepening an existing
+feature area. The BSP collapse behaviour and the underlying tiling
+insertion algorithm were both explicitly left untouched throughout —
+the project's tiling core has now gone several releases without a
+structural change, with new work consistently landing in the layers
+built on top of it (session persistence, learned habits, the
+configuration surface) rather than in the BSP tree itself.
+
+--------------------------------------------------------------------------
+
 ## Current Direction
 
-As of 0.17.0, Kohiko presents itself as a largely self-contained X11
+As of 0.18.0, Kohiko presents itself as a largely self-contained X11
 tiling window manager and minimal desktop session: its own bar, native
-launcher and notepad, native lock screen, power menu, session restore,
-multi-monitor support, and now a native settings GUI, with a
-deliberately small and shrinking set of external dependencies (Xlib,
-optionally XRandr, Imlib2, Xft/fontconfig, and libpam — GTK3 was
-removed in 0.15.0).
+launcher and notepad, native lock screen with both Suspend-triggered and
+idle-timeout automatic locking, a power menu, session restore that now
+tracks BSP position as well as workspace/monitor/floating state, an
+adaptive placement system that learns per-application habits during
+ordinary use, multi-monitor support, standards-based display-sleep
+inhibition, and a native settings GUI with structured editors for its
+two most syntax-heavy repeatable directives — all on a deliberately
+small and still-optional-where-possible set of external dependencies
+(Xlib, optionally XRandr/XScreenSaver/D-Bus, Imlib2, Xft/fontconfig, and
+libpam — GTK3 was removed in 0.15.0).
 
-The 0.17.0 README's "Planned" section no longer lists a configuration
-GUI at all, since this release builds it; the items remaining there are
-narrower refinements to what already exists (click-to-position text
-caret in Kohiko Settings, structured editors for window/monitor rules
-in place of raw-syntax text blocks, and idle-timeout locking), rather
-than a new major feature area. This suggests the project's next
-direction is continued refinement of the surface it has already built
-out, rather than expansion into new functionality — consistent with
-the "Intentionally unsupported" section (a deliberately single-slot
-scratchpad, an intentionally minimal notepad, no bound floating-window
-move) that indicates the project is deliberately bounding its own
-scope rather than growing it indefinitely.
+The README's "Planned" section is empty as of this release — every item
+it named going in was delivered, and nothing new was added to replace
+them. Combined with this phase's own pattern of two significant,
+un-"Planned" feature areas (Session Restore's BSP-position tracking and
+adaptive placement) shipping alongside the backlog items, this suggests
+Kohiko's trajectory has shifted from working through an explicit,
+publicly-tracked backlog toward organically deepening features that
+already exist, wherever the most friction was found — consistent with a
+project whose core scope (per "Intentionally unsupported") is considered
+essentially settled, with remaining effort going into making what's
+already there feel more considered rather than into growing the feature
+list itself.

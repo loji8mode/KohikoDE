@@ -5,6 +5,7 @@
 #include "CursorManager.h"
 #include "EventDispatcher.h"
 #include "IPCServer.h"
+#include "IdleWatcher.h"
 #include "KeyboardManager.h"
 #include "Launcher.h"
 #include "LayoutEngine.h"
@@ -12,8 +13,10 @@
 #include "MonitorManager.h"
 #include "MouseManager.h"
 #include "Notepad.h"
+#include "PlacementHabitStore.h"
 #include "PowerMenu.h"
 #include "Scratchpad.h"
+#include "ScreenSaverInhibitor.h"
 #include "SessionStore.h"
 #include "SystemTray.h"
 #include "Types.h"
@@ -75,6 +78,10 @@ public:
     EventDispatcher& Dispatcher();
 
     IPCServer& Ipc();
+
+    // For EventLoop's own select() set, exactly like Ipc() above -
+    // see ScreenSaverInhibitor::Fd()/Dispatch().
+    ScreenSaverInhibitor& SleepInhibitor();
 
     // Called by EventLoop: roughly once a second when idle so the
     // bar's clock keeps ticking with no X11/IPC activity, or as often
@@ -241,6 +248,33 @@ private:
     bool LockScreenManualAllowed() const;
     bool LockScreenAutoOnSuspend() const;
     bool LockScreenAutoOnStartup() const;
+
+    // Idle-timeout locking (lockscreen.idle_timeout_minutes) - called
+    // once per Tick(). A no-op whenever the extension IdleWatcher
+    // needs isn't available, the screen is already locked, locking is
+    // fully disabled (lockscreen.after=never), or the timeout itself
+    // is 0 (disabled, the default).
+    void CheckIdleTimeoutLock();
+
+    // Display-sleep inhibition (see include/ScreenSaverInhibitor.h) -
+    // called once per Tick(). Keeps the display from powering off via
+    // DPMS while there's a reason it shouldn't: an application
+    // actively holding a D-Bus Inhibit() (the primary mechanism - any
+    // video/media player or presentation tool that supports the
+    // standard org.freedesktop.ScreenSaver/PowerManagement
+    // interfaces, whether or not its window is fullscreen), or,
+    // failing that, IsAnyVisibleWindowFullscreen() as an X11-only
+    // fallback for content that doesn't make that call itself. Does
+    // NOT touch DPMS/screensaver settings when neither condition
+    // holds - the display's own configured timeout keeps counting
+    // down completely normally the rest of the time.
+    void CheckSleepInhibition();
+
+    // Whether any window that's actually being displayed right now
+    // (not just marked fullscreen on some other, currently-hidden
+    // workspace) is fullscreen - CheckSleepInhibition()'s X11-only
+    // fallback heuristic.
+    bool IsAnyVisibleWindowFullscreen() const;
 
     void Focus(WindowID id);
 
@@ -473,6 +507,63 @@ private:
     bool TryTile(ManagedWindow* window, int workspaceId, Monitor& referenceMonitor);
     int FindWorkspaceWithRoom(ManagedWindow* window, int excludeId, Monitor& referenceMonitor);
 
+    // Session Restore's BSP-position half (see SessionStore's header
+    // comment and BSPTree::InsertNextTo()): if `session` recorded a
+    // neighbor for this window and that neighbor is already tiled on
+    // this exact workspace right now (i.e. it's already been restored
+    // or otherwise mapped in this session), splices `window` in next
+    // to it in the same relative position it held at last shutdown,
+    // and returns true - the same success bookkeeping TryTile() does
+    // (Tiled state, ResetTilingMisbehavior(), stale-geometry refresh
+    // for a background workspace). Returns false, touching nothing,
+    // whenever there's no usable neighbor to restore against (no
+    // session data, a floating/leftmost-leaf window, or a neighbor
+    // that hasn't reappeared yet this session) - the caller falls
+    // straight through to the ordinary TryTile() in that case.
+    bool TryRestoreSessionPosition(
+        ManagedWindow* window,
+        const SessionWindowState* session,
+        Monitor& referenceMonitor);
+
+    // Adaptive placement's position half (see PlacementHabitStore's
+    // header comment): if `window`'s app class has a confident,
+    // repeatedly-observed habit of landing on one side of the tiling
+    // layout, walks it toward that edge - one FindNeighbor()/Swap()
+    // trade at a time, exactly what a manual Super+Shift+h/j/k/l move
+    // would do - until it's flush against that edge or there's simply
+    // nothing left to trade with. A no-op for a floating window, or
+    // one whose class has no confident habit on either axis yet.
+    // Never called for a window TryRestoreSessionPosition() already
+    // placed precisely - see Manage()'s call site.
+    void ApplyAdaptivePlacementNudge(ManagedWindow* window);
+
+    // The identity a habit is learned/predicted against: `window`'s
+    // WM_CLASS class string, falling back to its instance string if
+    // the class is blank, or "" (meaning "can't learn anything about
+    // this window") if both are - mirrors windowrule='s own class:/
+    // instance: fallback preference.
+    static std::string AppClassKey(ManagedWindow* window);
+
+    // The workspace half of Manage()'s adaptive-placement fallback
+    // (see PlacementHabitStore's header comment): general.
+    // adaptive_placement's own value, and PlacementHabitStore::
+    // PredictWorkspace() otherwise - 0 either way means "no opinion",
+    // matching every other entry in that same if/else-if chain.
+    int AdaptiveWorkspaceHabit(const std::string& appClass) const;
+
+    // Records one manual "sent to workspace `workspace`" observation
+    // for `window`'s app class - called from MoveFocusedToWorkspace().
+    // A no-op (never even touches PlacementHabitStore) if adaptive
+    // placement is turned off or `window` has no usable class/
+    // instance identity.
+    void RecordAdaptiveWorkspaceHabit(ManagedWindow* window, int workspace);
+
+    // Records one manual reposition observation for `window`'s app
+    // class from its current (post-Arrange()) geometry - called from
+    // SwapWindows() for both windows involved in a swap. Same no-op
+    // conditions as RecordAdaptiveWorkspaceHabit() above.
+    void RecordAdaptivePositionHabit(ManagedWindow* window);
+
     // `new_workspace` fallback destination: whichever *other*
     // workspace currently has the fewest windows on it (ties broken
     // by lowest id) - unlike FindWorkspaceWithRoom() above, this
@@ -682,6 +773,7 @@ private:
     LayoutEngine m_layout;
     Scratchpad m_scratchpad;
     SessionStore m_session;
+    PlacementHabitStore m_placementHabits;
 
     KeyboardManager m_keyboard;
     MouseManager m_mouse;
@@ -700,6 +792,8 @@ private:
     Notepad m_notepad;
     PowerMenu m_powerMenu;
     LockScreen m_lockScreen;
+    IdleWatcher m_idleWatcher;
+    ScreenSaverInhibitor m_sleepInhibitor;
     Animator m_animator;
 
     bool m_running = true;

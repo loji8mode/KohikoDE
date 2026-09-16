@@ -102,6 +102,8 @@ void WindowManager::Initialize()
     m_notepad.Configure(m_config, m_monitors.Primary().Geometry());
     m_powerMenu.Configure(m_config);
     m_lockScreen.Configure(m_config);
+    m_idleWatcher.Initialize(m_connection.GetDisplay());
+    m_sleepInhibitor.Initialize();
 
     // Suspend integration without needing a DBus/logind sleep-signal
     // dependency: Kohiko itself is what spawns the suspend command
@@ -228,7 +230,7 @@ void WindowManager::AdoptExistingWindows()
 
 void WindowManager::Shutdown()
 {
-    m_session.Save(m_repository.All(), m_monitors);
+    m_session.Save(m_repository.All(), m_monitors, m_workspaces);
 
     m_ipc.Stop();
     m_tray.Shutdown();
@@ -252,6 +254,11 @@ IPCServer& WindowManager::Ipc()
     return m_ipc;
 }
 
+ScreenSaverInhibitor& WindowManager::SleepInhibitor()
+{
+    return m_sleepInhibitor;
+}
+
 void WindowManager::Tick()
 {
     if (m_animator.Active())
@@ -264,11 +271,65 @@ void WindowManager::Tick()
         m_notepad.Blink();
 
     m_lockScreen.Tick();
+    CheckIdleTimeoutLock();
+    CheckSleepInhibition();
 
     // Also what clears a Bar::ShowNotification() once it expires - see
     // Bar::Redraw()'s own expiry check.
     for (auto& [monitor, bar] : m_bars)
         bar->Redraw();
+}
+
+void WindowManager::CheckIdleTimeoutLock()
+{
+    // Same full opt-out lockscreen.after=never already gives the
+    // manual lock command - see LockScreenManualAllowed()'s own
+    // comment. Already-locked is its own quick exit rather than an
+    // error: this runs roughly once a second the entire time Kohiko
+    // is up (see Tick()), so "still idle, still locked" is by far the
+    // most common case once idle-timeout locking has actually fired.
+    if (!m_idleWatcher.Available() || m_lockScreen.IsLocked() || !LockScreenManualAllowed())
+        return;
+
+    int minutes = m_config.GetInt("lockscreen.idle_timeout_minutes", 0);
+
+    if (minutes <= 0)
+        return;
+
+    if (m_idleWatcher.IdleTime(m_connection.GetDisplay()) >= std::chrono::minutes(minutes))
+        m_lockScreen.Lock(m_monitors);
+}
+
+bool WindowManager::IsAnyVisibleWindowFullscreen() const
+{
+    for (ManagedWindow* window : m_repository.All())
+        if (window->IsFullscreen() && IsWorkspaceVisible(window->Workspace()))
+            return true;
+
+    return false;
+}
+
+void WindowManager::CheckSleepInhibition()
+{
+    if (!m_config.GetBool("general.inhibit_sleep_during_playback", true))
+        return;
+
+    bool shouldInhibit = m_sleepInhibitor.AnyActiveInhibit() || IsAnyVisibleWindowFullscreen();
+
+    if (!shouldInhibit)
+        return;
+
+    // Simply keeps telling the X server "activity just happened" -
+    // this is exactly what actual keyboard/mouse input would do, so
+    // it resets the exact same idle counter DPMS's own power-down
+    // timers are driven by, without ever touching DPMS's
+    // configuration (enabled/disabled, or its timeouts) at all. The
+    // instant shouldInhibit above goes back to false - the video
+    // stops, the fullscreen window closes, every Inhibit() cookie is
+    // released - this function simply stops being called, and
+    // whatever idle time has genuinely elapsed since resumes counting
+    // completely normally toward the display's real timeout.
+    XResetScreenSaver(m_connection.GetDisplay());
 }
 
 bool WindowManager::HasActiveAnimation() const
@@ -840,6 +901,17 @@ void WindowManager::SwapWindows(ManagedWindow* first, ManagedWindow* second)
     m_workspaces.Get(first->Workspace()).Tree().Swap(first, second);
 
     Arrange();
+
+    // Adaptive Placement (see PlacementHabitStore's header comment):
+    // both windows just changed sides by hand (a Super+LMB drag, or
+    // Super+Shift+h/j/k/l - SwapWindows() is the sole chokepoint for
+    // both), so both get a vote for wherever they actually landed,
+    // using the fresh geometry Arrange() just wrote. Deliberately not
+    // called from ApplyAdaptivePlacementNudge()'s own tree.Swap()
+    // calls, which go straight to BSPTree rather than through here -
+    // an automatic nudge isn't a user decision to learn from.
+    RecordAdaptivePositionHabit(first);
+    RecordAdaptivePositionHabit(second);
 }
 
 void WindowManager::ResizeWindow(ManagedWindow* window, int dx, int dy)
@@ -1308,6 +1380,8 @@ void WindowManager::Manage(WindowID id)
         window->SetWorkspace(autostartWorkspace);
     else if (parent)
         window->SetWorkspace(parent->Workspace());
+    else if (int habitWorkspace = AdaptiveWorkspaceHabit(AppClassKey(window)); habitWorkspace != 0)
+        window->SetWorkspace(habitWorkspace);
 
     // Window Placement: a transient/dialog always follows its parent's
     // *monitor*, not just its workspace - if the parent's workspace is
@@ -1376,6 +1450,8 @@ void WindowManager::Manage(WindowID id)
     else
         wantsFloat = (isTransient || isFloatingType);
 
+    bool sessionPositionRestored = false;
+
     if (wantsFloat)
     {
         window->SetState(WindowState::Floating);
@@ -1398,9 +1474,12 @@ void WindowManager::Manage(WindowID id)
         m_connection.MoveResizeWindow(id, geometry);
         m_connection.SetBorderWidth(id, window->BorderWidth());
     }
-    else if (TryTile(window, window->Workspace(), targetMonitor))
+    else if ((sessionPositionRestored = TryRestoreSessionPosition(window, session, targetMonitor)) ||
+             TryTile(window, window->Workspace(), targetMonitor))
     {
-        // Tiled on the current workspace - the common case.
+        // Tiled on the current workspace - either restored to its
+        // exact previous BSP position (see TryRestoreSessionPosition())
+        // or, far more often, freshly placed by the common case.
     }
     else
     {
@@ -1478,6 +1557,15 @@ void WindowManager::Manage(WindowID id)
             }
         }
     }
+
+    // Adaptive Placement (see PlacementHabitStore's header comment):
+    // only for a window that actually landed tiled, and only when
+    // TryRestoreSessionPosition() above didn't already put it exactly
+    // where it sat at last shutdown - that's a strictly more precise
+    // answer than a general habit could ever be, so there's nothing
+    // for the softer heuristic to improve on.
+    if (window->IsTiled() && !sessionPositionRestored)
+        ApplyAdaptivePlacementNudge(window);
 
     // A client's own EWMH fullscreen request, made before it was ever
     // mapped (some toolkits set _NET_WM_STATE directly instead of
@@ -2074,6 +2162,15 @@ void WindowManager::MoveFocusedToWorkspace(int id)
         return;
 
     int oldWorkspaceId = window->Workspace();
+
+    // Adaptive Placement: an explicit "move THIS window to workspace
+    // `id`" is exactly the kind of repeated-by-hand signal
+    // PlacementHabitStore learns from - see its header comment. Voted
+    // on unconditionally (not just when the move actually lands
+    // tiled) since the user's *intent* was "this app belongs on
+    // workspace `id`" regardless of how the destination happens to be
+    // laid out right now.
+    RecordAdaptiveWorkspaceHabit(window, id);
 
     // Whichever monitor is currently showing the destination workspace
     // is what TryTile()'s capacity math (and the floating fallback's
@@ -2791,6 +2888,133 @@ void WindowManager::RestoreFocusAfterModal()
         FocusNextAvailable();
 
     m_focusBeforeModal = 0;
+}
+
+std::string WindowManager::AppClassKey(ManagedWindow* window)
+{
+    if (!window)
+        return std::string();
+
+    return !window->ClassName().empty() ? window->ClassName() : window->InstanceName();
+}
+
+int WindowManager::AdaptiveWorkspaceHabit(const std::string& appClass) const
+{
+    if (appClass.empty() || !m_config.GetBool("general.adaptive_placement", true))
+        return 0;
+
+    int habitWorkspace = m_placementHabits.PredictWorkspace(appClass);
+
+    return (habitWorkspace >= 1 && habitWorkspace <= m_workspaces.Count()) ? habitWorkspace : 0;
+}
+
+void WindowManager::RecordAdaptiveWorkspaceHabit(ManagedWindow* window, int workspace)
+{
+    if (!m_config.GetBool("general.adaptive_placement", true))
+        return;
+
+    std::string appClass = AppClassKey(window);
+
+    if (!appClass.empty())
+        m_placementHabits.RecordWorkspaceMove(appClass, workspace);
+}
+
+void WindowManager::RecordAdaptivePositionHabit(ManagedWindow* window)
+{
+    if (!window || !m_config.GetBool("general.adaptive_placement", true))
+        return;
+
+    std::string appClass = AppClassKey(window);
+
+    if (appClass.empty())
+        return;
+
+    Monitor* monitor = m_monitors.Find(window->Monitor());
+
+    if (!monitor)
+        return;
+
+    m_placementHabits.RecordPositionMove(appClass, window->Geometry(), monitor->WorkArea());
+}
+
+void WindowManager::ApplyAdaptivePlacementNudge(ManagedWindow* window)
+{
+    if (!window || !window->IsTiled())
+        return;
+
+    if (!m_config.GetBool("general.adaptive_placement", true))
+        return;
+
+    std::string appClass = AppClassKey(window);
+
+    if (appClass.empty())
+        return;
+
+    std::vector<Direction> habitDirections = m_placementHabits.PredictPositions(appClass);
+
+    if (habitDirections.empty())
+        return;
+
+    BSPTree& tree = m_workspaces.Get(window->Workspace()).Tree();
+
+    // Best-effort, bounded walk: repeatedly trades places with
+    // whichever neighbor sits one step further toward each confident
+    // direction, strongest axis first, until there's nothing left in
+    // that direction to trade with (window is now flush against that
+    // edge) - exactly what a manual Super+Shift+h/j/k/l move all the
+    // way to the edge would do by hand, just done automatically once
+    // per newly-opened window of a class Kohiko has learned this
+    // about. kMaxHopsPerDirection is purely a defensive bound against
+    // any pathological tree shape; a normal handful-of-windows
+    // workspace always runs out of neighbors long before hitting it.
+    constexpr int kMaxHopsPerDirection = 16;
+
+    for (Direction direction : habitDirections)
+    {
+        for (int hop = 0; hop < kMaxHopsPerDirection; ++hop)
+        {
+            ManagedWindow* neighbor = tree.FindNeighbor(window, direction);
+
+            if (!neighbor)
+                break;
+
+            tree.Swap(window, neighbor);
+            Arrange();
+        }
+    }
+}
+
+bool WindowManager::TryRestoreSessionPosition(
+    ManagedWindow* window,
+    const SessionWindowState* session,
+    Monitor& referenceMonitor)
+{
+    if (!window || !session || !session->hasNeighbor)
+        return false;
+
+    ManagedWindow* neighbor = m_repository.Get(session->neighborId);
+
+    // The neighbor has to already be tiled on the exact workspace
+    // `window` is about to land on - a neighbor that hasn't reappeared
+    // yet this session (its own process hasn't relaunched, or it
+    // landed somewhere else entirely) simply means there's nothing to
+    // splice next to right now; the caller falls back to ordinary
+    // TryTile(), exactly as if this window had no session position
+    // data at all - see SessionStore's header comment for why this is
+    // inherently best-effort rather than a guarantee.
+    if (!neighbor || !neighbor->IsTiled() || neighbor->Workspace() != window->Workspace())
+        return false;
+
+    if (!m_workspaces.Get(window->Workspace()).Tree().InsertNextTo(window, neighbor, session->neighborDirection))
+        return false;
+
+    window->SetState(WindowState::Tiled);
+    window->ResetTilingMisbehavior();
+
+    if (!IsWorkspaceVisible(window->Workspace()))
+        RefreshWorkspaceGeometry(window->Workspace(), referenceMonitor);
+
+    return true;
 }
 
 bool WindowManager::TryTile(ManagedWindow* window, int workspaceId, Monitor& referenceMonitor)

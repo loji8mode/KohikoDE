@@ -30,6 +30,13 @@ if(NOT PAM_LIBRARY)
     message(FATAL_ERROR "libpam not found - install libpam0g-dev (Debian/Ubuntu) or pam-devel (Fedora)")
 endif()
 
+# libdbus - the primary mechanism behind display-sleep inhibition (see
+# include/ScreenSaverInhibitor.h): NOT required, since Kohiko still
+# works fine without it (the X11 fullscreen-window heuristic in
+# WindowManager::CheckSleepInhibition() is the fallback whenever this
+# isn't available, exactly like XRandr/XScreenSaver below).
+pkg_check_modules(DBus dbus-1)
+
 # --- kohiko: the window manager ------------------------------------------------
 
 file(GLOB KOHIKO_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/*.cpp)
@@ -53,6 +60,21 @@ target_compile_options(kohiko PRIVATE -Wall -Wextra)
 if(X11_Xrandr_FOUND)
     target_compile_definitions(kohiko PRIVATE KOHIKO_HAVE_XRANDR)
     target_link_libraries(kohiko PRIVATE ${X11_Xrandr_LIB})
+endif()
+
+# Idle-timeout locking and display-sleep inhibition, both via the
+# XScreenSaver extension (see include/IdleWatcher.h) - same "enabled
+# only if actually available" treatment as XRandr above; neither
+# feature does anything on a server without it.
+if(X11_Xss_FOUND)
+    target_compile_definitions(kohiko PRIVATE KOHIKO_HAVE_XSS)
+    target_link_libraries(kohiko PRIVATE ${X11_Xss_LIB})
+endif()
+
+if(DBus_FOUND)
+    target_compile_definitions(kohiko PRIVATE KOHIKO_HAVE_DBUS)
+    target_include_directories(kohiko PRIVATE ${DBus_INCLUDE_DIRS})
+    target_link_libraries(kohiko PRIVATE ${DBus_LIBRARIES})
 endif()
 
 # --- kohikoctl: the IPC command-line client --------------------------------------
@@ -108,6 +130,16 @@ add_executable(test_launcherscoring
 )
 target_include_directories(test_launcherscoring PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME LauncherScoring COMMAND test_launcherscoring)
+
+# Pure logic + a throwaway XDG_DATA_HOME the test redirects itself to
+# (see the file) - no X11 display needed.
+add_executable(test_placementhabits
+    tests/test_placementhabits.cpp
+    src/PlacementHabitStore.cpp
+    src/Xdg.cpp
+)
+target_include_directories(test_placementhabits PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME PlacementHabitStore COMMAND test_placementhabits)
 
 # Needs a real X11/XRandR connection (skips its X-dependent checks
 # gracefully if $DISPLAY isn't set - see the file for why) - the same

@@ -102,6 +102,7 @@ void EventLoop::Run()
             break;
 
         int ipcFd = m_windowManager.Ipc().ListenFd();
+        int inhibitFd = m_windowManager.SleepInhibitor().Fd();
 
         fd_set readSet;
         FD_ZERO(&readSet);
@@ -115,6 +116,14 @@ void EventLoop::Run()
 
             if (ipcFd > maxFd)
                 maxFd = ipcFd;
+        }
+
+        if (inhibitFd >= 0)
+        {
+            FD_SET(inhibitFd, &readSet);
+
+            if (inhibitFd > maxFd)
+                maxFd = inhibitFd;
         }
 
         // A window sliding into place after a Swap needs Tick() to run
@@ -152,6 +161,9 @@ void EventLoop::Run()
 
         if (ipcFd >= 0 && FD_ISSET(ipcFd, &readSet))
             m_windowManager.Ipc().Poll();
+
+        if (inhibitFd >= 0 && FD_ISSET(inhibitFd, &readSet))
+            m_windowManager.SleepInhibitor().Dispatch();
     }
 }
 
