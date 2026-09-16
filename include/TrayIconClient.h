@@ -7,6 +7,7 @@
 
 #include <chrono>
 #include <functional>
+#include <string>
 #include <vector>
 
 namespace Kohiko
@@ -44,6 +45,20 @@ public:
     // with Xlib/Imlib2 calls using the given GC/Visual/Colormap.
     using DrawCallback = std::function<void(Display* display, Window window, GC gc, Visual* visual, Colormap colormap, int size)>;
     void SetDrawCallback(DrawCallback callback);
+
+    // Draws `text` directly onto this widget's own window at (x,
+    // baseline) - available to a DrawCallback (see SetDrawCallback())
+    // as a guaranteed-to-render fallback for whatever state a missing
+    // theme icon would otherwise have shown, using the same Font/
+    // XftDraw machinery Bar::DrawText() does (see that one's own
+    // comment) rather than depending on any icon file existing on
+    // disk at all.
+    void DrawText(
+        int x,
+        int baseline,
+        const std::string& text,
+        unsigned long rgbColor
+    );
 
     using ClickHandler = std::function<void()>;
     void SetLeftClickHandler(ClickHandler handler);
@@ -91,6 +106,13 @@ private:
 
     Font m_font;
     UiTheme m_theme;
+
+    // Bound directly to m_window (there's no off-screen backing
+    // pixmap here the way Bar has - a DrawCallback already draws
+    // straight onto the window via the Display/Window/GC it's handed,
+    // and DrawText() above follows the same convention rather than
+    // introducing a second drawing model just for text).
+    XftDraw* m_xftDraw = nullptr;
 
     DrawCallback m_drawCallback;
     ClickHandler m_leftClick;

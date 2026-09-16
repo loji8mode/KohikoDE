@@ -445,6 +445,19 @@ test-bar: build/test_bar
 build/test_bar: tests/test_bar.cpp src/Bar.cpp src/SystemTray.cpp src/Font.cpp src/Config.cpp src/XConnection.cpp src/XAtoms.cpp src/Utils.cpp src/Logger.cpp | build
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ $(LIBS)
 
+# Same "needs a real X11 connection, kept out of `make test`" deal
+# again - regression test for the 0.20.8 tray-icon fallback fix (see
+# that file's own header comment and the CHANGELOG's 0.20.8 entry).
+# Reuses DESKTOP_COMMON_OBJ/DESKTOP_SHARED_OBJ (the same dependency
+# set every one of the three real tray tools already links) rather
+# than hand-picking a smaller subset, since TrayIconClient/UiIconCache
+# are already part of that shared object set for exactly this reason.
+test-trayiconclient: build/test_trayiconclient
+	./build/test_trayiconclient
+
+build/test_trayiconclient: tests/test_trayiconclient.cpp $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ $(LIBS) $(RSVG_LIBS)
+
 # Installing kohiko always installs Kohiko Settings alongside it -
 # it's part of Kohiko itself, not a separate package (see
 # include/SettingsWindow.h) - so there's no separate `install-settings`

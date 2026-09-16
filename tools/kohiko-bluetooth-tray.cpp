@@ -23,6 +23,29 @@ std::string CurrentIcon(const BluezClient& bluez)
     return "bluetooth";
 }
 
+// Drawn instead whenever the installed icon theme doesn't actually
+// have CurrentIcon()'s name - see TrayIconClient::DrawText()'s own
+// comment for why this can never itself fail to render something, and
+// kohiko-audio-tray.cpp's own IconFallback for why this mirrors
+// CurrentIcon()'s branching independently rather than trying to
+// derive one from the other. Same glyph throughout - color alone
+// carries the state here, same as this tray's real icon set does
+// (bluetooth-disabled/bluetooth-active/bluetooth are otherwise the
+// same glyph in most themes too).
+struct IconFallback { std::string glyph; unsigned long color; };
+
+IconFallback FallbackFor(const TrayIconClient& tray, const BluezClient& bluez)
+{
+    if (!bluez.Available() || bluez.Adapters().empty() || !bluez.Adapters().front().powered)
+        return { "B", tray.Theme().muted };
+
+    for (auto& device : bluez.Devices())
+        if (device.connected)
+            return { "B", tray.Theme().success };
+
+    return { "B", tray.Theme().foreground };
+}
+
 }
 
 int main()
@@ -65,6 +88,13 @@ int main()
             XCopyArea(display, pixmap, window, gc, 0, 0, size - 4, size - 4, offset, offset);
             if (mask != None)
                 XSetClipMask(display, gc, None);
+        }
+        else
+        {
+            IconFallback fallback = FallbackFor(tray, bluez);
+            int textWidth = tray.GetFont().TextWidth(fallback.glyph);
+            int baseline = (size + tray.GetFont().Ascent()) / 2;
+            tray.DrawText((size - textWidth) / 2, baseline, fallback.glyph, fallback.color);
         }
     });
 

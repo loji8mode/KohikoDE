@@ -234,6 +234,17 @@ if(KOHIKO_DESKTOP_APPS_AVAILABLE)
     add_executable(kohiko-bluetooth-tray tools/kohiko-bluetooth-tray.cpp src/BluezClient.cpp)
     target_link_libraries(kohiko-bluetooth-tray PRIVATE kohiko-desktop-shared)
     target_compile_options(kohiko-bluetooth-tray PRIVATE -Wall -Wextra)
+
+    # Same "needs a real X11 connection, kept out of `make test`" deal
+    # as test_bar/test_monitormanager/test_svgrenderer - regression
+    # test for the 0.20.8 tray-icon fallback fix (see that file's own
+    # header comment and the CHANGELOG's 0.20.8 entry). Guarded by the
+    # same KOHIKO_DESKTOP_APPS_AVAILABLE condition as the rest of this
+    # block since it links kohiko-desktop-shared, which only exists
+    # here.
+    add_executable(test_trayiconclient tests/test_trayiconclient.cpp)
+    target_link_libraries(test_trayiconclient PRIVATE kohiko-desktop-shared)
+    add_test(NAME TrayIconClient COMMAND test_trayiconclient)
 endif()
 
 # --- tests ------------------------------------------------------------------------

@@ -420,7 +420,15 @@ systems:
   `IconResolver` (graceful no-op if a name doesn't resolve anywhere,
   including after a same-name-plus-`-symbolic` retry, added once a
   real theme showed the exact name often isn't what's actually
-  shipped), then rendering: through Imlib2 for raster formats
+  shipped) - **a "no-op" that the *caller* must have its own fallback
+  for, not `UiIconCache` itself** (0.20.8): a system with no icon
+  theme configured falls back to the bare `hicolor` theme (see
+  `IconResolver::DetectSystemThemeName()`), which typically ships no
+  actual status/panel icons, and `UiIconCache::Get()` returning false
+  in that case is normal, not a bug to fix there - see
+  `TrayIconClient::DrawText()` and each of the three tray tools' own
+  `DrawCallback` for the fallback-glyph pattern this led to. Then
+  rendering: through Imlib2 for raster formats
   (PNG/XPM/...), or through `SvgRenderer` (librsvg/Cairo, directly -
   see that header's own comment) for `.svg`/`.svgz` specifically,
   *not* through Imlib2's own bundled SVG loader, after real testing
@@ -563,7 +571,17 @@ seconds if nothing has actually claimed it by then. A genuine
 inside that window - but it means the fast path is now correctly a
 *hint*, not something a new tray-adjacent window can rely on as a
 guarantee it'll never be tiled if something else about its own startup
-sequence goes wrong.
+sequence goes wrong. One more thing worth carrying over from the three
+existing tray tools rather than rediscovering (0.20.8): whatever
+`UiIconCache::Get()` is asked to resolve for this new icon's `DrawCallback`
+*will* sometimes fail - not as an edge case, but as the likely default
+on a system with no GTK icon theme configured, which describes a
+realistic fraction of Kohiko's own actual users - so the `DrawCallback`
+needs its own fallback (`TrayIconClient::DrawText()`, a short
+guaranteed-to-render glyph) for that `else` branch. Leaving it empty
+draws nothing beyond the background fill, indistinguishable from a
+broken icon; see any of `kohiko-audio-tray.cpp`/`kohiko-network-tray.cpp`/
+`kohiko-bluetooth-tray.cpp`'s `FallbackFor*()` for the pattern.
 
 **A new full companion app** (a settings page of its own, like
 `kohiko-audio`) - build on the shared UI toolkit

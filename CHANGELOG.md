@@ -1,5 +1,78 @@
 # Changelog
 
+## Version 0.20.8
+
+Release date: 2026-09-11
+
+### Fixed
+- **Kohiko's own tray tools (`kohiko-audio-tray`, `kohiko-network-tray`,
+  `kohiko-bluetooth-tray`) could show a permanently blank icon square
+  while tray icons from other, third-party applications rendered
+  fine.** Reported live after the 0.20.7 Expose fix resolved the
+  workspace-indicator symptom but left this one - screenshots showed
+  the icon slots as plain dark squares, distinct from the earlier
+  finding and explicitly *not* another `Bar::Redraw()` issue (both
+  confirmed by the reporter). Traced end-to-end per the report's own
+  request - where icons are received (`SystemTray.cpp`'s generic
+  XEmbed docking, unaffected: third-party icons dock and render
+  through the identical code path), where they're drawn (each tray
+  tool's own `DrawCallback`, built on the shared `TrayIconClient.h`/
+  `.cpp`), and what actually paints their content (`UiIconCache::Get()`
+  resolving a freedesktop-standard status-icon name like
+  `"audio-volume-high"` via `IconResolver` against the system's active
+  icon theme chain). Root cause, confirmed empirically rather than
+  guessed: `IconResolver::DetectSystemThemeName()` only ever checks
+  `~/.config/gtk-3.0/settings.ini` for the user's configured icon
+  theme, falling back to the bare `hicolor` theme otherwise (its own
+  documented behavior) - and `hicolor`, while required by the
+  freedesktop spec to exist, typically ships no actual status/panel
+  icons of its own. A standalone diagnostic against this fix's own
+  sandbox (no GTK ever configured, matching a plausible real
+  configuration for Kohiko's actual users, who are running a bare WM
+  rather than a full desktop environment) confirmed all 14 icon names
+  used across the three tray tools failed to resolve, while every one
+  of them resolved instantly once a real theme (`Humanity`) was forced
+  - proving `IconResolver`'s own lookup algorithm is correct and the
+  gap is purely "nothing configured, sparse fallback theme." Third-
+  party tray apps were unaffected because they either bundle their own
+  icon data or don't depend on this lookup at all. `UiIconCache::Get()`
+  returning `false` is a normal, expected outcome its own header
+  documents - the actual bug was that none of the three tray tools'
+  `DrawCallback`s had anything to fall back to, leaving the plain
+  background fill with nothing on top, forever (permanently negative-
+  cached per icon name - see `UiIconCache.h`'s own comment - so no
+  amount of state changing would ever fix it for that name). Fixed by
+  adding a `DrawText()` method to `TrayIconClient` (mirroring
+  `Bar::DrawText()`) and a small, guaranteed-to-render fallback glyph
+  in each tray tool (block-height characters for volume/signal level,
+  "E"/"W" for wired/wireless-idle, "B" colored by connection state for
+  Bluetooth) drawn whenever `UiIconCache::Get()` returns `false`.
+  Verified live: a real screenshot before the fix showed three plain
+  dark squares; after, `kohiko-audio-tray` correctly shows "×" (muted,
+  since this sandbox has no real audio hardware) - `strace`/process
+  inspection confirmed `kohiko-network-tray`/`kohiko-bluetooth-tray`
+  share the exact same `TrayIconClient`/`UiIconCache` code path, and a
+  dedicated regression test exercises all three tools' logic directly.
+  Also found and fixed while building that test: a genuine, previously
+  latent bug in `TrayIconClient`'s destructor - it closed its X
+  display connection before `m_font`'s own member destructor (which
+  needs that connection to free its Xft resources) ran, crashing any
+  process that cleanly destructs a `TrayIconClient` rather than being
+  killed abruptly (which is what every real tray tool always does in
+  practice, so this was never hit in production - only by a test that
+  constructs and cleanly tears one down). Fixed by explicitly unloading
+  the font before closing the display.
+- New regression test, `tests/test_trayiconclient.cpp`
+  (`test-trayiconclient`/`TrayIconClient` in the Makefile/CMake):
+  reproduces the actual failure condition directly rather than only
+  asserting a function was called - looks up a genuinely nonexistent
+  icon name through the real `IconResolver`/`UiIconCache` (not a stub),
+  confirms via real `XGetImage` pixel readback that a failed lookup
+  with no fallback leaves the tray window showing only its background
+  fill (the bug, reproduced on a live window), then confirms
+  `TrayIconClient::DrawText()` - the fix - actually paints real,
+  non-background content there.
+
 ## Version 0.20.7
 
 Release date: 2026-09-10

@@ -45,6 +45,47 @@ std::string CurrentIcon(const NetworkManagerClient& nm)
     return "network-wireless-offline";
 }
 
+// Drawn instead whenever the installed icon theme doesn't actually
+// have CurrentIcon()'s name - see TrayIconClient::DrawText()'s own
+// comment for why this can never itself fail to render something, and
+// kohiko-audio-tray.cpp's own IconFallback for why this mirrors
+// CurrentIcon()'s branching independently rather than trying to
+// derive one from the other. Block-height characters for the four
+// signal-strength levels read as a simple level meter even at
+// tray-icon size.
+struct IconFallback { std::string glyph; unsigned long color; };
+
+IconFallback FallbackFor(const TrayIconClient& tray, const NetworkManagerClient& nm)
+{
+    if (!nm.Available() || !nm.NetworkingEnabled())
+        return { "\u00d7", tray.Theme().muted }; // ×
+
+    const NetworkDevice* ethernet = nullptr;
+    const NetworkDevice* wifi = nullptr;
+
+    for (auto& device : nm.Devices())
+    {
+        if (device.kind == NetworkDeviceKind::Ethernet && device.connected)
+            ethernet = &device;
+        else if (device.kind == NetworkDeviceKind::WiFi)
+            wifi = &device;
+    }
+
+    if (ethernet)
+        return { "E", tray.Theme().foreground };
+
+    if (wifi && wifi->connected)
+    {
+        std::uint8_t s = wifi->activeSignalStrength;
+        if (s >= 80) return { "\u2587", tray.Theme().foreground }; // ▇
+        if (s >= 55) return { "\u2585", tray.Theme().foreground }; // ▅
+        if (s >= 30) return { "\u2583", tray.Theme().foreground }; // ▃
+        return { "\u2581", tray.Theme().foreground }; // ▁
+    }
+
+    return { "W", tray.Theme().muted };
+}
+
 }
 
 int main()
@@ -87,6 +128,13 @@ int main()
             XCopyArea(display, pixmap, window, gc, 0, 0, size - 4, size - 4, offset, offset);
             if (mask != None)
                 XSetClipMask(display, gc, None);
+        }
+        else
+        {
+            IconFallback fallback = FallbackFor(tray, networkManager);
+            int textWidth = tray.GetFont().TextWidth(fallback.glyph);
+            int baseline = (size + tray.GetFont().Ascent()) / 2;
+            tray.DrawText((size - textWidth) / 2, baseline, fallback.glyph, fallback.color);
         }
     });
 

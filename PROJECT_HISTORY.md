@@ -1739,5 +1739,66 @@ screen or a bar-adjacent popup specifically. Recorded as unverified
 live end-to-end rather than folded into "verified" alongside the
 pixel-level mechanism test, which does stand on its own.
 
+The Expose fix landed, and a follow-up came back with something more
+precise than the first report: the workspace indicator was fixed, but
+the tray icons weren't, and - stated explicitly, worth taking at face
+value rather than re-litigating - this wasn't another `Bar::Redraw()`
+problem. That framing turned out to matter: it redirected the
+investigation immediately toward the tray-specific code rather than
+back into a file that had already been gone over twice. The next
+detail mattered even more: third-party tray icons rendered fine, only
+Kohiko's own three tray tools didn't. Since `SystemTray.cpp`'s XEmbed
+docking treats every icon identically regardless of which process owns
+it, that single fact ruled out the host side of the mechanism entirely
+and pointed straight at the one thing genuinely different about
+Kohiko's own tools: they all draw through the same shared
+`TrayIconClient`, looking up freedesktop-standard status-icon names
+through `UiIconCache`/`IconResolver` - something no third-party tray
+icon depends on.
+
+A live screenshot, cropped and enlarged, showed the actual bug
+directly rather than left to describe secondhand: plain dark squares,
+no glyph, nothing wrong with the icon *windows* themselves - they were
+correctly sized, positioned, and docked, just empty. Rather than guess
+at why, a standalone diagnostic linked straight against `IconResolver`
+and asked it, one name at a time, whether any of the fourteen icon
+names the three tray tools use actually resolved in this sandbox. None
+did. Forcing a real theme (`Humanity`, confirmed present on disk with
+exactly these files) made every one resolve instantly - which mattered
+as much as the negative result, since it ruled out a bug in the
+resolution algorithm itself and pinned this on `hicolor` (the required
+fallback, and the *only* fallback `IconResolver::DetectSystemThemeName()`
+checks for, since it only ever reads one specific GTK settings file)
+being close to empty of actual status icons. That's a shape of failure
+particularly likely for Kohiko's own actual users - people running a
+bare window manager rather than a full desktop environment, who would
+have no particular reason to have GTK configured at all.
+
+`UiIconCache::Get()` returning false is documented, expected behavior,
+not itself the bug - the bug was that none of the three tray tools had
+anything to fall back to when it did. The fix mirrored `Bar.cpp`'s own
+established pattern for "this can't be found, don't leave it visibly
+broken" - the same reasoning behind `[Power]`/`[S]`/`[N]` being drawn
+as plain text rather than left unrendered when a symbol might not be
+in the loaded font - extended into a small `TrayIconClient::DrawText()`
+and a short, always-rendering glyph per tray tool, varying with the
+same state each tool already computes for its (possibly unresolvable)
+icon name.
+
+Building the regression test the fix was asked for - one that reads
+real pixels back from a real window rather than only asserting a
+function got called, matching this project's usual standard for
+rendering-correctness claims - surfaced something else entirely: a
+`TrayIconClient` that gets cleanly destroyed (a test doing exactly
+that, rather than the real tray tools' own always-killed-abruptly
+lifecycle) segfaults, in `Font`'s own destructor, using a display
+connection `TrayIconClient` had already closed one line earlier. Nobody
+had built a test that cleanly tore one down before, so nothing had ever
+hit it. Fixed in the same change, for the same reason the earlier
+`forceRerender`/`forceFullRepaint` parameters exist: trace what a
+change actually touches - here, exactly what runs during destruction
+and in what order - rather than assume a destructor that had simply
+never been exercised was fine.
+
 --------------------------------------------------------------------------
 

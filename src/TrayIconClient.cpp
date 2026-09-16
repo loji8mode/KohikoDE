@@ -22,6 +22,23 @@ TrayIconClient::TrayIconClient() = default;
 
 TrayIconClient::~TrayIconClient()
 {
+    if (m_xftDraw) XftDrawDestroy(m_xftDraw);
+
+    // Explicit, ahead of XCloseDisplay() below: m_font's own
+    // destructor runs automatically after this function body
+    // finishes, and Font::Unload() frees its Xft resources through
+    // the same Display* this class owns and is about to close - m_font
+    // has no way to know that's about to happen. Doing it here first
+    // means that automatic call finds m_font already unloaded (a
+    // harmless no-op - see Font::Unload()'s own guard) instead of
+    // calling XftFontClose() on an already-closed display. This was
+    // always latent rather than ever actually hit in production - the
+    // real tray tools (kohiko-audio-tray and friends) only ever exit
+    // by being killed, never by a clean return from main() that would
+    // run this destructor - but a test that constructs and cleanly
+    // destroys a TrayIconClient hits it immediately.
+    m_font.Unload();
+
     if (m_gc) XFreeGC(m_display, m_gc);
     if (m_window) XDestroyWindow(m_display, m_window);
     if (m_display) XCloseDisplay(m_display);
@@ -62,6 +79,8 @@ bool TrayIconClient::Create(int iconSize)
 
     m_font.Load(m_display, m_screen, "monospace:pixelsize=14");
 
+    m_xftDraw = XftDrawCreate(m_display, m_window, m_visual, m_colormap);
+
     m_nextDockAttempt = std::chrono::steady_clock::now();
     return true;
 }
@@ -96,6 +115,17 @@ bool TrayIconClient::TryDock()
 }
 
 void TrayIconClient::SetDrawCallback(DrawCallback callback) { m_drawCallback = std::move(callback); }
+
+void TrayIconClient::DrawText(int x, int baseline, const std::string& text, unsigned long rgbColor)
+{
+    if (m_window == 0 || text.empty() || !m_xftDraw)
+        return;
+
+    TextColor textColor(m_display, m_visual, m_colormap, rgbColor);
+
+    m_font.DrawString(m_xftDraw, x, baseline, text, textColor.Get());
+}
+
 void TrayIconClient::SetLeftClickHandler(ClickHandler handler) { m_leftClick = std::move(handler); }
 void TrayIconClient::SetRightClickHandler(ClickHandler handler) { m_rightClick = std::move(handler); }
 void TrayIconClient::SetScrollHandler(ScrollHandler handler) { m_scroll = std::move(handler); }

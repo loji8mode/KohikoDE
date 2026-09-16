@@ -31,6 +31,28 @@ std::string IconForOutput(const AudioNode* node)
     return "audio-volume-high";
 }
 
+// Drawn instead whenever the installed icon theme doesn't actually
+// have IconForOutput()'s name (UiIconCache::Get() returning false) -
+// see TrayIconClient::DrawText()'s own comment for why this can never
+// itself fail to render something. Block-height characters for the
+// three "has volume" levels read as a simple level meter even at
+// tray-icon size; deliberately its own small switch over the same
+// states above rather than trying to derive one representation from
+// the other, since a filename-shaped string and a one-glyph fallback
+// don't share enough structure for that to simplify anything.
+struct IconFallback { std::string glyph; unsigned long color; };
+
+IconFallback FallbackForOutput(const TrayIconClient& tray, const AudioNode* node)
+{
+    if (!node || node->muted || node->volume <= 0.001f)
+        return { "\u00d7", tray.Theme().muted }; // ×
+    if (node->volume < 0.33f)
+        return { "\u2582", tray.Theme().foreground }; // ▂
+    if (node->volume < 0.66f)
+        return { "\u2585", tray.Theme().foreground }; // ▅
+    return { "\u2587", tray.Theme().foreground }; // ▇
+}
+
 }
 
 int main()
@@ -81,6 +103,17 @@ int main()
             XCopyArea(display, pixmap, window, gc, 0, 0, size - 4, size - 4, offset, offset);
             if (mask != None)
                 XSetClipMask(display, gc, None);
+        }
+        else
+        {
+            // The installed icon theme doesn't have IconForOutput()'s
+            // name (very common - see FallbackForOutput()'s own
+            // comment) - draw a guaranteed-to-render substitute rather
+            // than leaving this icon slot blank.
+            IconFallback fallback = FallbackForOutput(tray, node);
+            int textWidth = tray.GetFont().TextWidth(fallback.glyph);
+            int baseline = (size + tray.GetFont().Ascent()) / 2;
+            tray.DrawText((size - textWidth) / 2, baseline, fallback.glyph, fallback.color);
         }
     });
 
