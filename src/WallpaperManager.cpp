@@ -96,6 +96,12 @@ WallpaperManager::WallpaperManager() = default;
 
 WallpaperManager::~WallpaperManager()
 {
+    // Closing the inotify fd itself automatically removes every watch
+    // still associated with it (same as AppDirWatcher's own
+    // destructor) - no need to inotify_rm_watch() each one in
+    // m_watchedDirectories individually first, and doing so here would
+    // just generate a burst of IN_IGNORED events nothing is left to
+    // ever read anyway.
     if (m_inotifyFd >= 0)
         ::close(m_inotifyFd);
 
@@ -255,7 +261,26 @@ void WallpaperManager::ApplyToRoot(
 
     m_currentRootPixmap = composite;
 
-    RefreshWatches(monitors);
+    // Gathers exactly the paths ResolveFor() returned above for this
+    // render (recomputing via ResolveFor() again here, rather than
+    // saving the ones the loop above already resolved per-monitor, is
+    // deliberately avoided - not needed for correctness, but a
+    // std::vector<std::string> built at once here is simpler than
+    // threading one out of the loop above). RefreshWatches() itself
+    // decides what actually needs touching from this - see its own
+    // comment for why calling it unconditionally on every ApplyToRoot()
+    // (including one Poll() itself triggered) is safe.
+    std::vector<std::string> resolvedPaths;
+
+    for (const auto& monitor : monitors.All())
+    {
+        Resolved resolved = ResolveFor(*monitor);
+
+        if (!resolved.path.empty())
+            resolvedPaths.push_back(resolved.path);
+    }
+
+    RefreshWatches(resolvedPaths);
 }
 
 bool WallpaperManager::Available() const
@@ -283,14 +308,48 @@ bool WallpaperManager::Poll()
         if (bytesRead <= 0)
             break; // EAGAIN (non-blocking fd) - nothing left queued
 
-        sawEvent = true;
+        // read() on inotify never returns a partial event, so this
+        // walks exactly `bytesRead` bytes' worth of complete
+        // `struct inotify_event` records (each one's `len` covers its
+        // own trailing name, possibly zero) - same layout every other
+        // inotify consumer (including the kernel's own documentation)
+        // assumes.
+        std::size_t offset = 0;
+
+        while (offset + sizeof(struct inotify_event) <= static_cast<std::size_t>(bytesRead))
+        {
+            const auto* event =
+                reinterpret_cast<const struct inotify_event*>(buffer.data() + offset);
+
+            // IN_IGNORED means a watch was torn down - explicitly, by
+            // RefreshWatches() itself removing one, or because a
+            // watched directory was deleted/unmounted out from under
+            // it - and carries no information about any *file's
+            // contents* having changed. Every watch RefreshWatches()
+            // installs only ever asks for real content-change bits
+            // (IN_CREATE/IN_DELETE/IN_MODIFY/IN_MOVED_FROM/
+            // IN_MOVED_TO/IN_CLOSE_WRITE), so IN_IGNORED is the one
+            // event kind that can arrive on this fd without any of
+            // those - and specifically the one a watch-refresh's own
+            // inotify_rm_watch() call generates on itself. Not
+            // filtering this out here is what turned a
+            // Poll()-triggered ApplyToRoot() -> RefreshWatches() into
+            // a self-sustaining loop before this fix (each refresh's
+            // own removal kept manufacturing the next "something
+            // changed" wakeup) - see CHANGELOG.md's 0.20.5 entry for
+            // the full writeup.
+            if (!(event->mask & IN_IGNORED))
+                sawEvent = true;
+
+            offset += sizeof(struct inotify_event) + event->len;
+        }
     }
 
     return sawEvent;
 }
 
 void WallpaperManager::RefreshWatches(
-    const MonitorManager& monitors)
+    const std::vector<std::string>& resolvedPaths)
 {
     if (m_inotifyFd < 0)
     {
@@ -299,11 +358,6 @@ void WallpaperManager::RefreshWatches(
         if (m_inotifyFd < 0)
             return; // not fatal - see AppDirWatcher's identical reasoning
     }
-
-    for (int watch : m_watchDescriptors)
-        inotify_rm_watch(m_inotifyFd, watch);
-
-    m_watchDescriptors.clear();
 
     // Watches each resolved file's *containing directory*, not the
     // file itself - inotify watches are attached to an inode, and a
@@ -317,30 +371,54 @@ void WallpaperManager::RefreshWatches(
     // same directory, which just means an occasional harmless extra
     // Poll() -> ApplyToRoot() re-render (cheap; see this class's own
     // header comment on why that's fine).
-    std::unordered_set<std::string> directories;
+    std::unordered_set<std::string> desiredDirectories;
 
-    for (const auto& monitor : monitors.All())
+    for (const std::string& path : resolvedPaths)
     {
-        Resolved resolved = ResolveFor(*monitor);
-
-        if (resolved.path.empty())
+        if (path.empty())
             continue;
 
         std::error_code error;
-        std::filesystem::path parent = std::filesystem::path(resolved.path).parent_path();
+        std::filesystem::path parent = std::filesystem::path(path).parent_path();
 
         if (!parent.empty() && std::filesystem::is_directory(parent, error))
-            directories.insert(parent.string());
+            desiredDirectories.insert(parent.string());
     }
 
-    for (const std::string& directory : directories)
+    // Drop only the watches for directories that are no longer
+    // desired - a directory that's still wanted keeps its existing
+    // watch descriptor untouched, with no inotify_rm_watch() call (and
+    // therefore no IN_IGNORED) at all. This is the actual fix for the
+    // idle-CPU regression: previously every watch was torn down and
+    // rebuilt on every single call, including ones this method's own
+    // previous run indirectly caused via Poll() - see Poll()'s and
+    // this method's own header comments, and CHANGELOG.md's 0.20.5
+    // entry, for the full loop this closes.
+    for (auto it = m_watchedDirectories.begin(); it != m_watchedDirectories.end(); )
     {
+        if (desiredDirectories.find(it->first) == desiredDirectories.end())
+        {
+            inotify_rm_watch(m_inotifyFd, it->second);
+            it = m_watchedDirectories.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+
+    // Add watches only for directories that aren't already watched.
+    for (const std::string& directory : desiredDirectories)
+    {
+        if (m_watchedDirectories.find(directory) != m_watchedDirectories.end())
+            continue; // already watching this one - leave its watch descriptor alone
+
         int watch = inotify_add_watch(
             m_inotifyFd, directory.c_str(),
             IN_CREATE | IN_DELETE | IN_MODIFY | IN_MOVED_FROM | IN_MOVED_TO | IN_CLOSE_WRITE);
 
         if (watch >= 0)
-            m_watchDescriptors.push_back(watch);
+            m_watchedDirectories[directory] = watch;
     }
 }
 

@@ -101,7 +101,12 @@ public:
     // refreshes the inotify watch set (see RefreshWatches()) to match
     // whatever was just rendered, so a later edit to any of *these*
     // files is still caught even if the rules themselves haven't
-    // changed since the last Configure().
+    // changed since the last Configure(). RefreshWatches() itself is
+    // idempotent (see its own comment) specifically so that calling
+    // it from here on *every* ApplyToRoot() - including one Poll()
+    // itself just triggered - never touches the underlying inotify
+    // watches unless the set of directories that need watching has
+    // actually changed.
     void ApplyToRoot(
         XConnection& connection,
         const MonitorManager& monitors
@@ -112,13 +117,44 @@ public:
     // For EventLoop's own select() set, exactly like AppDirWatcher::Fd().
     int Fd() const;
 
-    // Drains every pending inotify event and returns true if anything
-    // was actually read - i.e. the caller should call ApplyToRoot()
-    // again (whatever changed on disk needs to be re-rendered). Same
-    // "doesn't matter which specific file, just that something did"
-    // reasoning as AppDirWatcher::Poll() - re-rendering is cheap
-    // enough that a spurious wakeup costs little.
+    // Drains every pending inotify event and returns true if any of
+    // them represents an actual on-disk change - i.e. the caller
+    // should call ApplyToRoot() again (whatever changed on disk needs
+    // to be re-rendered). Same "doesn't matter which specific file,
+    // just that something did" reasoning as AppDirWatcher::Poll() for
+    // *which* content event fired - re-rendering is cheap enough that
+    // a spurious wakeup over some unrelated content change costs
+    // little. Deliberately does NOT count IN_IGNORED (a watch was
+    // torn down - pure bookkeeping, not a file's contents changing)
+    // towards that: RefreshWatches() below removing and re-adding a
+    // watch generates exactly that event on this same fd, and this is
+    // what stops such bookkeeping from ever being mistaken for a real
+    // wallpaper-file change and looping back into another
+    // ApplyToRoot() -> RefreshWatches() of its own.
     bool Poll();
+
+    // (Re)points the inotify watch set at exactly the containing
+    // directories of `resolvedPaths` (normally whatever ResolveFor()
+    // currently returns across every monitor - see ApplyToRoot()).
+    // Deliberately idempotent: a directory that's already being
+    // watched is left completely untouched (same watch descriptor,
+    // no inotify_rm_watch()/inotify_add_watch() round trip at all) -
+    // only directories that need to *start* or *stop* being watched
+    // actually incur one. This is what keeps calling this on every
+    // single ApplyToRoot() (including one Poll() itself just
+    // triggered) safe: with nothing actually different to watch,
+    // this is a no-op, so it can never manufacture the IN_IGNORED
+    // event a real inotify_rm_watch() call would, and can never feed
+    // back into another spurious Poll()-triggered ApplyToRoot(). Takes
+    // a plain path list (rather than a MonitorManager) specifically so
+    // it's unit-testable without any X11/MonitorManager involved -
+    // see tests/test_wallpapermanager.cpp. Public because it's a pure,
+    // side-effect-free-when-nothing-changed operation any caller with
+    // a path list can reasonably use, not just ApplyToRoot() - which
+    // is still the only production call site.
+    void RefreshWatches(
+        const std::vector<std::string>& resolvedPaths
+    );
 
 private:
 
@@ -138,15 +174,13 @@ private:
     Pixmap m_currentRootPixmap = 0;
 
     int m_inotifyFd = -1;
-    std::vector<int> m_watchDescriptors;
 
-    // (Re)points the inotify watch set at exactly the files
-    // ResolveFor() could currently return across `monitors` - called
-    // from ApplyToRoot() itself, right after rendering, so the watch
-    // set always matches what was just actually drawn.
-    void RefreshWatches(
-        const MonitorManager& monitors
-    );
+    // Keyed by containing-directory path rather than a plain list of
+    // descriptors (what this used to be) specifically so
+    // RefreshWatches() above can tell which directories are *already*
+    // watched and leave them alone - see that method's own comment
+    // for why that idempotency is what actually matters here.
+    std::unordered_map<std::string, int> m_watchedDirectories;
 
 };
 

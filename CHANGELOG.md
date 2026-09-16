@@ -1,5 +1,61 @@
 # Changelog
 
+## Version 0.20.5
+
+Release date: 2026-09-08
+
+### Fixed
+- **Idle CPU regression introduced by the 0.20.4 disk-loss/restoration
+  cycle: `kohiko` pinned one thread at ~94% CPU on a completely idle
+  desktop, with `strace -p <pid> -e trace=inotify_add_watch,
+  inotify_rm_watch,openat,close -tt` showing a tight, self-sustaining
+  loop 15-25 times a second - `inotify_rm_watch()`, then
+  `inotify_add_watch()` on `/usr/local/share/kohiko/wallpapers` with a
+  new, incrementing watch descriptor each time, then an `openat()`/
+  `close()` of the current wallpaper file - with zero actual
+  filesystem activity required to sustain it.** Root cause:
+  `WallpaperManager::ApplyToRoot()` called `RefreshWatches()`
+  unconditionally on every single invocation, including ones
+  triggered only because `Poll()` reported a change, and
+  `RefreshWatches()` unconditionally tore down every existing inotify
+  watch and rebuilt it from scratch every time it ran, regardless of
+  whether the set of directories that needed watching had actually
+  changed. `inotify_rm_watch()` generates a real, readable
+  `IN_IGNORED` event on the same inotify fd it was called against
+  (confirmed directly against the kernel with a standalone reproducer
+  - this isn't a Kohiko-specific quirk, it's documented inotify(7)
+  behaviour) - and `WallpaperManager::Poll()` treated *any*
+  successfully-read bytes as "the wallpaper changed on disk, re-render
+  it", without ever inspecting the event's `mask` to tell that
+  self-generated bookkeeping notification apart from a genuine file
+  change. The result was a closed loop entirely internal to Kohiko:
+  `Poll()` reports the `IN_IGNORED` as a change -> `WindowManager`
+  calls `ApplyToRoot()` again -> `RefreshWatches()` tears down the
+  watch it just built (generating a fresh `IN_IGNORED`) and rebuilds
+  it (hence the ever-incrementing watch descriptor in the strace) ->
+  repeat, bounded only by how fast the event loop could cycle. Only
+  two `ApplyToRoot()` calls anywhere near each other - entirely normal
+  during ordinary startup - were needed to seed the first
+  `IN_IGNORED`; from there the loop needed no external trigger at all,
+  which is why it reproduced on a desktop nobody was touching. Fixed
+  two ways: `RefreshWatches()` (now taking a plain resolved-path list
+  rather than a `MonitorManager`, so it's unit-testable without X11)
+  is now idempotent - it diffs the desired directory set against
+  `m_watchedDirectories` and only calls `inotify_rm_watch()`/
+  `inotify_add_watch()` for directories that actually need to stop or
+  start being watched, leaving an already-correct watch set completely
+  untouched; and `Poll()` now parses each `inotify_event` properly and
+  no longer counts `IN_IGNORED` towards "something changed", as
+  defense in depth for the rare, legitimate case where a watch really
+  does need to move (e.g. `wallpaper.default` edited to point at a
+  different directory). Live-reload itself is untouched - directory-
+  level watching, an in-place edit, and the write-then-`rename()`
+  "save" pattern are all still caught exactly as before; see
+  `tests/test_wallpapermanager.cpp`'s "Idle-CPU regression" section for
+  the regression coverage, which reproduces the exact cascade above
+  against real inotify and confirms it terminates immediately rather
+  than recreating the watch indefinitely.
+
 ## Version 0.20.4
 
 Release date: 2026-08-20

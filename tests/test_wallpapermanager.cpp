@@ -1,7 +1,13 @@
 // Regression test for WallpaperManager's parsing/resolution logic -
 // no X11 needed (Monitor/Workspace are both deliberately X11-free -
 // see their own header comments; ApplyToRoot()'s actual rendering
-// isn't exercised here since it needs a live X connection).
+// isn't exercised here since it needs a live X connection) - plus a
+// real-inotify regression suite for RefreshWatches()/Poll() (see
+// "-- Idle-CPU regression --" below), which needs no X11 either since
+// RefreshWatches() takes a plain path list rather than a
+// MonitorManager specifically so this is possible - exercises the
+// same real Linux inotify AppDirWatcher's own test does, against
+// throwaway temp directories.
 //
 // Build & run: see the "test-wallpapermanager" target in the Makefile.
 
@@ -11,6 +17,8 @@
 #include "Monitor.h"
 #include "Workspace.h"
 
+#include <sys/select.h>
+
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
@@ -18,6 +26,7 @@
 #include <fstream>
 #include <memory>
 #include <string>
+#include <vector>
 
 using namespace Kohiko;
 
@@ -49,6 +58,23 @@ Config LoadConfigFromText(const std::filesystem::path& path, const std::string& 
     Config config;
     config.Load(path.string());
     return config;
+}
+
+// Waits up to `timeoutMs` for `fd` to become readable - same helper
+// (and same reasoning: local-filesystem inotify events are
+// effectively immediate, but this avoids flakiness under load) as
+// tests/test_appdirwatcher.cpp's own WaitReadable().
+bool WaitReadable(int fd, int timeoutMs)
+{
+    fd_set readSet;
+    FD_ZERO(&readSet);
+    FD_SET(fd, &readSet);
+
+    timeval timeout{};
+    timeout.tv_sec = timeoutMs / 1000;
+    timeout.tv_usec = (timeoutMs % 1000) * 1000;
+
+    return select(fd + 1, &readSet, nullptr, nullptr, &timeout) > 0;
 }
 
 // A Monitor showing `workspaceId` on a workspace object owned by the
@@ -233,6 +259,140 @@ int main()
         WallpaperManager wallpapers;
         wallpapers.Configure(config);
         Check(wallpapers.BackgroundColor() == 0x1e1e2eUL, "background_color parses correctly");
+    }
+
+    std::printf("\n-- Idle-CPU regression (0.20.5): RefreshWatches()/Poll() around inotify_rm_watch()'s own IN_IGNORED --\n");
+    std::printf("   (see CHANGELOG.md's 0.20.5 entry for the full root-cause writeup)\n");
+    {
+        std::filesystem::path dirA = tempDir / "wallpapers-a";
+        std::filesystem::path dirB = tempDir / "wallpapers-b";
+        std::filesystem::create_directories(dirA);
+        std::filesystem::create_directories(dirB);
+
+        std::filesystem::path fileA = dirA / "violet-peak.png";
+        std::filesystem::path fileB = dirB / "nebula.png";
+
+        { std::ofstream(fileA) << "not a real png - content doesn't matter for watch bookkeeping"; }
+        { std::ofstream(fileB) << "not a real png - content doesn't matter for watch bookkeeping"; }
+
+        WallpaperManager wallpapers;
+
+        std::printf("\n  -- Installing the initial watch --\n");
+        wallpapers.RefreshWatches({ fileA.string() });
+        Check(wallpapers.Available(), "inotify initialized by the first RefreshWatches() call");
+        Check(wallpapers.Fd() >= 0, "Fd() returns a valid descriptor");
+        Check(!WaitReadable(wallpapers.Fd(), 200), "installing the watch itself generates no event");
+        Check(!wallpapers.Poll(), "...and Poll() confirms nothing is pending");
+
+        std::printf("\n  -- THE ACTUAL FIX: repeatedly re-processing the *same* resolved path --\n");
+        std::printf("     (exactly what ApplyToRoot() -> RefreshWatches() did on every single\n");
+        std::printf("     Poll()-triggered re-render before this fix, even with zero real\n");
+        std::printf("     filesystem activity - this is the idle-desktop 94%%-CPU loop itself)\n");
+        {
+            bool anyStrayEvent = false;
+
+            for (int i = 0; i < 50; ++i)
+            {
+                // Nothing about the resolved wallpaper changed - same
+                // single path, same directory - so this must be a
+                // total no-op against an already-correct watch set.
+                // Before the fix, RefreshWatches() unconditionally
+                // tore down and rebuilt the watch every single time
+                // this was called, and each teardown
+                // (inotify_rm_watch()) generated a fresh, readable
+                // IN_IGNORED event on this exact fd - which is
+                // precisely the "unrelated/empty event" this
+                // regression test is about: it carries no actual
+                // wallpaper-file change, yet the pre-fix Poll() (which
+                // didn't look at the event mask at all) would have
+                // reported it as one anyway, and the watch descriptor
+                // returned by inotify_add_watch() would keep
+                // incrementing every iteration - exactly the "watch ID
+                // increments every cycle" from the live strace.
+                wallpapers.RefreshWatches({ fileA.string() });
+
+                if (WaitReadable(wallpapers.Fd(), 20))
+                    anyStrayEvent = true;
+            }
+
+            Check(!anyStrayEvent,
+                "50 repeated RefreshWatches() calls with an unchanged path never make the fd readable "
+                "- i.e. the watch is never torn down/recreated when nothing actually changed");
+            Check(!wallpapers.Poll(),
+                "...and Poll() confirms there is still nothing queued after all 50 calls");
+        }
+
+        std::printf("\n  -- A *real* directory-set change still legitimately swaps the watch --\n");
+        {
+            // This is the one case that's still SUPPOSED to touch the
+            // underlying inotify watch: the resolved wallpaper moved
+            // to a different directory entirely (e.g. wallpaper.default
+            // edited to point elsewhere, or a workspace switched onto
+            // a monitor with a different wallpaper.workspace= rule).
+            wallpapers.RefreshWatches({ fileB.string() });
+
+            Check(WaitReadable(wallpapers.Fd(), 200),
+                "swapping to a genuinely different directory *does* generate one IN_IGNORED (dirA's removal) - as expected");
+
+            std::printf("\n  -- ...but Poll() correctly does not mistake that removal for a content change --\n");
+            Check(!wallpapers.Poll(),
+                "Poll() reads the IN_IGNORED from the real watch swap above and correctly reports no change "
+                "(IN_IGNORED carries no file-content information)");
+
+            std::printf("\n  -- ...and the swap itself doesn't cascade into repeated re-processing --\n");
+            int cascadeIterations = 0;
+
+            // The exact shape of WindowManager::HandleWallpaperFileChanged():
+            // "if Poll() says something changed, call ApplyToRoot()
+            // again (which calls RefreshWatches() again)". Capped well
+            // above any legitimate iteration count as a safety valve -
+            // against the pre-fix code this loop does not terminate on
+            // its own at all.
+            while (wallpapers.Poll() && cascadeIterations <= 200)
+            {
+                ++cascadeIterations;
+                wallpapers.RefreshWatches({ fileB.string() });
+            }
+
+            Check(cascadeIterations == 0,
+                "the one real watch swap above triggers zero follow-up RefreshWatches() calls "
+                "- no infinite/runaway watch-recreation loop");
+        }
+
+        std::printf("\n  -- Live-reload still works: an actual wallpaper file replace is still caught --\n");
+        {
+            Check(!WaitReadable(wallpapers.Fd(), 200), "quiescent again after the checks above");
+
+            // The realistic "save" pattern this class's own comments
+            // describe: write a new file, rename() it over the
+            // original - replaces the inode entirely rather than
+            // editing it in place.
+            std::filesystem::path replacement = dirB / "nebula.png.tmp";
+            { std::ofstream(replacement) << "a new wallpaper's worth of bytes"; }
+            std::filesystem::rename(replacement, fileB);
+
+            Check(WaitReadable(wallpapers.Fd(), 2000),
+                "the fd becomes readable after a real wallpaper file replace");
+            Check(wallpapers.Poll(),
+                "...and Poll() reports it as a real change (this is live-reload actually firing)");
+
+            // ApplyToRoot() would now re-render and call this again -
+            // confirms doing so doesn't itself manufacture more events
+            // (same idempotency as above, now exercised right after a
+            // genuine reload rather than from a freshly-installed watch).
+            wallpapers.RefreshWatches({ fileB.string() });
+            Check(!WaitReadable(wallpapers.Fd(), 200),
+                "...and re-running RefreshWatches() right after a real reload is still a clean no-op");
+        }
+
+        std::printf("\n  -- Editing the watched file in place (no rename) is still caught too --\n");
+        {
+            { std::ofstream file(fileB, std::ios::app); file << "\nmore bytes appended in place"; }
+
+            Check(WaitReadable(wallpapers.Fd(), 2000),
+                "the fd becomes readable after an in-place edit");
+            Check(wallpapers.Poll(), "...and Poll() reports it as a real change");
+        }
     }
 
     std::printf("\nALL %d CHECKS PASSED.\n", g_pass);

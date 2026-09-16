@@ -1455,5 +1455,63 @@ it - `DockIcon()` sending a real `XEMBED_EMBEDDED_NOTIFY` - explained
 why. Worth remembering: a "the fix isn't working" moment is sometimes
 about the fix, and sometimes about the thing watching it.
 
+The next task handed over against this same restored checkpoint was a
+live-production report, not a code-review finding: idle `kohiko`
+pinned one thread at ~94% CPU, with a specific `strace` command
+already run against it and its output already in hand - a continuous
+`inotify_rm_watch()`/`inotify_add_watch()`/`openat()`/`close()` cycle
+against the wallpaper directory, 15-25 times a second, the watch
+descriptor incrementing every cycle. That's a different starting point
+from every regression this version had chased so far, closer to the
+`Tick()`-starvation bug's own shape than to the "does this
+plausible-sounding premise actually hold" pattern the two declined BSP
+items followed - a mechanism to find, not a claim to check - and it
+was treated that way: before touching `WallpaperManager.cpp` at all, a
+standalone C reproducer confirmed directly against the kernel (not
+assumed from `inotify(7)`'s wording, though it agrees) that
+`inotify_rm_watch()` alone generates a real, readable `IN_IGNORED`
+event on the same fd, with a fresh, incrementing watch descriptor from
+each subsequent `inotify_add_watch()` - the exact signature already in
+the strace. From there the loop read directly out of
+`WallpaperManager.cpp`: `ApplyToRoot()` called `RefreshWatches()`
+unconditionally on every invocation, including ones `Poll()` itself
+had just triggered, and `RefreshWatches()` tore down and rebuilt every
+watch unconditionally on every call regardless of whether anything
+about what needed watching had actually changed - so a `Poll()`
+misreading its own watch-teardown notification as a real file change
+fed directly back into another teardown, closed, needing no actual
+filesystem activity to sustain itself once started. Fixed the same way
+the `Tick()` regression was: not by adding a delay or disabling the
+mechanism the bug lived in, but by making the two places actually
+responsible - `RefreshWatches()` unconditionally churning watches, and
+`Poll()` not distinguishing `IN_IGNORED` from a real content event -
+correct on their own terms, with `AppDirWatcher`'s own established
+"watch the containing directory, install once, leave alone" pattern
+(already the model `WallpaperManager` was supposed to be following,
+per this project's own Phase 12 notes) as the reference rather than a
+new invention. Confirmed four separate ways rather than any one taken
+as sufficient alone: a standalone kernel-level reproducer first: a
+regression test built to fail against the original logic before it
+was allowed to pass against the fix (run both ways, not just the one
+that was expected to succeed, exactly the same discipline as the
+XEmbed timeout task's deliberately-broken-first check two tasks
+earlier); the entire existing suite re-run clean afterward, nothing
+elsewhere disturbed; and a live install under this sandbox's Xvfb,
+`kohiko` actually running from `/usr/local/bin` against the real
+`/usr/local/share/kohiko/wallpapers` path the report named, idle CPU
+watched flat over repeated sampling windows and the reporter's own
+exact `strace` command re-run against it producing zero matching
+output where it had previously shown a continuous loop - then, for a
+direct before/after rather than an inferred one, the original
+unmodified source rebuilt and reinstalled in the same live session and
+shown to reproduce actual watch-descriptor churn before the fix was
+restored. A real wallpaper file replaced under the running process
+(both a write-then-`rename()` and an in-place edit) confirmed the one
+property most worth losing sight of while chasing a CPU regression:
+the fix cannot just make the loop stop, it has to leave the feature
+the loop was supposed to be serving still working, and both still
+triggered exactly one re-render each, watched directly in the same
+strace output, with the watch itself left untouched throughout.
+
 --------------------------------------------------------------------------
 
