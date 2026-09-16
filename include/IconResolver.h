@@ -42,6 +42,16 @@ public:
     // than treat that as an error; plenty of third-party .desktop
     // files reference an icon name no installed theme actually ships.
     //
+    // If the exact name isn't found anywhere in the chain, also tries
+    // it with a "-symbolic" suffix before giving up - a plain status-
+    // icon name like "network-wireless-signal-excellent" is standard,
+    // real freedesktop icon-naming-spec content, but most actively-
+    // maintained themes (Adwaita included) only actually ship it as
+    // "network-wireless-signal-excellent-symbolic" these days, full-
+    // colour status icons having mostly fallen out of use. Skipped
+    // when the requested name already ends in "-symbolic", so this
+    // never doubles up into a "...-symbolic-symbolic" search.
+    //
     // Resolved names are cached in memory for the lifetime of this
     // object, including negative (not-found) results, so looking up
     // the same icon name twice (extremely common - many apps share

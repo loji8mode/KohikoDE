@@ -2,6 +2,7 @@
 
 #include "Command.h"
 #include "Config.h"
+#include "DesktopEntry.h"
 #include "IpcPath.h"
 #include "Json.h"
 #include "Logger.h"
@@ -10,11 +11,13 @@
 #include "Process.h"
 #include "Utils.h"
 #include "XConnection.h"
+#include "Xdg.h"
 
 #include <X11/Xatom.h>
 
 #include <algorithm>
 #include <cstdlib>
+#include <filesystem>
 #include <sstream>
 
 namespace Kohiko
@@ -2793,6 +2796,8 @@ void WindowManager::RunAutostart()
         Process::Spawn(program, m_connection.DisplayName());
     }
 
+    RunXdgAutostartEntries();
+
     // `workspace<N>=` is autostart with a target workspace attached -
     // e.g.
     //
@@ -2833,6 +2838,49 @@ void WindowManager::RunAutostart()
             pending.expiry = expiry;
 
             m_pendingWorkspaceAutostarts.push_back(pending);
+        }
+    }
+}
+
+void WindowManager::RunXdgAutostartEntries()
+{
+    // Desktop IDs already resolved by a higher-priority directory -
+    // once a given basename has been decided (spawn it, or explicitly
+    // don't), a same-named file further down the list is a system
+    // fallback the user/admin has already overridden and must be
+    // ignored outright, not merged with or fallen back to. See
+    // Xdg::AutostartDirs()'s comment for why the list is ordered this
+    // way in the first place.
+    std::vector<std::string> seenIds;
+
+    for (const std::filesystem::path& dir : Xdg::AutostartDirs())
+    {
+        std::error_code ec;
+
+        if (!std::filesystem::is_directory(dir, ec))
+            continue; // no autostart entries here - e.g. no ~/.config/autostart at all, which is normal
+
+        std::filesystem::directory_iterator it(dir, ec);
+        std::filesystem::directory_iterator end;
+
+        for (; !ec && it != end; it.increment(ec))
+        {
+            const std::filesystem::path& path = it->path();
+
+            if (path.extension() != ".desktop")
+                continue;
+
+            std::string desktopId = path.stem().string();
+
+            if (std::find(seenIds.begin(), seenIds.end(), desktopId) != seenIds.end())
+                continue;
+
+            seenIds.push_back(desktopId);
+
+            std::optional<DesktopEntry> entry = ParseDesktopFile(path, 0);
+
+            if (entry && ShouldAutostart(*entry))
+                Process::Spawn(entry->exec, m_connection.DisplayName());
         }
     }
 }

@@ -352,9 +352,14 @@ systems:
   once per `Run()` loop iteration) means a frame is only actually
   composited when something changed, not on a fixed timer. Icons
   route through `UiIconCache` (Imlib2-backed, freedesktop icon-theme
-  lookup, graceful no-op if a name doesn't resolve - relevant if
-  you're testing in an environment with no icon theme installed, see
-  `docs/AUDIO_NETWORK_BLUETOOTH.md`); text goes through `Font` (Xft/
+  lookup via `IconResolver`, graceful no-op if a name doesn't resolve
+  anywhere - including after a same-name-plus-`-symbolic` retry, added
+  once a real theme showed the exact name often isn't what's actually
+  shipped; relevant if you're testing in an environment with no icon
+  theme installed, see `docs/AUDIO_NETWORK_BLUETOOTH.md`, which also
+  covers an unresolved Imlib2/librsvg rendering-crash risk worth
+  reading before assuming any icon load is side-effect-free); text
+  goes through `Font` (Xft/
   fontconfig, with the same per-character fallback the WM's own `Bar`
   uses).
 
@@ -456,9 +461,18 @@ like `monitor=`/`windowrule=` (`Kind::Monitor`/`Kind::WindowRule`) got.
 complete example: connect a backend client, call `tray.Initialize()`,
 wire `SetLeftClickHandler`/`SetRightClickHandler`/`SetScrollHandler`,
 call `tray.Run()`). Ships as its own autostart `.desktop` entry under
-`/etc/xdg/autostart` (see `desktop/kohiko-audio-tray.desktop`) rather
-than anything `kohiko` itself launches or links against - the WM
-process never needs to know a new tray icon exists.
+`/etc/xdg/autostart` (see `desktop/kohiko-audio-tray.desktop`), which
+`WindowManager::RunXdgAutostartEntries()` picks up and runs generically
+alongside every other autostart entry (see
+[Autostart](../README.md#xdg-autostart-desktop-entries) in the
+README) - `kohiko` itself never needs source changes, or to know a new
+tray icon exists by name, only a correctly-formed `.desktop` file
+installed to that directory. (This wasn't always true: through 0.20.0,
+nothing actually read that directory at all, and the tray widgets
+never launched on a real session as a result - see `CHANGELOG.md`'s
+0.20.1 entry and `docs/AUDIO_NETWORK_BLUETOOTH.md`'s "Tray widget
+autostart" section. Fixed now, but worth knowing if you're reading
+older code or history.)
 
 **A new full companion app** (a settings page of its own, like
 `kohiko-audio`) - build on the shared UI toolkit

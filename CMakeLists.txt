@@ -412,6 +412,35 @@ if(X11_Xrandr_FOUND)
 endif()
 add_test(NAME WallpaperManager COMMAND test_wallpapermanager)
 
+# Pure logic + plain file I/O, no X11 needed - covers ShouldAutostart()
+# and Xdg::AutostartDirs(), the two testable halves of the tray-icon
+# autostart fix (see WindowManager::RunXdgAutostartEntries()'s own
+# comment). Redirects XDG_CONFIG_HOME/XDG_CONFIG_DIRS/PATH to
+# throwaway temp locations itself (see the file).
+add_executable(test_desktopentry
+    tests/test_desktopentry.cpp
+    src/DesktopEntry.cpp
+    src/IniFile.cpp
+    src/Xdg.cpp
+    src/Utils.cpp
+)
+target_include_directories(test_desktopentry PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME DesktopEntry COMMAND test_desktopentry)
+
+# Pure logic + plain file I/O, no X11 needed - covers the
+# "-symbolic" fallback in IconResolver::Resolve() (see IconResolver.h)
+# added alongside the tray-icon autostart fix. Redirects
+# HOME/XDG_DATA_HOME to a throwaway temp theme (see the file).
+add_executable(test_iconresolver
+    tests/test_iconresolver.cpp
+    src/IconResolver.cpp
+    src/IniFile.cpp
+    src/Xdg.cpp
+    src/Utils.cpp
+)
+target_include_directories(test_iconresolver PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME IconResolver COMMAND test_iconresolver)
+
 # Shell-script regression test for scripts/kohiko-session - no
 # compiled binary involved, see the test file itself.
 add_test(

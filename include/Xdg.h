@@ -44,6 +44,26 @@ std::filesystem::path ConfigDir();
 // them empty when they try to iterate.
 std::vector<std::filesystem::path> ApplicationDirs();
 
+// Every directory that can hold autostart .desktop entries, per the
+// freedesktop Desktop Application Autostart Specification - NOT the
+// same directories or spec as ApplicationDirs() above, despite both
+// being ".desktop entries somewhere under XDG base dirs": autostart
+// entries live under the *config* hierarchy ($XDG_CONFIG_HOME,
+// $XDG_CONFIG_DIRS), not the *data* one ($XDG_DATA_HOME,
+// $XDG_DATA_DIRS), and the subdirectory name itself differs
+// ("autostart", not "applications"). Same priority-order contract as
+// ApplicationDirs(): $XDG_CONFIG_HOME/autostart first (in practice
+// ~/.config/autostart), then autostart/ under each $XDG_CONFIG_DIRS
+// entry (in practice just /etc/xdg/autostart, since that's the
+// spec's own default when $XDG_CONFIG_DIRS is unset) - a file with
+// the same basename in an earlier directory here is meant to
+// completely override (not merge with) one of the same name in a
+// later one, letting a user's own ~/.config/autostart/foo.desktop
+// disable or replace a system-wide /etc/xdg/autostart/foo.desktop.
+// Non-existent directories are still included, same as
+// ApplicationDirs().
+std::vector<std::filesystem::path> AutostartDirs();
+
 // AppStream metadata directories to scan for a richer name/summary/
 // icon than a bare .desktop file provides - $XDG_DATA_HOME/metainfo
 // then metainfo/ (and the older, still-common app-info/xmls/) under

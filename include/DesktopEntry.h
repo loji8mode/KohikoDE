@@ -46,6 +46,20 @@ struct DesktopEntry
     bool hidden = false;
     bool terminal = false;
 
+    // X-GNOME-Autostart-enabled - not part of the formal Desktop Entry
+    // Specification, but a de-facto extension the Desktop Application
+    // Autostart Specification explicitly carves out room for ("desktop
+    // environments... may... support additional methods for enabling/
+    // disabling autostart"), near-universally honoured, and how e.g. a
+    // desktop's own settings UI commonly disables one specific
+    // autostart entry without deleting or hand-editing the file. Only
+    // ever meaningful to ShouldAutostart() below - distinct from
+    // hidden (the spec's own key, checked there too). Defaults to
+    // true: absence means enabled, matching every desktop's own
+    // interpretation (and every entry Kohiko itself ships, none of
+    // which sets this to false).
+    bool autostartEnabled = true;
+
     // First whitespace-separated token of `exec`, with any leading
     // path stripped - used both for dedup (two desktop files that
     // Exec the same binary are almost certainly the same app under
@@ -71,6 +85,24 @@ std::optional<DesktopEntry> ParseDesktopFile(
 bool ShouldDisplay(
     const DesktopEntry& entry,
     bool includeHiddenNoDisplay
+);
+
+// True if this entry should be launched once at session startup, per
+// the freedesktop Desktop Application Autostart Specification
+// (https://specifications.freedesktop.org/autostart-spec/latest/) -
+// answers a different question from ShouldDisplay() above, and in
+// particular treats NoDisplay= oppositely: an autostart helper is
+// *expected* to set NoDisplay=true (it has no menu presence at all)
+// while still very much wanting to run, which is exactly what
+// Kohiko's own desktop/kohiko-*-tray.desktop entries do. Checks, in
+// order: Type=Application; not Hidden=true (the spec's own kill
+// switch); Exec= actually set to something; not disabled via
+// X-GNOME-Autostart-enabled=false; TryExec=, if set, resolves to a
+// real executable; and OnlyShowIn=/NotShowIn= against
+// $XDG_CURRENT_DESKTOP, reusing the exact same rule ShouldDisplay()
+// applies for the same keys.
+bool ShouldAutostart(
+    const DesktopEntry& entry
 );
 
 // A light heuristic layer on top of ShouldDisplay(): most non-app

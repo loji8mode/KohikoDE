@@ -1,7 +1,7 @@
 # Kohiko Project History
 
 This document traces the evolution of Kohiko, a C++20 / X11 tiling window
-manager, across its released versions from 0.1.0 through 0.20.0. It is
+manager, across its released versions from 0.1.0 through 0.20.1. It is
 derived from a direct comparison of the source, configuration, and
 documentation of each released version against the one before it.
 
@@ -638,6 +638,84 @@ described as tested.
 
 --------------------------------------------------------------------------
 
+## Phase 12 — Tray Integration Verification (0.20.1)
+
+**Versions:** 0.20.1
+
+**Goals:**
+Diagnose and fix a specific, concrete real-world report - the audio/
+network/Bluetooth tray icons did not appear on a real Arch Linux
+Kohiko session - by verifying the actual runtime behavior end to end
+rather than trusting what the code, or the existing documentation,
+claimed.
+
+**Major developments:**
+- Root cause: the three tray widgets' `.desktop` autostart entries
+  (introduced back in 0.19.0, described there and in `README.md` as
+  "autostarted by default") were correctly installed to
+  `/etc/xdg/autostart`, but nothing in Kohiko - which has never had a
+  session manager of its own - ever actually read that directory.
+  `WindowManager::RunAutostart()` gained a second mechanism alongside
+  its existing config-string one: it now also runs every `.desktop`
+  entry under `Xdg::AutostartDirs()`, filtered through a new
+  `ShouldAutostart()` predicate. Kohiko also now sets
+  `$XDG_CURRENT_DESKTOP` itself if nothing already has, closing a
+  display-manager-vs-manual-launch environment difference the
+  investigation surfaced along the way.
+- A second, independent bug in the same investigation: `IconResolver`
+  only ever tried an icon's exact name, which silently failed for
+  standard status-icon names (`network-wireless-signal-excellent` and
+  siblings) against a real, currently-installed Adwaita theme - found
+  by checking actual rendered pixel data, not by reading the code -
+  since Adwaita only ships those under a `-symbolic` suffix. Fixed
+  with a same-again-with-a-suffix retry.
+- A third finding, investigated but explicitly *not* fixed: loading
+  several different real status-icon SVGs in succession, within one
+  process, reproducibly corrupts the heap somewhere inside Imlib2's
+  own SVG loader, isolated as precisely as reasonably possible (a raw-
+  Imlib2, no-Kohiko-code reproduction hits the same crash; librsvg's
+  own CLI renders the same files fine standalone) but not resolved -
+  fixing a third-party rendering library's own internals was judged
+  well outside a "smallest robust fix" for this report, and the crash
+  is unconfirmed on the actual target system's library versions. A
+  standard, low-risk mitigation (disabling Imlib2's own internal
+  cache) was applied anyway, but documented plainly as unproven rather
+  than claimed as a fix.
+- An unrelated, pre-existing build-system bug was fixed as a
+  prerequisite for trusting `make test`'s own output at all: two test
+  targets were silently missing `-lXrandr`, so `make test` stopped
+  partway through - on any system with XRandr headers present, which
+  includes a default Arch install - without the remaining test
+  binaries ever running, and without failing loudly enough to make
+  that obvious.
+
+**Lessons visible from the repository:**
+This phase is a direct, fairly stark answer to the exact gap Phase 11
+flagged for itself: "real-display/real-system verification... is still
+outstanding." For the tray-specific slice of that gap, actually setting
+one up - a real (if headless) Xvfb X server, a real `dbus-daemon
+--session`, a real PipeWire/WirePlumber stack with a dummy sink, a
+dedicated non-root user, `kohiko-session` itself as the entry point -
+surfaced two genuine bugs that a code read alone had not (the autostart
+gap was introduced in 0.19.0 and had gone unnoticed for multiple
+releases; the icon-name gap likely predates even that). It also
+demonstrates the flip side of the same lesson: even with a real X
+server and a real backend stack available, some things still can't be
+verified without the user's own actual machine (real Wi-Fi/Bluetooth
+hardware, a real display manager specifically, the exact `imlib2`/
+`librsvg` package versions Arch itself ships) - and the honest response
+to hitting that wall was to disclose the gap precisely, not to either
+stop short of the fix that was achievable or overstate the fix that
+wasn't. Two small, purpose-built unit tests
+(`test_desktopentry`/`test_iconresolver`) were added for the two pieces
+of newly-added pure logic, following the project's existing pattern of
+real-execution tests wherever a dependency permits them, and mock/
+review-only where it doesn't - the Imlib2 crash specifically falls into
+the latter category, and is recorded as such rather than quietly
+dropped.
+
+--------------------------------------------------------------------------
+
 ## Current Direction
 
 As of 0.20.0, Kohiko adds persistence, recovery, and desktop-session
@@ -655,18 +733,27 @@ still-optional-where-possible set of external dependencies Phase 11
 left it with (Imlib2 now load-bearing for the main `kohiko` binary
 itself, not just `kohiko-settings`, on account of wallpaper support).
 
-Two things seem likely to matter next. First, this phase's own testing
-gap - everything touching Xft, D-Bus, Imlib2, or a real X server was
-verified by code review and close analogy to already-proven patterns,
-not execution - means real-display/real-system verification of this
-entire phase (window manager startup, the lock screen's new logind
-integration, wallpaper rendering itself, the autologin flow against an
-actual display manager) is still outstanding, the same category of gap
-Phase 9/10/11 each flagged for whatever they couldn't exercise in
-their own environment. Second, this phase's own "Extension points"
-section in `docs/ARCHITECTURE.md` is deliberately source-level, not
-dynamically loaded - worth revisiting only if a concrete need for
-genuine runtime plugin loading materializes, not preemptively.
+That release flagged its own biggest gap plainly: everything touching
+Xft, D-Bus, Imlib2, or a real X server had been verified by code
+review and close analogy, not execution. 0.20.1 (Phase 12) closed the
+specific slice of that gap a real user actually hit first - tray
+autostart and icon loading - by setting up exactly the kind of real
+execution environment that gap called for (a real X server, a real
+D-Bus session bus, a real PipeWire stack) and finding two genuine bugs
+neither code review nor the existing documentation had caught. The
+rest of that same gap is explicitly not closed by 0.20.1 and remains
+outstanding: the lock screen's logind integration, wallpaper rendering
+itself, and the autologin flow against an actual display manager were
+all outside this phase's own scope (a tray-icon report) and were not
+touched or re-verified here. Two things seem likely to matter next
+beyond that. First, the Imlib2/librsvg crash risk 0.20.1 disclosed but
+did not resolve is worth either confirming against Arch's actual
+package versions (and filing upstream if it reproduces there too) or
+ruling out - right now it's an open question, not a closed one.
+Second, this phase's own "Extension points" section in
+`docs/ARCHITECTURE.md` is deliberately source-level, not dynamically
+loaded - worth revisiting only if a concrete need for genuine runtime
+plugin loading materializes, not preemptively.
 
 --------------------------------------------------------------------------
 

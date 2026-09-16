@@ -276,6 +276,11 @@ std::string IconResolver::Resolve(
 
     std::string result = SearchChain(iconName, m_preferredSize);
 
+    // See this function's own header comment (IconResolver.h) for why
+    // "-symbolic" specifically.
+    if (result.empty() && !iconName.ends_with("-symbolic"))
+        result = SearchChain(iconName + "-symbolic", m_preferredSize);
+
     if (result.empty())
         result = SearchPixmaps(iconName);
 

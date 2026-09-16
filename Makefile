@@ -181,7 +181,7 @@ kohiko-bluetooth-tray: $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) build/BluezCl
 build/kohiko-bluetooth-tray-main.o: tools/kohiko-bluetooth-tray.cpp | build
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
-test: build/test_bsptree build/test_launcherscoring build/test_placementhabits build/test_dbusvalue build/test_sessionstore build/test_configmigration build/test_recoverymode build/test_appdirwatcher build/test_autologinconfigurator build/test_wallpapermanager
+test: build/test_bsptree build/test_launcherscoring build/test_placementhabits build/test_dbusvalue build/test_sessionstore build/test_configmigration build/test_recoverymode build/test_appdirwatcher build/test_autologinconfigurator build/test_wallpapermanager build/test_desktopentry build/test_iconresolver
 	./build/test_bsptree
 	./build/test_launcherscoring
 	./build/test_placementhabits
@@ -192,6 +192,8 @@ test: build/test_bsptree build/test_launcherscoring build/test_placementhabits b
 	./build/test_appdirwatcher
 	./build/test_autologinconfigurator
 	./build/test_wallpapermanager
+	./build/test_desktopentry
+	./build/test_iconresolver
 	sh tests/test_kohiko_session.sh
 
 build/test_bsptree: tests/test_bsptree.cpp src/BSPTree.cpp src/BSPLeaf.cpp src/BSPSplit.cpp src/ManagedWindow.cpp src/LayoutEngine.cpp | build
@@ -220,9 +222,14 @@ build/test_dbusvalue: tests/test_dbusvalue.cpp src/DBusValue.cpp | build
 # references the full Monitor/Workspace/BSP chain, so that has to be
 # linked in too even though this test never calls Save(). -lX11 is
 # needed for the same reason (XConnection.o references it), not
-# because any test here opens a real display.
+# because any test here opens a real display. Same deal for the
+# trailing pkg-config xrandr clause as test_monitormanager's below: it
+# also pulls in MonitorManager.cpp, which - whenever this build has
+# KOHIKO_HAVE_XRANDR on, i.e. the normal case, matching the main
+# `kohiko` binary above - refers to real XRandr symbols regardless of
+# whether this particular test ever exercises that code path.
 build/test_sessionstore: tests/test_sessionstore.cpp src/SessionStore.cpp src/Xdg.cpp src/ManagedWindow.cpp src/Monitor.cpp src/MonitorRule.cpp src/MonitorManager.cpp src/Workspace.cpp src/WorkspaceManager.cpp src/BSPTree.cpp src/BSPLeaf.cpp src/BSPSplit.cpp src/LayoutEngine.cpp src/XConnection.cpp src/XAtoms.cpp src/Config.cpp src/ConfigParser.cpp src/IniFile.cpp src/Utils.cpp | build
-	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ -lX11
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ -lX11 $(shell pkg-config --exists xrandr && pkg-config --libs xrandr)
 
 # Pure logic + plain file I/O, no X11 needed at all - see the file
 # itself. Exercises ConfigMigration.cpp against ConfigSchema's real,
@@ -253,9 +260,28 @@ build/test_autologinconfigurator: tests/test_autologinconfigurator.cpp src/Autol
 # and isn't something a unit test should be driving anyway (see the
 # file itself). Still needs Imlib2/X11 to link, since WallpaperManager.o
 # references ImageRenderer::Render() regardless of whether this test
-# calls the code path that uses it.
+# calls the code path that uses it. Same MonitorManager.cpp/XRandr
+# situation as test_sessionstore just above - see its comment.
 build/test_wallpapermanager: tests/test_wallpapermanager.cpp src/WallpaperManager.cpp src/ImageRenderer.cpp src/Config.cpp src/ConfigParser.cpp src/IniFile.cpp src/Monitor.cpp src/MonitorManager.cpp src/MonitorRule.cpp src/Workspace.cpp src/WorkspaceManager.cpp src/BSPTree.cpp src/BSPLeaf.cpp src/BSPSplit.cpp src/ManagedWindow.cpp src/LayoutEngine.cpp src/XConnection.cpp src/XAtoms.cpp src/Utils.cpp | build
-	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ -lX11 -lImlib2
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ -lX11 -lImlib2 $(shell pkg-config --exists xrandr && pkg-config --libs xrandr)
+
+# Pure logic + plain file I/O, no X11 needed - covers ShouldAutostart()
+# and Xdg::AutostartDirs(), the two testable halves of the tray-icon
+# autostart fix (see WindowManager::RunXdgAutostartEntries()'s own
+# comment). Redirects XDG_CONFIG_HOME/XDG_CONFIG_DIRS/PATH to
+# throwaway temp locations itself (see the file), same as
+# test_placementhabits redirecting XDG_DATA_HOME.
+build/test_desktopentry: tests/test_desktopentry.cpp src/DesktopEntry.cpp src/IniFile.cpp src/Xdg.cpp src/Utils.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
+
+# Pure logic + plain file I/O, no X11 needed - covers the
+# "-symbolic" fallback in IconResolver::Resolve() (see IconResolver.h)
+# added alongside the tray-icon autostart fix, once real testing
+# showed the tray icons still rendered blank even once docked.
+# Redirects HOME/XDG_DATA_HOME to a throwaway temp theme (see the
+# file).
+build/test_iconresolver: tests/test_iconresolver.cpp src/IconResolver.cpp src/IniFile.cpp src/Xdg.cpp src/Utils.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
 
 # Needs a real X11/XRandr connection - gracefully skips the checks
 # that need one if $DISPLAY isn't set (see the file itself), so it's

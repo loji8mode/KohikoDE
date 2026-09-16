@@ -8,6 +8,7 @@
 #include "WindowManager.h"
 
 #include <csignal>
+#include <cstdlib>
 
 namespace Kohiko
 {
@@ -30,6 +31,21 @@ int Application::Run(
     std::signal(SIGPIPE, SIG_IGN);
 
     EventLoop::InstallSignalHandlers();
+
+    // $XDG_CURRENT_DESKTOP drives OnlyShowIn=/NotShowIn= filtering for
+    // both the launcher (DesktopEntry.cpp's ShouldDisplay()) and XDG
+    // autostart (ShouldAutostart(), via WindowManager::
+    // RunXdgAutostartEntries()) - but nothing in this codebase ever
+    // set it, leaving it entirely up to whatever launched this
+    // process. A display manager that honours desktop/kohiko.desktop's
+    // DesktopNames=Kohiko typically exports it already; a manual
+    // `startx`/`~/.xinitrc` launch never does, since there's no
+    // display manager involved to read that key from at all. Fill the
+    // gap (without overwriting a value that's already there - setenv's
+    // overwrite=0) so both paths behave identically instead of an
+    // OnlyShowIn=/NotShowIn= entry silently working under one and not
+    // the other.
+    setenv("XDG_CURRENT_DESKTOP", "Kohiko", 0);
 
     Logger::Info(std::string("kohiko ") + VERSION + " starting");
 

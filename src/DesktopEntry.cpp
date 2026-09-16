@@ -3,6 +3,8 @@
 #include "IniFile.h"
 #include "Utils.h"
 
+#include <unistd.h>
+
 #include <array>
 #include <cstdlib>
 
@@ -96,6 +98,7 @@ std::optional<DesktopEntry> ParseDesktopFile(
     entry.noDisplay = ini.GetBool(kGroup, "NoDisplay", false);
     entry.hidden = ini.GetBool(kGroup, "Hidden", false);
     entry.terminal = ini.GetBool(kGroup, "Terminal", false);
+    entry.autostartEnabled = ini.GetBool(kGroup, "X-GNOME-Autostart-enabled", true);
 
     entry.categories = ini.GetList(kGroup, "Categories");
     entry.keywords = ini.GetList(kGroup, "Keywords");
@@ -156,6 +159,49 @@ bool PassesShowIn(
     return true;
 }
 
+// TryExec=, per spec: "a generic name of an executable... or its full
+// path. If the path is not absolute, the file is looked up in the
+// $PATH environment variable. If the file is not present or if it is
+// not executable, the entry may be ignored." An empty tryExec means
+// the key was never set at all, which is not the same thing as it
+// being set-but-unresolvable - callers check emptiness separately
+// (see ShouldAutostart()), so this only has to handle the "some value
+// was given" case.
+bool TryExecFound(
+    const std::string& tryExec)
+{
+    if (tryExec.find('/') != std::string::npos)
+        return ::access(tryExec.c_str(), X_OK) == 0; // absolute (or otherwise slash-containing) path - check directly, no PATH search
+
+    const char* pathEnv = std::getenv("PATH");
+    std::string path = (pathEnv && pathEnv[0] != '\0') ?
+        pathEnv :
+        "/usr/local/bin:/usr/bin:/bin"; // glibc's own confstr(_CS_PATH) fallback for a missing $PATH
+
+    std::size_t pos = 0;
+
+    while (pos <= path.size())
+    {
+        std::size_t end = path.find(':', pos);
+
+        if (end == std::string::npos)
+            end = path.size();
+
+        if (end > pos)
+        {
+            std::filesystem::path candidate =
+                std::filesystem::path(path.substr(pos, end - pos)) / tryExec;
+
+            if (::access(candidate.c_str(), X_OK) == 0)
+                return true;
+        }
+
+        pos = end + 1;
+    }
+
+    return false;
+}
+
 }
 
 bool ShouldDisplay(
@@ -170,6 +216,30 @@ bool ShouldDisplay(
 
     if (entry.exec.empty())
         return false; // nothing to launch - not a real, runnable application
+
+    if (!PassesShowIn(entry))
+        return false;
+
+    return true;
+}
+
+bool ShouldAutostart(
+    const DesktopEntry& entry)
+{
+    if (entry.type != "Application")
+        return false;
+
+    if (entry.hidden)
+        return false; // deliberately NOT noDisplay too - see this function's header comment
+
+    if (entry.exec.empty())
+        return false; // nothing to launch
+
+    if (!entry.autostartEnabled)
+        return false;
+
+    if (!entry.tryExec.empty() && !TryExecFound(entry.tryExec))
+        return false;
 
     if (!PassesShowIn(entry))
         return false;

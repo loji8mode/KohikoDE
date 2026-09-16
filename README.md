@@ -803,6 +803,41 @@ session gets redirected too. A `windowrule=workspace:N` for the same
 window (see [Window rules](#window-rules)) always wins over this if both
 apply, since that's a more specific, deliberate override.
 
+### XDG autostart (`.desktop` entries)
+
+Alongside the two config-driven mechanisms above, Kohiko also runs
+every `.desktop` entry it finds under `~/.config/autostart/` and
+`/etc/xdg/autostart/`, per the [freedesktop Desktop Application
+Autostart Specification](https://specifications.freedesktop.org/autostart-spec/latest/) -
+this is what actually launches the audio/network/Bluetooth tray
+widgets (see [System tray](#system-tray) below), since their
+`.desktop` files are installed to `/etc/xdg/autostart/` by `make
+install`/`cmake --install` rather than listed in `auto_start_programs=`.
+It runs anything else placed in either of those two directories too -
+by a package, or by hand - the same way any other XDG-autostart-aware
+desktop would.
+
+An entry is skipped if it sets `Hidden=true` or
+`X-GNOME-Autostart-enabled=false`, if its `TryExec=` (when set) can't
+be found, or if `OnlyShowIn=`/`NotShowIn=` excludes `Kohiko` (Kohiko
+sets `$XDG_CURRENT_DESKTOP=Kohiko` itself if nothing already has -
+see below). A `~/.config/autostart/foo.desktop` completely overrides
+(not merges with) a `/etc/xdg/autostart/foo.desktop` of the same
+name, so copying one there and adding `Hidden=true` is the standard
+way to turn off a single system-wide entry without touching the
+original file. Like the two mechanisms above, this runs exactly once,
+right after the bar/tray/launcher finish starting up, and never again
+on `kohikoctl reload`.
+
+This is also the one place `$XDG_CURRENT_DESKTOP` matters to Kohiko:
+a display manager that honours `desktop/kohiko.desktop`'s
+`DesktopNames=Kohiko` will usually already have set it before Kohiko
+even starts, but a manual `startx`/`~/.xinitrc` launch has no display
+manager around to do that translation at all - so Kohiko sets it
+itself (to `Kohiko`, without overwriting an existing value) early in
+startup, so `OnlyShowIn=`/`NotShowIn=` on *any* autostart entry - not
+just Kohiko's own - behaves identically either way.
+
 ## Keyboard layouts / languages
 
 Kohiko applies `keyboard.layouts=` via `setxkbmap` once at startup (and
@@ -927,11 +962,14 @@ own "Advanced Settings" link, rather than being dropped.
 
 Each has a matching tray widget (`kohiko-audio-tray`,
 `kohiko-network-tray`, `kohiko-bluetooth-tray`) that docks into the
-system tray described above and autostarts by default (see
-[Autostart](#autostart) for the general mechanism - these use the
-same `/etc/xdg/autostart` convention as any other autostarted
-application, installed automatically by `make install`/`cmake
---install`). Left-clicking `kohiko-audio-tray` opens `kohiko-audio`,
+system tray described above and autostarts by default via their
+`desktop/kohiko-*-tray.desktop` entries, installed to
+`/etc/xdg/autostart` by `make install`/`cmake --install` and run by
+Kohiko's own XDG autostart handling - see [XDG
+autostart](#xdg-autostart-desktop-entries) above for exactly what runs
+them and when, since `auto_start_programs=` is a different,
+config-driven mechanism that has nothing to do with these three.
+Left-clicking `kohiko-audio-tray` opens `kohiko-audio`,
 and right-click opens a quick mute/device-switch menu; left-clicking
 `kohiko-network-tray`/`kohiko-bluetooth-tray` opens a quick popup, and
 right-click opens the full app - this asymmetry matches how each one
@@ -946,6 +984,15 @@ None of these three apps or their tray widgets are built at all if
 `libdbus-1-dev`/`libpipewire-0.3-dev` aren't present at build time
 (see [Building](#building)) - `kohiko`, `kohikoctl`, and
 `kohiko-settings` build and work exactly as before either way.
+
+Icon rendering for the tray widgets goes through the system icon theme
+(`~/.config/gtk-3.0/settings.ini`'s `gtk-icon-theme-name`, falling
+back to `hicolor` - see [docs/AUDIO_NETWORK_BLUETOOTH.md](docs/AUDIO_NETWORK_BLUETOOTH.md#icon-loading)
+for exactly what that does and doesn't find) and then through Imlib2's
+own SVG loader for anything vector-based, which most modern icon
+themes' status icons are; see that same doc for a known, unresolved
+Imlib2/librsvg crash risk found while testing this, affecting a
+minority of specific icon files under specific conditions.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how these three
 apps are put together internally (the shared `UiWindow`/`Widget`

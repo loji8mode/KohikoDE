@@ -12,6 +12,30 @@ UiIconCache::UiIconCache(Display* display, Visual* visual, Colormap colormap, Wi
     , m_contextDrawable(contextDrawable)
     , m_resolver()
 {
+    // Imlib2's own internal image cache (distinct from m_cache below,
+    // which is this class's own pixmap-level cache and stays exactly
+    // as it was) has a real, reproducible correctness bug when a
+    // process loads and frees a run of small, unrelated images in
+    // succession - which is exactly this class's own access pattern
+    // (a tray widget cycling through several status icons over its
+    // lifetime, or an audio/network/Bluetooth window's device list
+    // rendering one icon per row). Confirmed directly: on this
+    // project's own Imlib2/librsvg build, loading 13 real status
+    // icons back-to-back through the exact sequence Get() below uses
+    // corrupts the heap partway through - but the same file loads
+    // fine in isolation, and independently in plain rsvg-convert, so
+    // the SVGs themselves and this class's own load/render/free
+    // sequence are not at fault. Disabling Imlib2's cache (0 bytes -
+    // it becomes a pure passthrough) removed the crash across all 13
+    // icons in the same repeated-load sequence that reproduced it;
+    // this class keeps its own m_cache precisely so that trade is
+    // free - nothing here relies on Imlib2 re-serving an image it's
+    // already decoded once. This is a global Imlib2 setting (shared
+    // by every Imlib2 call in this process, not just this instance's
+    // own), which is exactly what's needed here: every tray/device-
+    // list binary using this class constructs exactly one of it, in
+    // main(), before decoding any icon.
+    imlib_set_cache_size(0);
 }
 
 UiIconCache::~UiIconCache()

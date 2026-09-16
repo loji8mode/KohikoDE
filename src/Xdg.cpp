@@ -29,15 +29,13 @@ fs::path EnsureExists(
     return path;
 }
 
-// $XDG_DATA_DIRS, split on ':', defaulting to the spec's own
-// "/usr/local/share/:/usr/share/" when unset/empty.
-std::vector<fs::path> DataDirs()
+// Splits a ':'-separated XDG dir-list env var into paths, dropping
+// empty entries (a leading/trailing/doubled ':') - shared by
+// XDG_DATA_DIRS below and XDG_CONFIG_DIRS in AutostartDirs(), which
+// both use exactly this same list syntax.
+std::vector<fs::path> SplitPathList(
+    const std::string& raw)
 {
-    std::string raw = EnvOrEmpty("XDG_DATA_DIRS");
-
-    if (raw.empty())
-        raw = "/usr/local/share/:/usr/share/";
-
     std::vector<fs::path> dirs;
 
     std::size_t pos = 0;
@@ -56,6 +54,18 @@ std::vector<fs::path> DataDirs()
     }
 
     return dirs;
+}
+
+// $XDG_DATA_DIRS, split on ':', defaulting to the spec's own
+// "/usr/local/share/:/usr/share/" when unset/empty.
+std::vector<fs::path> DataDirs()
+{
+    std::string raw = EnvOrEmpty("XDG_DATA_DIRS");
+
+    if (raw.empty())
+        raw = "/usr/local/share/:/usr/share/";
+
+    return SplitPathList(raw);
 }
 
 }
@@ -113,6 +123,30 @@ std::vector<std::filesystem::path> ApplicationDirs()
 
     for (const auto& dir : DataDirs())
         dirs.push_back(dir / "applications");
+
+    return dirs;
+}
+
+std::vector<std::filesystem::path> AutostartDirs()
+{
+    std::vector<fs::path> dirs;
+
+    std::string xdgConfig = EnvOrEmpty("XDG_CONFIG_HOME");
+
+    fs::path userConfig = xdgConfig.empty() ?
+        Home() / ".config" :
+        fs::path(xdgConfig);
+
+    if (!userConfig.empty())
+        dirs.push_back(userConfig / "autostart");
+
+    std::string rawConfigDirs = EnvOrEmpty("XDG_CONFIG_DIRS");
+
+    if (rawConfigDirs.empty())
+        rawConfigDirs = "/etc/xdg";
+
+    for (const auto& dir : SplitPathList(rawConfigDirs))
+        dirs.push_back(dir / "autostart");
 
     return dirs;
 }

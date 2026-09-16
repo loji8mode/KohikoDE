@@ -1,5 +1,106 @@
 # Changelog
 
+## Version 0.20.1
+
+Release date: 2026-08-13
+
+### Fixed
+- **Audio/network/Bluetooth tray icons now actually appear.** Root
+  cause: `desktop/kohiko-*-tray.desktop` were correctly installed to
+  `/etc/xdg/autostart` (as the 0.19.0 entry below describes), but
+  nothing in Kohiko ever read that directory - `RunAutostart()` only
+  ever handled `auto_start_programs=`/`workspace<N>=`, a separate,
+  config-string-only mechanism, and Kohiko has no session manager of
+  its own to fall back on. The three tray processes were never
+  started at all, on a display-manager-launched session or a manual
+  `startx` one alike - confirmed by reproducing it against a pristine
+  pre-fix build first, not just by reading the code.
+  `WindowManager::RunAutostart()` now also runs every `.desktop` entry
+  under `Xdg::AutostartDirs()` (new: `$XDG_CONFIG_HOME/autostart` then
+  `$XDG_CONFIG_DIRS/autostart`), via a new `ShouldAutostart()`
+  predicate (`DesktopEntry.h`/`.cpp`) that respects `Hidden=`,
+  `X-GNOME-Autostart-enabled=false`, `TryExec=`, and
+  `OnlyShowIn=`/`NotShowIn=`. `SystemTray.cpp`, `TrayIconClient.cpp`,
+  and all three `tools/kohiko-*-tray.cpp` were already correct and are
+  unmodified by this fix - confirmed by diff against the pre-fix
+  source, not just by assumption. See
+  `docs/AUDIO_NETWORK_BLUETOOTH.md`'s new "Tray widget autostart"
+  section for the full investigation and exactly what was tested
+  (a real Xvfb X server, a real D-Bus session bus, and a real
+  PipeWire/WirePlumber stack, not just a code read).
+- `IconResolver::Resolve()` now retries a bare icon name with a
+  `-symbolic` suffix if the exact name isn't found anywhere in the
+  theme chain. Found while verifying the fix above: with autostart
+  fixed and a real, currently-installed Adwaita theme configured, all
+  three tray icons docked successfully but rendered as entirely blank
+  squares, because Adwaita (like most actively-maintained themes)
+  only ships modern status-icon names like
+  `network-wireless-signal-excellent` under a `-symbolic` suffix.
+  Affects the launcher's own icon lookups too (same `IconResolver`),
+  though only as an additional fallback attempted after every existing
+  lookup already failed, so it cannot change the result of a lookup
+  that previously succeeded.
+- `make test` was silently incomplete on any system with XRandr
+  development headers present (i.e. most real installs, including a
+  default Arch one, since `libxrandr` is already a listed
+  dependency) - `build/test_sessionstore` and
+  `build/test_wallpapermanager` didn't link `-lXrandr` despite pulling
+  in `MonitorManager.cpp`, so `make test` silently stopped partway
+  through instead of running the remaining test binaries. Unrelated to
+  the tray fix above; found only because a full, honest `make test`
+  run was needed to verify it.
+
+### Changed
+- Kohiko now sets `$XDG_CURRENT_DESKTOP=Kohiko` at startup
+  (`Application::Run()`) if nothing has already set it, without
+  overwriting an existing value. A display manager that honours
+  `desktop/kohiko.desktop`'s `DesktopNames=Kohiko` typically sets this
+  already; a manual `startx`/`~/.xinitrc` launch never did, since
+  there's no display manager involved to make that translation -
+  meaning `OnlyShowIn=`/`NotShowIn=` on any autostart entry could
+  silently behave differently between the two launch paths. Found
+  while investigating the tray fix above, though it doesn't affect
+  Kohiko's own three tray `.desktop` files, which don't set either key.
+- `UiIconCache`'s constructor now calls `imlib_set_cache_size(0)`,
+  disabling Imlib2's own internal image cache (distinct from, and not
+  a replacement for, `UiIconCache`'s own separate pixmap-level cache,
+  which is unchanged) - a standard, zero-downside mitigation for a
+  class of Imlib2 correctness bug when loading many small images in
+  one process. Added defensively; see "Known issues" below - it did
+  not conclusively fix the specific crash found this release.
+
+### Added
+- Two new unit test binaries, wired into `make test` and `ctest`
+  alike: `test_desktopentry` (27 checks: `ShouldAutostart()`'s
+  handling of `Hidden=`, `X-GNOME-Autostart-enabled=`, `TryExec=`,
+  `OnlyShowIn=`/`NotShowIn=`, and specifically that `NoDisplay=true`
+  does *not* block autostart the way it blocks menu display; plus
+  `Xdg::AutostartDirs()`'s priority order) and `test_iconresolver` (7
+  checks: the `-symbolic` fallback above, including that it can't
+  double up on a name that already ends in `-symbolic`).
+
+### Known issues
+- **An unresolved Imlib2/librsvg crash risk**, found (not caused) by
+  the icon-resolver fix above: once real status-icon SVGs were
+  actually being loaded, loading a specific sequence of several
+  different ones in a row - the pattern a tray widget's icon naturally
+  follows as its status changes over time - reproducibly corrupted the
+  heap in this project's own Ubuntu 24.04 sandbox (`libimlib2-1.12.4`/
+  `librsvg2-2.58.0`). Isolated to Imlib2's own SVG-loading path
+  specifically (`rsvg-convert`, librsvg's own CLI, renders the exact
+  same files fine standalone; a minimal reproduction using raw Imlib2
+  calls only, no Kohiko code at all, hits the same crash) - not a bug
+  in `UiIconCache`, `IconResolver`, or anything else in this release.
+  Deterministic given a fixed load sequence, but sequence- and file-
+  specific (11 of the 13 real icon names the three tray widgets can
+  request were individually confirmed not to trigger it). Disclosed,
+  not fixed - root-causing a third-party rendering library's own
+  internals is well outside this release's scope, and unconfirmed
+  against Arch Linux's actual `imlib2`/`librsvg` package versions,
+  which likely differ from this sandbox's. See
+  `docs/AUDIO_NETWORK_BLUETOOTH.md`'s "Icon loading" section for the
+  full isolation work and a practical workaround.
+
 ## Version 0.20.0
 
 ### Added

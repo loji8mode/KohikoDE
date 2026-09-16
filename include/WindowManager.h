@@ -465,13 +465,28 @@ private:
     // every `workspace<N>=` line (N from 1 to workspace.count) - the
     // same idea, except each program listed there also gets recorded
     // in m_pendingWorkspaceAutostarts so Manage() can land its
-    // window(s) on workspace N once they actually show up. All of it
-    // runs exactly once, right after startup - see Initialize().
-    // Deliberately never called from ReloadConfig(), or `kohikoctl
-    // reload` would relaunch every autostart program (a second
-    // Telegram, a second Discord, ...) every time someone reloads the
-    // config.
+    // window(s) on workspace N once they actually show up - and every
+    // freedesktop XDG autostart .desktop entry found by
+    // RunXdgAutostartEntries() below, which is how the audio/network/
+    // Bluetooth tray widgets (desktop/kohiko-*-tray.desktop) actually
+    // get started; Kohiko has no session manager of its own to do this
+    // otherwise. All of it runs exactly once, right after startup -
+    // see Initialize(). Deliberately never called from ReloadConfig(),
+    // or `kohikoctl reload` would relaunch every autostart program (a
+    // second Telegram, a second Discord, a second tray icon...) every
+    // time someone reloads the config.
     void RunAutostart();
+
+    // The freedesktop-autostart half of RunAutostart() above: scans
+    // every directory Xdg::AutostartDirs() returns, in priority order,
+    // parses each ".desktop" file found (skipping any desktop ID
+    // already seen in a higher-priority directory, exactly as the spec
+    // requires - see AutostartDirs()'s own comment), and spawns
+    // whichever ones ShouldAutostart() accepts. Broken out on its own
+    // only because RunAutostart() was already doing something
+    // different (config-string parsing) for its other two sources;
+    // never called on its own from anywhere else.
+    void RunXdgAutostartEntries();
 
     // 0 if nothing pending matches `pid` (or it's <= 0); otherwise the
     // workspace a `workspace<N>=` autostart line asked this window's
