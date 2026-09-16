@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Kohiko Network Tray
+Comment=Network tray widget for Kohiko (connection state and quick controls)
+Exec=kohiko-network-tray
+Icon=kohiko-network
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+Terminal=false

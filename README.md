@@ -34,6 +34,7 @@ a full compositor.
 - [Keyboard layouts / languages](#keyboard-layouts--languages)
 - [Default keybindings](#default-keybindings)
 - [System tray](#system-tray)
+- [Audio, network, and Bluetooth](#audio-network-and-bluetooth)
 - [EWMH support](#ewmh-support)
 - [The mouse: swap, move, and resize](#the-mouse-swap-move-and-resize)
 - [The launcher (Super+D)](#the-launcher-superd)
@@ -73,6 +74,11 @@ sudo apt install libxrandr-dev
 sudo apt install libxss-dev
 # optional, for the primary (D-Bus) half of display-sleep inhibition:
 sudo apt install libdbus-1-dev
+# optional, for kohiko-audio/kohiko-network/kohiko-bluetooth and their
+# tray widgets (see Audio, network, and Bluetooth) - both required
+# together for those six binaries to build at all; everything else in
+# this repository builds fine without them:
+sudo apt install libdbus-1-dev libpipewire-0.3-dev
 ```
 
 Also install the lock screen's PAM service file - without it, every
@@ -89,16 +95,21 @@ Two build systems are provided; pick whichever you'd rather have installed.
 **Plain `make`** (no cmake required):
 
 ```sh
-make -j$(nproc)          # -> ./kohiko, ./kohikoctl, ./kohiko-settings
-make test                 # BSP tree, launcher scoring, adaptive-placement unit tests (no X server needed)
+make -j$(nproc)          # -> ./kohiko, ./kohikoctl, ./kohiko-settings, and (if libdbus-1-dev
+                           #    + libpipewire-0.3-dev are present) ./kohiko-audio, ./kohiko-network,
+                           #    ./kohiko-bluetooth, and their three tray widgets
+make test                 # BSP tree, launcher scoring, adaptive-placement, DBusValue unit tests (no X server needed)
 make test-monitors        # MonitorManager/XRandr tests (needs a real X server - skips gracefully without one)
-sudo make install          # installs to /usr/local, incl. Kohiko Settings' .desktop entry + icon
+sudo make install          # installs to /usr/local, incl. every app's .desktop entry + icon,
+                           # and the tray widgets' autostart entries under /etc/xdg/autostart
 ```
 
 **CMake:**
 
 ```sh
-scripts/build.sh           # -> build/kohiko, build/kohikoctl, build/kohiko-settings
+scripts/build.sh           # -> build/kohiko, build/kohikoctl, build/kohiko-settings, and
+                           #    (same conditions as above) build/kohiko-audio, build/kohiko-network,
+                           #    build/kohiko-bluetooth, and their tray widgets
 ```
 
 `kohiko-settings` (see [Kohiko Settings](#kohiko-settings)) is Kohiko's
@@ -584,16 +595,73 @@ to them freely; nothing is hardcoded.
 ## System tray
 
 The bar implements the freedesktop System Tray Protocol, so applets that
-dock an icon there (NetworkManager, Bluetooth, volume, etc.) show up at
-the right edge of the bar, just left of the clock, the same way they
-would in any other status bar. No configuration needed - Kohiko takes
-ownership of the tray selection on startup and lays out whatever docks
-itself with it, left to right, in the order it arrived. On a
-multi-monitor setup (every monitor has its own bar - see
-[Multi-monitor](#multi-monitor)) the tray is a single X11-wide
-selection, so it can only ever live on one of them - it stays on
-whichever monitor is Primary(), following it if a hotplug changes
+dock an icon there show up at the right edge of the bar, just left of
+the clock, the same way they would in any other status bar. No
+configuration needed - Kohiko takes ownership of the tray selection on
+startup and lays out whatever docks itself with it, left to right, in
+the order it arrived. On a multi-monitor setup (every monitor has its
+own bar - see [Multi-monitor](#multi-monitor)) the tray is a single
+X11-wide selection, so it can only ever live on one of them - it stays
+on whichever monitor is Primary(), following it if a hotplug changes
 which one that is.
+
+Kohiko ships its own native audio/network/Bluetooth tray widgets (see
+the next section) rather than expecting a third-party applet like
+`nm-applet` or `blueman-applet` - those still dock into the same tray
+just fine if you run them instead, since this is a completely ordinary
+implementation of the standard protocol either way, but there's no
+need to for these three in particular.
+
+## Audio, network, and Bluetooth
+
+Three standalone native applications, installed and built alongside
+`kohiko`/`kohiko-settings` (see [Building](#building)) but not part of
+the window manager process itself - each is an ordinary X11 client
+you can also launch, alt-tab to, or window-rule like any other:
+
+- **`kohiko-audio`** - the permanent audio control center: output/input
+  device lists, per-device volume and mute, switching the default
+  device, and live output/microphone level meters. Backed entirely by
+  PipeWire (and whatever WirePlumber policy is in effect for it) -
+  Kohiko doesn't talk to ALSA or PulseAudio directly, and doesn't
+  replace WirePlumber's own session/policy management, just the UI in
+  front of it.
+- **`kohiko-network`** - Wi-Fi (scan, connect, saved networks, signal
+  strength), Ethernet (connect/disconnect, IPv4/IPv6/DNS/gateway/MAC
+  info), VPN (activate/deactivate existing profiles), and an airplane
+  mode toggle. Backed entirely by NetworkManager over D-Bus; airplane
+  mode here means NetworkManager's own `WirelessEnabled`/`WwanEnabled`
+  flags together, the closest equivalent it exposes to a hardware
+  radio kill switch. Setting up a brand-new VPN profile isn't in
+  scope - that's `nm-connection-editor` or your VPN provider's own
+  setup tool's job; kohiko-network manages profiles that already
+  exist.
+- **`kohiko-bluetooth`** - adapter power/discoverable, scanning,
+  pairing, connecting/disconnecting, trusting, removing, and (where
+  the device reports one) battery level. Backed entirely by BlueZ over
+  D-Bus.
+
+Each has a matching tray widget (`kohiko-audio-tray`,
+`kohiko-network-tray`, `kohiko-bluetooth-tray`) that docks into the
+system tray described above and autostarts by default (see
+[Autostart](#autostart) for the general mechanism - these use the
+same `/etc/xdg/autostart` convention as any other autostarted
+application, installed automatically by `make install`/`cmake
+--install`). Left-clicking `kohiko-audio-tray` opens `kohiko-audio`,
+and right-click opens a quick mute/device-switch menu; left-clicking
+`kohiko-network-tray`/`kohiko-bluetooth-tray` opens a quick popup, and
+right-click opens the full app - this asymmetry matches how each one
+is most often used (audio's quick actions are reached for constantly;
+network/Bluetooth's aren't). The audio tray widget's scroll wheel
+adjusts the default output's volume directly. Clicking a tray widget's
+"open the full app" action raises the already-running window instead
+of launching a second one, the same single-instance behavior as
+opening the app any other way.
+
+None of these three apps or their tray widgets are built at all if
+`libdbus-1-dev`/`libpipewire-0.3-dev` aren't present at build time
+(see [Building](#building)) - `kohiko`, `kohikoctl`, and
+`kohiko-settings` build and work exactly as before either way.
 
 ## EWMH support
 
@@ -1113,6 +1181,12 @@ into a tile it's already shown it won't render into correctly.
   idle display from sleeping on schedule - turn off with `general.
   inhibit_sleep_during_playback=false` if you'd rather the display's
   configured timeout applied completely unconditionally.
+- **Native audio, network, and Bluetooth apps** (`kohiko-audio`,
+  `kohiko-network`, `kohiko-bluetooth` - see
+  [Audio, network, and Bluetooth](#audio-network-and-bluetooth)) with
+  matching tray widgets, built on PipeWire, NetworkManager, and BlueZ
+  respectively - Kohiko still doesn't replace any of those, just adds
+  a native UI in front of each.
 
 ## Planned
 

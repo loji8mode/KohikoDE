@@ -35,7 +35,21 @@ endif()
 # works fine without it (the X11 fullscreen-window heuristic in
 # WindowManager::CheckSleepInhibition() is the fallback whenever this
 # isn't available, exactly like XRandr/XScreenSaver below).
-pkg_check_modules(DBus dbus-1)
+#
+# It's also what every one of kohiko-audio/network/bluetooth's D-Bus
+# backends (DBusClient, NetworkManagerClient, BluezClient,
+# NotificationClient - see include/DBusClient.h) is built on, where
+# it's a hard requirement rather than an optional one - see the
+# KOHIKO_DESKTOP_APPS_AVAILABLE check further down, which skips
+# building those three apps and their tray widgets entirely (with a
+# warning) rather than failing the whole project's build if it's
+# missing.
+pkg_check_modules(DBus IMPORTED_TARGET dbus-1)
+
+# libpipewire - kohiko-audio's only audio backend (see
+# include/PipeWireClient.h) - also folded into the
+# KOHIKO_DESKTOP_APPS_AVAILABLE check below.
+pkg_check_modules(PipeWire IMPORTED_TARGET libpipewire-0.3)
 
 # --- kohiko: the window manager ------------------------------------------------
 
@@ -44,10 +58,32 @@ file(GLOB KOHIKO_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/*.cpp)
 # SettingsWindow.cpp/ConfigWriter.cpp exist only for kohiko-settings,
 # its own separate binary/process (see include/SettingsWindow.h's own
 # header comment for why) - excluded here so `kohiko` itself stays
-# free of GUI code it never runs, per "keep the WM lightweight".
+# free of GUI code it never runs, per "keep the WM lightweight". The
+# desktop-integration apps' sources (kohiko-audio/network/bluetooth
+# and their shared infrastructure, built as their own targets further
+# down) get the same treatment for the same reason.
 list(REMOVE_ITEM KOHIKO_SOURCES
     ${CMAKE_SOURCE_DIR}/src/SettingsWindow.cpp
     ${CMAKE_SOURCE_DIR}/src/ConfigWriter.cpp
+    ${CMAKE_SOURCE_DIR}/src/DBusValue.cpp
+    ${CMAKE_SOURCE_DIR}/src/DBusClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/AppInstanceLock.cpp
+    ${CMAKE_SOURCE_DIR}/src/AppConfigStore.cpp
+    ${CMAKE_SOURCE_DIR}/src/NotificationClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/UiWindow.cpp
+    ${CMAKE_SOURCE_DIR}/src/UiWidget.cpp
+    ${CMAKE_SOURCE_DIR}/src/UiListRow.cpp
+    ${CMAKE_SOURCE_DIR}/src/UiScrollView.cpp
+    ${CMAKE_SOURCE_DIR}/src/UiSidebar.cpp
+    ${CMAKE_SOURCE_DIR}/src/UiPopupMenu.cpp
+    ${CMAKE_SOURCE_DIR}/src/UiIconCache.cpp
+    ${CMAKE_SOURCE_DIR}/src/TrayIconClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/PipeWireClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/NetworkManagerClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/BluezClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/AudioWindow.cpp
+    ${CMAKE_SOURCE_DIR}/src/NetworkWindow.cpp
+    ${CMAKE_SOURCE_DIR}/src/BluetoothWindow.cpp
 )
 
 add_executable(kohiko ${KOHIKO_SOURCES})
@@ -105,6 +141,88 @@ add_executable(kohiko-settings
 target_include_directories(kohiko-settings PRIVATE ${CMAKE_SOURCE_DIR}/include ${X11_INCLUDE_DIR})
 target_link_libraries(kohiko-settings PRIVATE ${X11_LIBRARIES} PkgConfig::Xft)
 target_compile_options(kohiko-settings PRIVATE -Wall -Wextra)
+
+# --- kohiko-audio / kohiko-network / kohiko-bluetooth + tray widgets -------------
+#
+# The native desktop-integration apps: standalone binaries sharing a
+# UI toolkit (UiWindow/UiWidget/UiListRow/UiScrollView/UiSidebar/
+# UiPopupMenu/UiIconCache), a tray-docking framework (TrayIconClient),
+# and a D-Bus layer (DBusClient/DBusValue) used by NetworkManagerClient
+# and BluezClient - see each header for the reasoning. kohiko-audio
+# additionally needs PipeWireClient (libpipewire), which has no D-Bus
+# interface of its own.
+#
+# Gated as a whole on dbus-1 + libpipewire-0.3 rather than built
+# unconditionally: unlike kohiko itself (which merely loses the
+# display-sleep-inhibition *feature* without dbus-1, see above), these
+# three apps have no fallback for a missing D-Bus/PipeWire connection
+# at *compile* time - DBusClient.cpp and PipeWireClient.cpp both
+# `#include` their real headers unconditionally. Skipping the whole
+# section (with a clear warning) keeps a system without those
+# dev packages able to build `kohiko` itself, same as any other
+# optional dependency in this file.
+if(DBus_FOUND AND PipeWire_FOUND)
+    set(KOHIKO_DESKTOP_APPS_AVAILABLE TRUE)
+else()
+    set(KOHIKO_DESKTOP_APPS_AVAILABLE FALSE)
+    message(WARNING "libdbus-1-dev and/or libpipewire-0.3-dev not found - "
+        "skipping kohiko-audio, kohiko-network, kohiko-bluetooth, and their "
+        "tray widgets. Install both to enable them.")
+endif()
+
+if(KOHIKO_DESKTOP_APPS_AVAILABLE)
+    # Shared infrastructure, common to every one of the six binaries
+    # below - built once as a static library rather than recompiled
+    # per binary.
+    add_library(kohiko-desktop-shared STATIC
+        src/DBusValue.cpp
+        src/DBusClient.cpp
+        src/AppInstanceLock.cpp
+        src/AppConfigStore.cpp
+        src/NotificationClient.cpp
+        src/UiWindow.cpp
+        src/UiWidget.cpp
+        src/UiListRow.cpp
+        src/UiScrollView.cpp
+        src/UiSidebar.cpp
+        src/UiPopupMenu.cpp
+        src/UiIconCache.cpp
+        src/TrayIconClient.cpp
+        src/Font.cpp
+        src/Config.cpp
+        src/IconResolver.cpp
+        src/Xdg.cpp
+        src/Utils.cpp
+        src/IniFile.cpp
+    )
+    target_include_directories(kohiko-desktop-shared PUBLIC ${CMAKE_SOURCE_DIR}/include ${X11_INCLUDE_DIR})
+    target_link_libraries(kohiko-desktop-shared PUBLIC ${X11_LIBRARIES} PkgConfig::Xft PkgConfig::Imlib2 PkgConfig::DBus)
+    target_compile_options(kohiko-desktop-shared PRIVATE -Wall -Wextra)
+
+    add_executable(kohiko-audio tools/kohiko-audio.cpp src/AudioWindow.cpp src/PipeWireClient.cpp)
+    target_link_libraries(kohiko-audio PRIVATE kohiko-desktop-shared PkgConfig::PipeWire)
+    target_compile_options(kohiko-audio PRIVATE -Wall -Wextra)
+
+    add_executable(kohiko-network tools/kohiko-network.cpp src/NetworkWindow.cpp src/NetworkManagerClient.cpp)
+    target_link_libraries(kohiko-network PRIVATE kohiko-desktop-shared)
+    target_compile_options(kohiko-network PRIVATE -Wall -Wextra)
+
+    add_executable(kohiko-bluetooth tools/kohiko-bluetooth.cpp src/BluetoothWindow.cpp src/BluezClient.cpp)
+    target_link_libraries(kohiko-bluetooth PRIVATE kohiko-desktop-shared)
+    target_compile_options(kohiko-bluetooth PRIVATE -Wall -Wextra)
+
+    add_executable(kohiko-audio-tray tools/kohiko-audio-tray.cpp src/PipeWireClient.cpp)
+    target_link_libraries(kohiko-audio-tray PRIVATE kohiko-desktop-shared PkgConfig::PipeWire)
+    target_compile_options(kohiko-audio-tray PRIVATE -Wall -Wextra)
+
+    add_executable(kohiko-network-tray tools/kohiko-network-tray.cpp src/NetworkManagerClient.cpp)
+    target_link_libraries(kohiko-network-tray PRIVATE kohiko-desktop-shared)
+    target_compile_options(kohiko-network-tray PRIVATE -Wall -Wextra)
+
+    add_executable(kohiko-bluetooth-tray tools/kohiko-bluetooth-tray.cpp src/BluezClient.cpp)
+    target_link_libraries(kohiko-bluetooth-tray PRIVATE kohiko-desktop-shared)
+    target_compile_options(kohiko-bluetooth-tray PRIVATE -Wall -Wextra)
+endif()
 
 # --- tests ------------------------------------------------------------------------
 
@@ -170,6 +288,16 @@ if(X11_Xrandr_FOUND)
 endif()
 add_test(NAME MonitorManager COMMAND test_monitormanager)
 
+# Pure data-structure logic (no D-Bus connection involved - see the
+# file itself), same category as test_launcherscoring/
+# test_placementhabits above.
+add_executable(test_dbusvalue
+    tests/test_dbusvalue.cpp
+    src/DBusValue.cpp
+)
+target_include_directories(test_dbusvalue PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME DBusValue COMMAND test_dbusvalue)
+
 # --- install ------------------------------------------------------------------------
 
 install(TARGETS kohiko kohikoctl kohiko-settings RUNTIME DESTINATION bin)
@@ -181,3 +309,43 @@ install(FILES assets/icons/kohiko-settings.svg DESTINATION share/icons/hicolor/s
 # IconResolver's guaranteed-checked pixmaps fallback, working around
 # its theme search only reading one base directory per theme.
 install(FILES assets/icons/kohiko-settings.svg DESTINATION /usr/share/pixmaps)
+
+if(KOHIKO_DESKTOP_APPS_AVAILABLE)
+    install(TARGETS
+        kohiko-audio kohiko-network kohiko-bluetooth
+        kohiko-audio-tray kohiko-network-tray kohiko-bluetooth-tray
+        RUNTIME DESTINATION bin
+    )
+
+    install(FILES
+        desktop/kohiko-audio.desktop
+        desktop/kohiko-network.desktop
+        desktop/kohiko-bluetooth.desktop
+        DESTINATION share/applications
+    )
+
+    install(FILES
+        assets/icons/kohiko-audio.svg
+        assets/icons/kohiko-network.svg
+        assets/icons/kohiko-bluetooth.svg
+        DESTINATION share/icons/hicolor/scalable/apps
+    )
+    install(FILES
+        assets/icons/kohiko-audio.svg
+        assets/icons/kohiko-network.svg
+        assets/icons/kohiko-bluetooth.svg
+        DESTINATION /usr/share/pixmaps
+    )
+
+    # System-wide autostart per the freedesktop Desktop Application
+    # Autostart Specification - read from $XDG_CONFIG_DIRS/autostart,
+    # whose default (/etc/xdg) is what this installs into; a per-user
+    # override still works normally by dropping a same-named file in
+    # ~/.config/autostart.
+    install(FILES
+        desktop/kohiko-audio-tray.desktop
+        desktop/kohiko-network-tray.desktop
+        desktop/kohiko-bluetooth-tray.desktop
+        DESTINATION /etc/xdg/autostart
+    )
+endif()

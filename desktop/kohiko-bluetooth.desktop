@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Kohiko Bluetooth
+GenericName=Bluetooth Settings
+Comment=Pair, connect, and manage Bluetooth devices for Kohiko
+Exec=kohiko-bluetooth
+Icon=kohiko-bluetooth
+Categories=Settings;HardwareSettings;
+StartupWMClass=kohiko-bluetooth
+Terminal=false
+NoDisplay=false

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Kohiko Bluetooth Tray
+Comment=Bluetooth tray widget for Kohiko (connection state and quick controls)
+Exec=kohiko-bluetooth-tray
+Icon=kohiko-bluetooth
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+Terminal=false

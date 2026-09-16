@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Kohiko Audio Tray
+Comment=Audio tray widget for Kohiko (volume/mute indicator and quick controls)
+Exec=kohiko-audio-tray
+Icon=kohiko-audio
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+Terminal=false

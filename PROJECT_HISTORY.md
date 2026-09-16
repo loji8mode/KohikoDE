@@ -1,7 +1,7 @@
 # Kohiko Project History
 
 This document traces the evolution of Kohiko, a C++20 / X11 tiling window
-manager, across its released versions from 0.1.0 through 0.18.0. It is
+manager, across its released versions from 0.1.0 through 0.19.0. It is
 derived from a direct comparison of the source, configuration, and
 documentation of each released version against the one before it.
 
@@ -370,30 +370,89 @@ configuration surface) rather than in the BSP tree itself.
 
 --------------------------------------------------------------------------
 
+## Phase 10 — Native Desktop Integration (0.19.0)
+
+**Versions:** 0.19.0
+
+**Goals:**
+Replace reliance on third-party tray applets (`nm-applet`,
+`blueman-applet`, a PulseAudio/PipeWire mixer) for the three most common
+pieces of desktop-session functionality a tiling WM doesn't itself
+provide - audio, networking, and Bluetooth - with native Kohiko
+applications and tray widgets, while continuing to use the same
+underlying system services (PipeWire/WirePlumber, NetworkManager, BlueZ)
+as their backend rather than reimplementing any of them.
+
+**Major developments:**
+- Three new standalone GUI applications - `kohiko-audio`,
+  `kohiko-network`, `kohiko-bluetooth` - each a completely ordinary X11
+  client (not part of the `kohiko` WM process), following the same
+  "standalone binary, no toolkit dependency" precedent `kohiko-settings`
+  set in Phase 8.
+- A new shared UI toolkit (`UiWindow`/`UiWidget`/`UiListRow`/
+  `UiScrollView`/`UiSidebar`/`UiPopupMenu`/`UiIconCache`) used by all
+  three, deliberately kept separate from `kohiko-settings`'s own
+  existing hand-rolled widget code rather than migrating that working,
+  already-shipped code onto a shared base - new infrastructure for new
+  apps, not a refactor of something that already works.
+- A new D-Bus layer (`DBusValue`/`DBusClient`) generalizing the
+  request/reply and property/signal patterns `ScreenSaverInhibitor`
+  (Phase 9's predecessor, Phase 7 originally) already used in miniature
+  for one narrow purpose, now reused by `NetworkManagerClient` and
+  `BluezClient`; a separate `PipeWireClient` for `kohiko-audio`'s
+  backend, since PipeWire has no D-Bus interface of its own.
+- A tray-docking framework (`TrayIconClient`) implementing the client
+  side of the same freedesktop System Tray Protocol `SystemTray.cpp`
+  already implements the host side of (Phase 2), used by three new tray
+  widgets - `kohiko-audio-tray`, `kohiko-network-tray`,
+  `kohiko-bluetooth-tray` - plus a small single-instance/raise-existing-
+  window mechanism (`AppInstanceLock`) shared by all six new binaries.
+- `libpipewire-0.3-dev` joins `libdbus-1-dev` as a build dependency for
+  these six binaries specifically (both required together, unlike
+  `kohiko`'s own already-optional `libdbus-1-dev` usage) - the rest of
+  the project is entirely unaffected if either is absent.
+
+**Lessons visible from the repository:**
+This is the first phase whose new code deliberately does *not* build on
+an existing shared foundation where one already existed for a similar
+purpose (`kohiko-settings`'s widget code) - a sign that "shared
+infrastructure" is being scoped to genuine reuse across the *new* apps
+being added, rather than treated as an excuse to refactor already-stable
+code paths, consistent with Phase 9's observation that Kohiko's core
+increasingly changes only where real friction is found. It's also the
+first phase to add a hard (non-optional-feature) external dependency
+pair to part of the build - a narrower version of the same "gracefully
+degrade, never fail the whole build" precedent XRandr/XScreenSaver/D-Bus
+established in earlier phases, just applied at the level of "skip six
+binaries" instead of "skip one feature inside an existing binary".
+
+--------------------------------------------------------------------------
+
 ## Current Direction
 
-As of 0.18.0, Kohiko presents itself as a largely self-contained X11
+As of 0.19.0, Kohiko presents itself as a largely self-contained X11
 tiling window manager and minimal desktop session: its own bar, native
 launcher and notepad, native lock screen with both Suspend-triggered and
 idle-timeout automatic locking, a power menu, session restore that now
 tracks BSP position as well as workspace/monitor/floating state, an
 adaptive placement system that learns per-application habits during
 ordinary use, multi-monitor support, standards-based display-sleep
-inhibition, and a native settings GUI with structured editors for its
-two most syntax-heavy repeatable directives — all on a deliberately
-small and still-optional-where-possible set of external dependencies
-(Xlib, optionally XRandr/XScreenSaver/D-Bus, Imlib2, Xft/fontconfig, and
-libpam — GTK3 was removed in 0.15.0).
+inhibition, a native settings GUI with structured editors for its
+two most syntax-heavy repeatable directives, and now native audio,
+network, and Bluetooth applications with matching tray widgets built on
+PipeWire/NetworkManager/BlueZ - all on a deliberately small and
+still-optional-where-possible set of external dependencies (Xlib,
+optionally XRandr/XScreenSaver/D-Bus, Imlib2, Xft/fontconfig, libpam,
+and now libdbus-1/libpipewire-0.3 together for the three new apps
+specifically - GTK3 was removed in 0.15.0).
 
-The README's "Planned" section is empty as of this release — every item
-it named going in was delivered, and nothing new was added to replace
-them. Combined with this phase's own pattern of two significant,
-un-"Planned" feature areas (Session Restore's BSP-position tracking and
-adaptive placement) shipping alongside the backlog items, this suggests
-Kohiko's trajectory has shifted from working through an explicit,
-publicly-tracked backlog toward organically deepening features that
-already exist, wherever the most friction was found — consistent with a
-project whose core scope (per "Intentionally unsupported") is considered
-essentially settled, with remaining effort going into making what's
-already there feel more considered rather than into growing the feature
-list itself.
+The README's "Planned" section was empty going into this release, and
+this phase's own scope (a fully-specified feature request rather than
+something drawn from that list) is itself a data point: with the core
+tiling/session/settings surface considered largely settled (per Phase
+9's own observation), new scope is now arriving as complete, externally-
+defined feature areas - "add native desktop integration" - rather than
+emerging organically from friction with what already exists. Whether
+that pattern continues or Kohiko returns to incrementally deepening its
+existing surface is the open question this release doesn't answer by
+itself.

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Kohiko Audio
+GenericName=Audio Control Center
+Comment=Manage output/input devices, volume, and mute for Kohiko
+Exec=kohiko-audio
+Icon=kohiko-audio
+Categories=Settings;Audio;AudioVideo;
+StartupWMClass=kohiko-audio
+Terminal=false
+NoDisplay=false

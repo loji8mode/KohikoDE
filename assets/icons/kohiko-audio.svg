@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Kohiko Audio's application icon - a plain speaker/volume glyph, in
+    the same accent-blue-on-dark palette as kohiko-settings.svg
+    (#89b4fa on #1e1e2e). See that file's own comment for why this is
+    installed into the hicolor icon theme rather than referenced by
+    path anywhere.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+  <circle cx="24" cy="24" r="23" fill="#1e1e2e"/>
+
+  <g fill="#89b4fa">
+    <path d="M14 19 H19 L27 12 V36 L19 29 H14 Z"/>
+  </g>
+
+  <g stroke="#89b4fa" stroke-width="2.4" fill="none" stroke-linecap="round">
+    <path d="M32 18 A10 10 0 0 1 32 30"/>
+    <path d="M35.5 14 A15.5 15.5 0 0 1 35.5 34"/>
+  </g>
+</svg>

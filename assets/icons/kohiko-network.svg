@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Kohiko Network's application icon - a plain Wi-Fi signal glyph, in
+    the same accent-blue-on-dark palette as kohiko-settings.svg
+    (#89b4fa on #1e1e2e). See that file's own comment for why this is
+    installed into the hicolor icon theme rather than referenced by
+    path anywhere.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+  <circle cx="24" cy="24" r="23" fill="#1e1e2e"/>
+
+  <g stroke="#89b4fa" stroke-width="3" fill="none" stroke-linecap="round">
+    <path d="M11 21 A20 20 0 0 1 37 21"/>
+    <path d="M16.5 27.5 A12.5 12.5 0 0 1 31.5 27.5"/>
+    <path d="M22 34 A5.5 5.5 0 0 1 26 34"/>
+  </g>
+
+  <circle cx="24" cy="38.5" r="2.6" fill="#89b4fa"/>
+</svg>

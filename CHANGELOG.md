@@ -1,5 +1,49 @@
 # Changelog
 
+## Version 0.19.0
+
+Release date: 2026-08-02
+
+### Added
+- **`kohiko-audio`**: a native audio control center backed by PipeWire/
+  WirePlumber - output/input device lists, per-device volume and mute,
+  default-device switching, and live output/microphone level meters.
+  Future-ready page architecture (a `Sidebar` of pages built from a
+  single `PipeWireClient::Nodes()` snapshot) so per-app volume,
+  equalizer, and similar pages can be added later without reshaping the
+  window itself.
+- **`kohiko-network`**: Wi-Fi (scan, connect to open/secured networks,
+  saved-network reuse, signal strength), Ethernet (connect/disconnect,
+  IPv4/IPv6/DNS/gateway/MAC), VPN (activate/deactivate existing
+  profiles), and an airplane-mode toggle (NetworkManager's
+  `WirelessEnabled`/`WwanEnabled` together) - all backed by
+  NetworkManager over D-Bus via a new `NetworkManagerClient`.
+- **`kohiko-bluetooth`**: adapter power/discoverable, scanning, pairing,
+  connecting/disconnecting, trusting, removing, and (where available)
+  battery level - backed by BlueZ over D-Bus via a new `BluezClient`.
+- Three matching tray widgets - `kohiko-audio-tray`,
+  `kohiko-network-tray`, `kohiko-bluetooth-tray` - docking into the
+  existing System Tray Protocol implementation (`SystemTray.cpp`) via a
+  new `TrayIconClient`, autostarted by default
+  (`desktop/kohiko-*-tray.desktop`, installed to `/etc/xdg/autostart`).
+  The audio tray widget's scroll wheel adjusts the default output
+  volume directly.
+- New shared infrastructure backing all six binaries above: a
+  D-Bus marshalling/connection layer (`DBusValue`/`DBusClient`), a
+  small UI toolkit (`UiWindow`/`UiWidget`/`UiListRow`/`UiScrollView`/
+  `UiSidebar`/`UiPopupMenu`/`UiIconCache`) distinct from
+  `kohiko-settings`'s own existing widget code, a single-instance/
+  raise-existing-window mechanism (`AppInstanceLock`), a desktop
+  notification helper (`NotificationClient`), and a small per-app
+  settings store (`AppConfigStore`).
+- New build dependency: `libpipewire-0.3-dev`, required together with
+  `libdbus-1-dev` to build the six binaries above - both build systems
+  skip just those six targets (with a warning), rather than failing the
+  whole build, if either is missing; `kohiko`/`kohikoctl`/
+  `kohiko-settings` are entirely unaffected either way.
+- New `DBusValue` unit test suite (`tests/test_dbusvalue.cpp`, added to
+  both `make test` and `ctest`).
+
 ## Version 0.18.0
 
 Release date: 2026-07-31

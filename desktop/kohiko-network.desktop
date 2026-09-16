@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Kohiko Network
+GenericName=Network Settings
+Comment=Manage Wi-Fi, Ethernet, VPN, and airplane mode for Kohiko
+Exec=kohiko-network
+Icon=kohiko-network
+Categories=Settings;Network;
+StartupWMClass=kohiko-network
+Terminal=false
+NoDisplay=false
