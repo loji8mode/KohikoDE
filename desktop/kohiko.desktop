@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Kohiko
+Comment=Minimalist X11 tiling window manager
+Exec=/usr/local/bin/kohiko-session
+Type=Application
+DesktopNames=Kohiko

@@ -27,6 +27,7 @@ current limitations, recommendations), see
 - [IPC](#ipc)
 - [Rendering pipeline](#rendering-pipeline)
 - [Build system](#build-system)
+- [Extension points](#extension-points)
 - [Known limitations / recommendations for the next session](#known-limitations--recommendations-for-the-next-session)
 
 ## Process map
@@ -387,6 +388,100 @@ object-file-producing rule to the `Makefile`, give it `$(DEPFLAGS)`
 too**, or it'll silently regress back to the same bug for that one
 rule. `CMakeLists.txt` was not affected - CMake's Makefile/Ninja
 generators already track header dependencies automatically.
+
+## Extension points
+
+No dynamic loading (`dlopen()`, a plugin `.so` ABI) exists or is
+planned - every "extension" described here is source-level: write a
+new file following one of these shapes, wire it in at the one or two
+call sites each shape names, rebuild. That's a deliberate choice, not
+a gap: every concrete feature this project has actually needed so far
+(a new background subsystem, a new tray widget, a new companion app, a
+new repeatable config directive) has fit one of these shapes cleanly,
+and a real `.so`-loading ABI is a substantial commitment - a stable
+interface to maintain compatibility across, a security surface,
+version-skew handling - that nothing yet justifies paying for. If a
+concrete need for genuine runtime loading (a third party shipping a
+tray widget independently of Kohiko's own release, say) ever
+materializes, that's the point to design that ABI against a real
+requirement, not preemptively. What follows is what to reach for
+instead, today.
+
+**A new background subsystem in `kohiko` itself** (a file watcher, a
+D-Bus integration, anything that needs to react to something happening
+outside X11 events) - follow `AppDirWatcher`, `SessionLockBridge`, or
+`ScreenSaverInhibitor`'s exact shape:
+
+1. A self-contained class with `bool Available() const`, `int Fd()
+   const` (-1 when unavailable), and either `void Dispatch()` (fully
+   self-contained - reads its own fd and acts, like
+   `ScreenSaverInhibitor`/`SessionLockBridge`) or `bool Poll()` (reads
+   and reports whether anything changed, leaving "what to do about it"
+   to the caller, like `AppDirWatcher`/`WallpaperManager` - use this
+   shape when acting requires reaching into a different subsystem your
+   new class shouldn't depend on directly).
+2. A member on `WindowManager`, an accessor returning a reference to
+   it, and - only for the `Poll()` shape - a `WindowManager::Handle*()`
+   method EventLoop calls when its fd is readable.
+3. Three lines in `EventLoop::Run()`'s existing `select()` loop: add
+   the fd to the read set (guarded by `>= 0`), track it against
+   `maxFd`, and call `.Dispatch()` or the `Handle*()` method when
+   `FD_ISSET`.
+4. Gracefully degrade to `Available() == false` (not a crash, not a
+   logged error) on any environment where the underlying facility
+   doesn't exist - see any of the three classes above for the exact
+   pattern.
+
+**A new setting** - add a `ConfigOption` entry to `ConfigSchema.cpp`
+(category, key, type, default, description) and it appears in Kohiko
+Settings automatically, fully typed (a checkbox for `Boolean`, a
+dropdown for `Enum`, a color swatch for `Color`, ...) with no further
+UI code - see [Configuration system](#configuration-system). A
+**repeatable** directive (multiple values under one key, like
+`monitor=`/`windowrule=`/`wallpaper.monitor=`) doesn't go through
+`ConfigSchema` at all - read it with `Config::GetAll(key)`, parse each
+line as `<identifier>,key=value,key=value,...` (see
+`WallpaperManager.cpp`'s `ParseWallpaperRule` or `MonitorRule::Parse`
+for the exact shape - an unrecognised key or value is silently
+ignored, not a rejected line, so old configs stay valid as new
+sub-keys are added later), and register it as a `RawBlockPanel` with
+`Kind::RawText` (a plain text block with a prefix filter and a help
+string - see `wallpaper.monitor=`'s own entry in
+`SettingsWindow.cpp`'s `kSpecs` table) so it's still visible and
+editable in Kohiko Settings, even without a fully custom row editor
+like `monitor=`/`windowrule=` (`Kind::Monitor`/`Kind::WindowRule`) got.
+
+**A new system-tray icon** - a new small binary built on
+`TrayIconClient` (see `tools/kohiko-audio-tray.cpp` for the shortest
+complete example: connect a backend client, call `tray.Initialize()`,
+wire `SetLeftClickHandler`/`SetRightClickHandler`/`SetScrollHandler`,
+call `tray.Run()`). Ships as its own autostart `.desktop` entry under
+`/etc/xdg/autostart` (see `desktop/kohiko-audio-tray.desktop`) rather
+than anything `kohiko` itself launches or links against - the WM
+process never needs to know a new tray icon exists.
+
+**A new full companion app** (a settings page of its own, like
+`kohiko-audio`) - build on the shared UI toolkit
+(`UiWindow`/`UiWidget`/`Card`/`TextField`/...) and whichever backend
+client shape fits (a new `*Client.cpp` following `PipeWireClient`/
+`NetworkManagerClient`/`BluezClient`'s shape for a new D-Bus service,
+or reuse `DBusClient` directly) - see [Companion
+applications](#companion-applications) for the shared
+`Initialize()`/`RebuildChrome()`/`RebuildPage()` shape all three
+existing ones follow, and `docs/AUDIO_NETWORK_BLUETOOTH.md` for a
+worked example in depth. Entirely its own process; nothing here
+touches `kohiko` itself either.
+
+**A new `kohikoctl` subcommand** - most belong as a `dispatch` verb
+`WindowManager`'s own dispatch handler recognises (reachable from a
+`bind=` line and `kohikoctl dispatch <verb>` identically - see
+[IPC](#ipc)) rather than a new top-level `kohikoctl` command at all.
+Only reach for a genuinely new top-level command, handled directly in
+`tools/kohikoctl.cpp` as a plain filesystem/process operation bypassing
+the IPC socket entirely, when the command has to work in circumstances
+where `kohiko` itself might not be running or reachable - `kohikoctl
+restore-config` and `configure-autologin` are the two examples that
+exist for exactly that reason (see each one's own header comment).
 
 ## Known limitations / recommendations for the next session
 

@@ -65,6 +65,22 @@ public:
         MonitorRemovedCallback callback
     );
 
+    // Consulted by Detect() to pick a newly-(re)connected output's
+    // *starting* workspace, below an explicit `monitor=` rule but
+    // above "first workspace nothing else is showing" - see the
+    // fallback chain there. WindowManager::Initialize() wires this to
+    // SessionStore::LastWorkspaceForMonitor() before the first
+    // Initialize()/Detect() call, the same "set a callback, then let
+    // the owning subsystem call it when relevant" shape already used
+    // for SetBeforeMonitorRemovedCallback() just above. Takes the
+    // XRandr output name, returns a workspace id, or <1 for "nothing
+    // saved" (which Detect() treats exactly like an unmatched rule).
+    using SessionWorkspaceLookup = std::function<int(const std::string&)>;
+
+    void SetSessionWorkspaceLookup(
+        SessionWorkspaceLookup lookup
+    );
+
     Monitor& Primary() const;
 
     Monitor* Focused() const;
@@ -128,6 +144,8 @@ private:
     std::vector<MonitorRule> m_rules;
 
     MonitorRemovedCallback m_beforeMonitorRemoved;
+
+    SessionWorkspaceLookup m_sessionWorkspaceLookup;
 
     int m_randrEventBase = -1;
     int m_randrErrorBase = -1;

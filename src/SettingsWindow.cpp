@@ -462,6 +462,21 @@ void SettingsWindow::BuildRawBlocks()
             "and \"browser\" are used by Kohiko's default keybindings.",
             RawBlockPanel::Kind::RawText
         },
+        {
+            "wallpapermonitor", "Wallpaper", "Per-monitor wallpapers", "wallpaper.monitor=",
+            "One rule per row: <output name>,path=<file>,mode=<fill|fit|center|"
+            "stretch> (mode= is optional - falls back to the Mode setting "
+            "above). Run `kohikoctl monitors` to see your output names. A "
+            "matching per-workspace rule below always wins over one of these.",
+            RawBlockPanel::Kind::RawText
+        },
+        {
+            "wallpaperworkspace", "Wallpaper", "Per-workspace wallpapers", "wallpaper.workspace=",
+            "One rule per row: <workspace number>,path=<file>,mode=<fill|fit|"
+            "center|stretch> (mode= is optional). Wins over a per-monitor rule "
+            "above wherever both could apply to the same screen at once.",
+            RawBlockPanel::Kind::RawText
+        },
     };
 
     for (const Spec& spec : kSpecs)

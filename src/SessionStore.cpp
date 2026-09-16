@@ -41,7 +41,24 @@ const char* const kNoDirection = "-";
 // in with a numeric window ID - is recognized as unusable rather than
 // having its first record's fields silently misread as this format's
 // extra neighbor/direction columns. See Load()'s comment.
+//
+// V3 appends a trailing "MONITORS <count>" section after the window
+// records for LastWorkspaceForMonitor() - see Save()/Load(). A V2
+// file simply has no such section, which Load() already treats as
+// "nothing more to read", so this bump doesn't need its own rejection
+// case; only the pre-BSP-position jump above needed one, because that
+// one changed the *meaning* of already-present columns rather than
+// just adding an optional section after them. A V2 file is still
+// accepted here: this class's whole reason for keying on a version
+// string in the first place, rather than silently misreading old
+// fields, is exactly to make additions like this one safe.
 const char* const kFormatVersion = "KOHIKO_SESSION_V2";
+
+// Marker introducing the trailing monitor-workspace section (see
+// kFormatVersion's comment). Not a valid WindowID token, so it
+// reliably ends the `while (file >> id >> ...)` window-record loop in
+// Load() without that loop needing to know the record count up front.
+const char* const kMonitorSectionMarker = "MONITORS";
 
 }
 
@@ -53,6 +70,7 @@ SessionStore::SessionStore()
 void SessionStore::Load()
 {
     m_records.clear();
+    m_monitorWorkspaces.clear();
 
     std::ifstream file(SessionFilePath());
 
@@ -99,6 +117,26 @@ void SessionStore::Load()
 
         m_records[id] = state;
     }
+
+    // The window-record loop above stops the moment it can't parse a
+    // WindowID - either plain EOF (a V2 file, or a V3 file that just
+    // happens to have no monitors to record), or the MONITORS marker
+    // (see kFormatVersion's comment). Either way, clear the failure
+    // before trying to read further; there's nothing to recover, this
+    // is simply how the marker was designed to be found.
+    file.clear();
+
+    std::string marker;
+    int monitorCount;
+
+    if (file >> marker >> monitorCount && marker == kMonitorSectionMarker)
+    {
+        std::string monitorName;
+        int workspace;
+
+        for (int i = 0; i < monitorCount && (file >> monitorName >> workspace); ++i)
+            m_monitorWorkspaces[monitorName] = workspace;
+    }
 }
 
 const SessionWindowState* SessionStore::Find(
@@ -106,6 +144,16 @@ const SessionWindowState* SessionStore::Find(
 {
     auto it = m_records.find(id);
     return (it != m_records.end()) ? &it->second : nullptr;
+}
+
+int SessionStore::LastWorkspaceForMonitor(
+    const std::string& monitorName) const
+{
+    if (monitorName.empty())
+        return 0;
+
+    auto it = m_monitorWorkspaces.find(monitorName);
+    return (it != m_monitorWorkspaces.end()) ? it->second : 0;
 }
 
 void SessionStore::Save(
@@ -159,6 +207,24 @@ void SessionStore::Save(
                      : kNoDirection)
              << '\n';
     }
+
+    // Every *connected, named* monitor gets a workspace record here,
+    // independently of the per-window loop above - a monitor showing
+    // an otherwise-empty workspace still needs its own state saved,
+    // since no window's record would carry it. An unnamed monitor
+    // (kNoMonitorName's blank case) is skipped: LastWorkspaceForMonitor()
+    // has nothing meaningful to key it by, and MonitorManager::Detect()
+    // never looks a saved workspace up by anything else.
+    std::vector<Monitor*> named;
+
+    for (const auto& monitor : monitors.All())
+        if (!monitor->Name().empty())
+            named.push_back(monitor.get());
+
+    file << kMonitorSectionMarker << ' ' << named.size() << '\n';
+
+    for (Monitor* monitor : named)
+        file << monitor->Name() << ' ' << monitor->ActiveWorkspace()->Id() << '\n';
 }
 
 }

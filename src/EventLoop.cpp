@@ -103,6 +103,9 @@ void EventLoop::Run()
 
         int ipcFd = m_windowManager.Ipc().ListenFd();
         int inhibitFd = m_windowManager.SleepInhibitor().Fd();
+        int appDirFd = m_windowManager.AppWatcher().Fd();
+        int lockBridgeFd = m_windowManager.LockBridge().Fd();
+        int wallpaperFd = m_windowManager.Wallpaper().Fd();
 
         fd_set readSet;
         FD_ZERO(&readSet);
@@ -124,6 +127,30 @@ void EventLoop::Run()
 
             if (inhibitFd > maxFd)
                 maxFd = inhibitFd;
+        }
+
+        if (appDirFd >= 0)
+        {
+            FD_SET(appDirFd, &readSet);
+
+            if (appDirFd > maxFd)
+                maxFd = appDirFd;
+        }
+
+        if (lockBridgeFd >= 0)
+        {
+            FD_SET(lockBridgeFd, &readSet);
+
+            if (lockBridgeFd > maxFd)
+                maxFd = lockBridgeFd;
+        }
+
+        if (wallpaperFd >= 0)
+        {
+            FD_SET(wallpaperFd, &readSet);
+
+            if (wallpaperFd > maxFd)
+                maxFd = wallpaperFd;
         }
 
         // A window sliding into place after a Swap needs Tick() to run
@@ -164,6 +191,15 @@ void EventLoop::Run()
 
         if (inhibitFd >= 0 && FD_ISSET(inhibitFd, &readSet))
             m_windowManager.SleepInhibitor().Dispatch();
+
+        if (appDirFd >= 0 && FD_ISSET(appDirFd, &readSet))
+            m_windowManager.HandleAppDirChanged();
+
+        if (lockBridgeFd >= 0 && FD_ISSET(lockBridgeFd, &readSet))
+            m_windowManager.LockBridge().Dispatch();
+
+        if (wallpaperFd >= 0 && FD_ISSET(wallpaperFd, &readSet))
+            m_windowManager.HandleWallpaperFileChanged();
     }
 }
 

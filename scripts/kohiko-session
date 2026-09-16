@@ -1,0 +1,170 @@
+#!/bin/sh
+# kohiko-session - the actual session entry point a display manager
+# (or `startx`/`~/.xinitrc`) launches, in between it and `kohiko`
+# itself:
+#
+#   Display Manager -> kohiko-session -> kohiko
+#
+# Deliberately kept simple - a POSIX shell script, no new compiled
+# binary - since its whole job is two things:
+#
+#   1. Be the process a display manager's xsessions entry actually
+#      execs (see ../desktop/kohiko.desktop), so it's this script's
+#      exit status the DM sees, not kohiko's own.
+#   2. If kohiko crashes (exits non-zero, or dies to a signal) rather
+#      than exiting cleanly (a deliberate logout - see below), restart
+#      it - but with a sensible backoff, and with a hard limit on how
+#      many times in a row this happens, so a genuinely broken install
+#      fails the session outright instead of spinning forever.
+#
+# This *complements* Kohiko's own internal RecoveryMode
+# (include/RecoveryMode.h) rather than overlapping with it - the two
+# need no coordination between them at all:
+#
+#   - RecoveryMode decides *what kohiko itself does* on any given
+#     start (fall back to built-in defaults if the previous attempt
+#     never reached "ready" - almost always a config problem).
+#   - This script decides *whether there even is another start* after
+#     kohiko exits, and how many times that's allowed to happen.
+#
+# A config-caused crash loop is exactly the case where both matter
+# together: this script keeps relaunching kohiko (up to the burst
+# limit below), and RecoveryMode makes the very next one of those
+# relaunches fall back to safe defaults automatically - with neither
+# system needing to know the other exists.
+#
+# Without a wrapper like this at all, a single crash simply ends the
+# whole X session with no restart of any kind - RecoveryMode's own
+# safe-defaults logic would never even get a next launch to run on.
+
+set -u
+
+KOHIKO_BIN="${KOHIKO_BIN:-kohiko}"
+
+# At most this many restarts within a single burst before giving up
+# and letting the session fail - see IsWithinBurstLimit() below for
+# exactly what resets a "burst".
+MAX_CONSECUTIVE_FAILURES=5
+
+# A crash-free run at least this long resets the failure count back to
+# 0 - so an install that's been running fine for hours and then
+# crashes once still gets the full restart budget, rather than that
+# one crash silently eating into a count left over from a much earlier
+# burst.
+STABLE_RUN_SECONDS=30
+
+# Backoff before each restart, in seconds - grows with the *current*
+# burst's failure count (1, 2, 4, 8, ... ), capped, rather than a
+# flat delay - a genuinely fast crash loop backs off quickly instead
+# of restarting several times a second for a few seconds before the
+# burst limit even kicks in.
+MAX_BACKOFF_SECONDS=30
+
+log()
+{
+    # Matches Kohiko's own Logger format/destination (stdout, one line
+    # per message) - both end up in the same place (journald, under a
+    # systemd-managed session; the DM's own session log otherwise).
+    printf '[INFO] kohiko-session: %s\n' "$1"
+}
+
+child_pid=""
+
+# A display manager or systemd typically signals the *session leader*
+# (this script, since it's what Exec= actually launches) to end a
+# session, not kohiko directly - relay it to the real child and treat
+# it as a deliberate shutdown, never a crash to restart from.
+forward_and_exit()
+{
+    signal_name="$1"
+
+    if [ -n "$child_pid" ] && kill -0 "$child_pid" 2>/dev/null; then
+        log "received $signal_name - stopping kohiko (pid $child_pid)"
+        kill "-$signal_name" "$child_pid" 2>/dev/null
+
+        # Give it a real chance to shut down cleanly (see
+        # EventLoop::InstallSignalHandlers()) before falling back to
+        # SIGKILL - this wrapper must never itself hang forever
+        # waiting on a child that, for whatever reason, doesn't
+        # respond to the forwarded signal.
+        waited=0
+        while kill -0 "$child_pid" 2>/dev/null && [ "$waited" -lt 10 ]; do
+            sleep 1
+            waited=$((waited + 1))
+        done
+
+        if kill -0 "$child_pid" 2>/dev/null; then
+            log "kohiko didn't exit within ${waited}s - sending SIGKILL"
+            kill -KILL "$child_pid" 2>/dev/null
+        fi
+
+        wait "$child_pid" 2>/dev/null
+    fi
+
+    exit 0
+}
+
+trap 'forward_and_exit TERM' TERM
+trap 'forward_and_exit INT' INT
+
+consecutive_failures=0
+
+while true
+do
+    start_time=$(date +%s)
+
+    log "starting $KOHIKO_BIN $*"
+
+    "$KOHIKO_BIN" "$@" &
+    child_pid=$!
+
+    wait "$child_pid"
+    exit_status=$?
+
+    child_pid=""
+
+    end_time=$(date +%s)
+    ran_for=$((end_time - start_time))
+
+    if [ "$exit_status" -eq 0 ]
+    then
+        # A clean exit is always a deliberate one (a logout/quit
+        # request, or Application::Run() itself returning 0 - see
+        # src/Application.cpp) - kohiko's own SIGTERM/SIGINT handling
+        # already exits this way too (see EventLoop::
+        # InstallSignalHandlers()), so this also correctly covers the
+        # case where the DM signaled kohiko directly rather than this
+        # wrapper. Never restart after this; just propagate the same
+        # clean exit outward.
+        log "kohiko exited cleanly - ending session"
+        exit 0
+    fi
+
+    if [ "$ran_for" -ge "$STABLE_RUN_SECONDS" ]
+    then
+        # Ran fine for a while before this crash - don't let it eat
+        # into a failure budget a much earlier, unrelated burst left
+        # behind (see this script's own header comment).
+        consecutive_failures=0
+    fi
+
+    consecutive_failures=$((consecutive_failures + 1))
+
+    log "kohiko exited abnormally (status $exit_status) after ${ran_for}s - failure $consecutive_failures/$MAX_CONSECUTIVE_FAILURES"
+
+    if [ "$consecutive_failures" -gt "$MAX_CONSECUTIVE_FAILURES" ]
+    then
+        log "too many consecutive failures - giving up rather than restarting again"
+        exit 1
+    fi
+
+    # 2^(failures-1), capped - see this script's own header comment.
+    backoff=$((1 << (consecutive_failures - 1)))
+    if [ "$backoff" -gt "$MAX_BACKOFF_SECONDS" ]
+    then
+        backoff=$MAX_BACKOFF_SECONDS
+    fi
+
+    log "restarting in ${backoff}s"
+    sleep "$backoff"
+done

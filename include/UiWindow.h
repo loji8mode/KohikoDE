@@ -10,6 +10,7 @@
 #include <X11/Xft/Xft.h>
 
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>

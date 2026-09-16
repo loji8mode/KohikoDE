@@ -233,9 +233,25 @@ bool MonitorManager::Detect()
         if (desired < 1 || desired > m_workspaces.Count() || WorkspaceTaken(desired, next))
         {
             // No usable rule (none matched, or the one that did is
-            // already showing on another monitor right now) - fall
-            // back to the lowest-numbered workspace nothing else is
-            // currently showing, same "first available" convention
+            // already showing on another monitor right now). Before
+            // falling all the way back to "first available", try
+            // whichever workspace this output was actually showing as
+            // of the last clean shutdown (see
+            // SetSessionWorkspaceLookup()'s comment) - a monitor= rule
+            // is for pinning an output somewhere on purpose, but most
+            // outputs never get one, and a monitor that was on
+            // workspace 4 last time shouldn't reset to whatever's
+            // "first available" every single restart just because
+            // nobody bothered to pin it.
+            desired = m_sessionWorkspaceLookup ? m_sessionWorkspaceLookup(out.name) : 0;
+        }
+
+        if (desired < 1 || desired > m_workspaces.Count() || WorkspaceTaken(desired, next))
+        {
+            // Neither an explicit rule nor a saved session workspace
+            // panned out - fall back to the lowest-numbered workspace
+            // nothing else is currently showing, same "first
+            // available" convention
             // WindowManager::FindWorkspaceWithFewestWindows() uses.
             desired = 0;
 
@@ -349,6 +365,12 @@ void MonitorManager::SetBeforeMonitorRemovedCallback(
     MonitorRemovedCallback callback)
 {
     m_beforeMonitorRemoved = std::move(callback);
+}
+
+void MonitorManager::SetSessionWorkspaceLookup(
+    SessionWorkspaceLookup lookup)
+{
+    m_sessionWorkspaceLookup = std::move(lookup);
 }
 
 Monitor& MonitorManager::Primary() const

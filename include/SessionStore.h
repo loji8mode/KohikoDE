@@ -64,6 +64,21 @@ public:
         WindowID id
     ) const;
 
+    // The workspace `monitorName` (an XRandr output name) was showing
+    // as of the last clean shutdown - the one piece of session state
+    // that belongs to a monitor rather than any single window. 0 if
+    // there's no record (first run, an unnamed/empty monitor, or an
+    // output that wasn't connected last time). MonitorManager::Detect()
+    // consults this - see its own comment - as a fallback for a
+    // (re)connected output's *starting* workspace: below an explicit
+    // `monitor=` rule, which is a deliberate pin and always wins, but
+    // above "first workspace nothing else is showing", so an output
+    // that was last showing workspace 4 comes back up on workspace 4
+    // without needing a fixed rule to say so every time.
+    int LastWorkspaceForMonitor(
+        const std::string& monitorName
+    ) const;
+
     // Snapshots every currently managed window and writes it to disk -
     // workspace/monitor/floating-geometry/fullscreen from `windows`
     // directly, and each tiled window's BSP neighbor via `workspaces`
@@ -80,6 +95,13 @@ public:
 private:
 
     std::unordered_map<WindowID, SessionWindowState> m_records;
+
+    // Keyed by XRandr output name - see LastWorkspaceForMonitor().
+    // Populated by Save() from every *connected* monitor at shutdown,
+    // independently of m_records (a monitor showing an otherwise-empty
+    // workspace still gets a record here, even with zero windows to
+    // save above).
+    std::unordered_map<std::string, int> m_monitorWorkspaces;
 
 };
 

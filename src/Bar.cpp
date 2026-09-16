@@ -28,6 +28,9 @@ Bar::~Bar()
     if (m_xftDraw)
         XftDrawDestroy(m_xftDraw);
 
+    if (m_backing)
+        XFreePixmap(display, m_backing);
+
     m_font.Unload();
 
     if (m_gc)
@@ -35,6 +38,29 @@ Bar::~Bar()
 
     if (m_window)
         XDestroyWindow(display, m_window);
+}
+
+void Bar::ResizeBacking(
+    int width,
+    int height)
+{
+    Display* display = m_connection.GetDisplay();
+    int screen = m_connection.Screen();
+
+    if (m_xftDraw) { XftDrawDestroy(m_xftDraw); m_xftDraw = nullptr; }
+    if (m_backing) { XFreePixmap(display, m_backing); m_backing = 0; }
+
+    m_backing = XCreatePixmap(
+        display, m_window,
+        static_cast<unsigned int>(width > 0 ? width : 1),
+        static_cast<unsigned int>(height),
+        DefaultDepth(display, screen));
+
+    m_xftDraw = XftDrawCreate(
+        display,
+        m_backing,
+        DefaultVisual(display, screen),
+        DefaultColormap(display, screen));
 }
 
 void Bar::Configure(
@@ -77,11 +103,7 @@ void Bar::Configure(
             screen,
             config.GetString("general.font", "monospace:pixelsize=14"));
 
-        m_xftDraw = XftDrawCreate(
-            display,
-            m_window,
-            DefaultVisual(display, screen),
-            DefaultColormap(display, screen));
+        ResizeBacking(m_geometry.width, m_height);
     }
     else
     {
@@ -92,7 +114,17 @@ void Bar::Configure(
             static_cast<unsigned int>(m_geometry.width > 0 ? m_geometry.width : 1),
             static_cast<unsigned int>(m_height)
         );
+
+        // Bar height comes from config and never changes at runtime,
+        // but width follows monitor geometry - a resolution change or
+        // hotplug can and does alter it, and the backing pixmap has to
+        // stay exactly window-sized (a stale, too-small one would just
+        // silently clip everything drawn past its old width).
+        if (m_geometry.width != m_backingWidth)
+            ResizeBacking(m_geometry.width, m_height);
     }
+
+    m_backingWidth = m_geometry.width;
 
     m_backgroundPixel = std::strtoul(config.GetString("bar.background", "0x1e1e2e").c_str(), nullptr, 0);
     m_foregroundPixel = std::strtoul(config.GetString("bar.foreground", "0xcdd6f4").c_str(), nullptr, 0);
@@ -189,12 +221,25 @@ const Rect& Bar::Geometry() const
 
 void Bar::Redraw()
 {
-    if (!m_visible || m_window == 0)
+    if (!m_visible || m_window == 0 || !m_backing)
         return;
 
     Display* display = m_connection.GetDisplay();
 
-    XClearWindow(display, m_window);
+    // Everything below draws onto m_backing (via m_xftDraw, which
+    // Configure()/ResizeBacking() point at it, not m_window) - the
+    // window itself is only ever touched once, by the single
+    // XCopyArea at the very end. XClearWindow only works on a real
+    // window, not a pixmap, so the equivalent here is an explicit
+    // fill - see this function's own header comment on why this
+    // (rather than clearing/drawing the window directly, this bar's
+    // original approach) is what actually eliminates the flicker.
+    XSetForeground(display, m_gc, m_backgroundPixel);
+    XFillRectangle(
+        display, m_backing, m_gc,
+        0, 0,
+        static_cast<unsigned int>(m_geometry.width > 0 ? m_geometry.width : 1),
+        static_cast<unsigned int>(m_height));
 
     int baseline = m_height / 2 + 5;
     int x = 10;
@@ -270,6 +315,18 @@ void Bar::Redraw()
     m_powerButtonRect = Rect{powerX - 6, 0, powerWidth + 12, m_height};
 
     DrawText(m_geometry.width - clockWidth - 12 - trayWidth, baseline, clockText, m_foregroundPixel);
+
+    // The one and only touch of the real window this whole function
+    // makes - see this function's own header comment. Composites the
+    // fully-finished frame in a single operation, so there is no
+    // intermediate state (a blank window, or a half-drawn one) for
+    // the X server to ever actually display.
+    XCopyArea(
+        display, m_backing, m_window, m_gc,
+        0, 0,
+        static_cast<unsigned int>(m_geometry.width > 0 ? m_geometry.width : 1),
+        static_cast<unsigned int>(m_height),
+        0, 0);
 
     XFlush(display);
 }

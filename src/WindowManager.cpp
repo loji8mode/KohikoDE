@@ -52,6 +52,17 @@ void WindowManager::Initialize()
     m_atoms.Initialize();
     m_cursor.Initialize();
 
+    // m_session already loaded its file in its own constructor (well
+    // before this point), so this is safe to wire up before the first
+    // Detect() call below - which is exactly when it's first needed,
+    // for that call's own "new output, no rule matched it" fallback.
+    // See SetSessionWorkspaceLookup()'s comment.
+    m_monitors.SetSessionWorkspaceLookup(
+        [this](const std::string& monitorName)
+        {
+            return m_session.LastWorkspaceForMonitor(monitorName);
+        });
+
     // Loads `monitor=` rules, turns on XRandR hotplug reporting (when
     // available), and runs the first Detect() - every Monitor exists
     // and has an ActiveWorkspace() assigned by the time this returns.
@@ -104,6 +115,40 @@ void WindowManager::Initialize()
     m_lockScreen.Configure(m_config);
     m_idleWatcher.Initialize(m_connection.GetDisplay());
     m_sleepInhibitor.Initialize();
+    m_appDirWatcher.Initialize();
+    m_sessionLockBridge.Initialize();
+
+    // Every monitor already exists with its geometry/starting
+    // workspace assigned by this point (m_monitors.Initialize() ran
+    // earlier in this same function), so the very first render
+    // already has everything ResolveFor() needs - no separate
+    // "initial paint" special case beyond just calling this once,
+    // here, the same way every later re-render (workspace switch,
+    // topology change, config reload - see those call sites) does.
+    m_wallpaperManager.Configure(m_config);
+    m_wallpaperManager.ApplyToRoot(m_connection, m_monitors);
+
+    // Relays LockScreen's own state to logind's SetLockedHint() -
+    // fires for every trigger (keybind, kohikoctl, suspend/startup
+    // config, or an external session-lock request below), since they
+    // all funnel through LockScreen::Lock()/Unlock() already. See
+    // SessionLockBridge.h.
+    m_lockScreen.SetLockStateChangedCallback(
+        [this](bool locked)
+        {
+            m_sessionLockBridge.NotifyLocked(locked);
+        });
+
+    // The other direction: `loginctl lock-session`/an equivalent
+    // external request reaches Kohiko's own real lock screen, exactly
+    // like every other way of locking it - never a second/duplicate
+    // lock screen, never a separate authentication path. See
+    // SessionLockBridge.h.
+    m_sessionLockBridge.SetLockRequestedCallback(
+        [this]()
+        {
+            m_lockScreen.Lock(m_monitors, m_wallpaperManager);
+        });
 
     // Suspend integration without needing a DBus/logind sleep-signal
     // dependency: Kohiko itself is what spawns the suspend command
@@ -120,7 +165,7 @@ void WindowManager::Initialize()
         [this]()
         {
             if (LockScreenAutoOnSuspend())
-                m_lockScreen.Lock(m_monitors);
+                m_lockScreen.Lock(m_monitors, m_wallpaperManager);
         });
 
     // lockscreen.after=always additionally locks once right here, at
@@ -129,7 +174,7 @@ void WindowManager::Initialize()
     // for an account with no password configured, same as every other
     // call to Lock() - see its own comment.
     if (LockScreenAutoOnStartup())
-        m_lockScreen.Lock(m_monitors);
+        m_lockScreen.Lock(m_monitors, m_wallpaperManager);
 
     m_windowRules = LoadWindowRules(m_config);
 
@@ -259,6 +304,33 @@ ScreenSaverInhibitor& WindowManager::SleepInhibitor()
     return m_sleepInhibitor;
 }
 
+AppDirWatcher& WindowManager::AppWatcher()
+{
+    return m_appDirWatcher;
+}
+
+void WindowManager::HandleAppDirChanged()
+{
+    if (m_appDirWatcher.Poll())
+        m_launcher.ReloadDesktopEntries();
+}
+
+SessionLockBridge& WindowManager::LockBridge()
+{
+    return m_sessionLockBridge;
+}
+
+WallpaperManager& WindowManager::Wallpaper()
+{
+    return m_wallpaperManager;
+}
+
+void WindowManager::HandleWallpaperFileChanged()
+{
+    if (m_wallpaperManager.Poll())
+        m_wallpaperManager.ApplyToRoot(m_connection, m_monitors);
+}
+
 void WindowManager::Tick()
 {
     if (m_animator.Active())
@@ -297,7 +369,7 @@ void WindowManager::CheckIdleTimeoutLock()
         return;
 
     if (m_idleWatcher.IdleTime(m_connection.GetDisplay()) >= std::chrono::minutes(minutes))
-        m_lockScreen.Lock(m_monitors);
+        m_lockScreen.Lock(m_monitors, m_wallpaperManager);
 }
 
 bool WindowManager::IsAnyVisibleWindowFullscreen() const
@@ -824,7 +896,7 @@ void WindowManager::Execute(const Command& command)
         case CommandType::Lock:
 
             if (LockScreenManualAllowed())
-                m_lockScreen.Lock(m_monitors);
+                m_lockScreen.Lock(m_monitors, m_wallpaperManager);
 
             break;
 
@@ -2033,6 +2105,14 @@ void WindowManager::SwitchWorkspaceOnMonitor(Monitor& monitor, int id)
 
     monitor.SetWorkspace(&m_workspaces.Get(id));
 
+    // The wallpaper for this monitor may now be different (see
+    // wallpaper.workspace= in WallpaperManager.h) - re-resolve and
+    // redraw it before Arrange() below, not after, so there's no
+    // visible flash of the previous workspace's wallpaper showing
+    // through the gaps for even one frame while windows are still
+    // being retiled.
+    m_wallpaperManager.ApplyToRoot(m_connection, m_monitors);
+
     // Arrange() is what actually unmaps whatever either monitor was
     // just showing and maps/positions whatever it's showing now - see
     // its comment. Every window that was ever tiled onto `id` while it
@@ -2629,6 +2709,9 @@ void WindowManager::ReloadConfig()
 
     m_windowRules = LoadWindowRules(m_config);
     m_monitors.SetRules(LoadMonitorRules(m_config));
+
+    m_wallpaperManager.Configure(m_config);
+    m_wallpaperManager.ApplyToRoot(m_connection, m_monitors);
 
     m_fileManager =
         m_config.GetString(
@@ -3474,8 +3557,17 @@ void WindowManager::HandleMonitorTopologyChanged()
     RefreshMonitorWorkAreas();
     RelocateOrphanedFloatingWindows();
 
+    // A monitor connecting, disconnecting, or changing resolution
+    // always changes what the composite root-window wallpaper needs
+    // to look like (a new region to cover, one less region, or an
+    // existing region resized) - see WallpaperManager::ApplyToRoot()'s
+    // own comment. Before Reposition()/Arrange() below, for the same
+    // "no visible flash of stale content" reasoning as
+    // SwitchWorkspaceOnMonitor().
+    m_wallpaperManager.ApplyToRoot(m_connection, m_monitors);
+
     if (m_lockScreen.IsLocked())
-        m_lockScreen.Reposition(m_monitors);
+        m_lockScreen.Reposition(m_monitors, m_wallpaperManager);
 
     Arrange();
 

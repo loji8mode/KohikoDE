@@ -2,6 +2,7 @@
 
 #include <X11/Xatom.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <poll.h>
@@ -180,15 +181,40 @@ void TrayIconClient::Run()
         for (auto& watch : m_fdWatches)
             pfds.push_back({ watch.fd, POLLIN, 0 });
 
-        int timeoutMs = m_docked ? 250 : 500;
-        auto now = std::chrono::steady_clock::now();
-        for (auto& timer : m_timers)
-        {
-            auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(timer.next - now).count();
-            timeoutMs = std::min<int>(timeoutMs, std::max<int>(0, static_cast<int>(remaining)));
-        }
+        // No unconditional polling floor: with nothing pending, this
+        // blocks in poll() indefinitely (timeout -1) rather than
+        // waking up several times a second forever for no reason -
+        // every real deadline this loop needs to notice (the next
+        // registered timer, and the dock-retry attempt while not yet
+        // docked) is folded in explicitly below instead. m_dirty
+        // doesn't need a deadline of its own: RequestRedraw() is only
+        // ever called from inside one of the callbacks below, which
+        // only run after poll() has already woken this same iteration
+        // for an unrelated reason (an fd becoming readable, or one of
+        // those same timers) - so the very next loop iteration's
+        // `if (m_dirty) Redraw()` at the top always sees it with no
+        // extra wakeup needed to notice it sooner.
+        bool haveDeadline = false;
+        int timeoutMs = 0;
 
-        poll(pfds.data(), pfds.size(), timeoutMs);
+        auto now = std::chrono::steady_clock::now();
+
+        auto considerDeadline = [&](std::chrono::steady_clock::time_point when)
+        {
+            int remaining = std::max<int>(0,
+                static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(when - now).count()));
+
+            timeoutMs = haveDeadline ? std::min(timeoutMs, remaining) : remaining;
+            haveDeadline = true;
+        };
+
+        if (!m_docked)
+            considerDeadline(m_nextDockAttempt);
+
+        for (auto& timer : m_timers)
+            considerDeadline(timer.next);
+
+        poll(pfds.data(), pfds.size(), haveDeadline ? timeoutMs : -1);
 
         if (pfds[0].revents & POLLIN)
         {

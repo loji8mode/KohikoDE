@@ -5,6 +5,7 @@
 #include "Monitor.h"
 #include "MonitorManager.h"
 #include "Utils.h"
+#include "WallpaperManager.h"
 #include "XConnection.h"
 
 #include <Imlib2.h>
@@ -89,6 +90,12 @@ LockScreen::~LockScreen()
         XDestroyWindow(display, m_window);
 }
 
+void LockScreen::SetLockStateChangedCallback(
+    LockStateChangedCallback callback)
+{
+    m_lockStateChanged = std::move(callback);
+}
+
 void LockScreen::Configure(
     const Config& config)
 {
@@ -98,6 +105,9 @@ void LockScreen::Configure(
     m_errorPixel       = std::strtoul(config.GetString("lockscreen.error_color", "0xf38ba8").c_str(), nullptr, 0);
 
     m_backgroundImagePath = config.GetString("lockscreen.background_image", "");
+    m_backgroundMode = ImageRenderer::ParseMode(
+        config.GetString("lockscreen.background_mode", "fill"), ImageScaleMode::Fill);
+    m_useDesktopWallpaper = config.GetBool("lockscreen.use_desktop_wallpaper", false);
     m_logoPath            = config.GetString("lockscreen.logo", "");
 
     m_showClock    = config.GetBool("lockscreen.show_clock", true);
@@ -216,43 +226,51 @@ void LockScreen::Configure(
     }
 }
 
-Pixmap LockScreen::LoadImageStretched(
-    const std::string& path,
-    int width,
-    int height) const
+void LockScreen::RenderBackgroundPixmaps(
+    const MonitorManager& monitors,
+    const WallpaperManager& wallpapers)
 {
-    if (path.empty() || width <= 0 || height <= 0 || m_window == 0)
-        return 0;
-
     Display* display = m_connection.GetDisplay();
-    int screen = m_connection.Screen();
 
-    imlib_context_set_display(display);
-    imlib_context_set_visual(DefaultVisual(display, screen));
-    imlib_context_set_colormap(DefaultColormap(display, screen));
-    imlib_context_set_drawable(m_window);
+    m_monitorGeometries.clear();
 
-    Imlib_Image image = imlib_load_image(path.c_str());
+    for (Pixmap pixmap : m_backgroundPixmaps)
+        if (pixmap)
+            XFreePixmap(display, pixmap);
 
-    if (!image)
-        return 0;
+    m_backgroundPixmaps.clear();
 
-    imlib_context_set_image(image);
+    for (const auto& monitor : monitors.All())
+    {
+        const Rect& geometry = monitor->Geometry();
+        m_monitorGeometries.push_back(geometry);
 
-    Pixmap pixmap = 0;
-    Pixmap mask = 0; // a full-bleed background never needs alpha clipping - see this function's own header comment
+        std::string path = m_backgroundImagePath;
+        ImageScaleMode mode = m_backgroundMode;
 
-    imlib_render_pixmaps_for_whole_image_at_size(&pixmap, &mask, width, height);
-    imlib_free_image();
+        if (path.empty() && m_useDesktopWallpaper)
+        {
+            WallpaperManager::Resolved resolved = wallpapers.ResolveFor(*monitor);
+            path = resolved.path;
+            mode = resolved.mode;
+        }
 
-    if (mask)
-        XFreePixmap(display, mask);
-
-    return pixmap;
+        // A 0 pixmap here is a normal, valid outcome, not a failure -
+        // Redraw() already falls back to lockscreen.background_color
+        // for it (see its own check), same as when ImageRenderer
+        // itself couldn't load `path` at all.
+        m_backgroundPixmaps.push_back(
+            path.empty()
+                ? 0
+                : ImageRenderer::Render(
+                    m_connection, m_window, path,
+                    geometry.width, geometry.height, mode, m_backgroundPixel));
+    }
 }
 
 void LockScreen::Lock(
-    const MonitorManager& monitors)
+    const MonitorManager& monitors,
+    const WallpaperManager& wallpapers)
 {
     if (m_locked || m_window == 0)
         return;
@@ -271,20 +289,7 @@ void LockScreen::Lock(
     Display* display = m_connection.GetDisplay();
     int screen = m_connection.Screen();
 
-    m_monitorGeometries.clear();
-
-    for (Pixmap pixmap : m_backgroundPixmaps)
-        if (pixmap)
-            XFreePixmap(display, pixmap);
-
-    m_backgroundPixmaps.clear();
-
-    for (const auto& monitor : monitors.All())
-    {
-        m_monitorGeometries.push_back(monitor->Geometry());
-        m_backgroundPixmaps.push_back(
-            LoadImageStretched(m_backgroundImagePath, monitor->Geometry().width, monitor->Geometry().height));
-    }
+    RenderBackgroundPixmaps(monitors, wallpapers);
 
     Rect full{0, 0, DisplayWidth(display, screen), DisplayHeight(display, screen)};
     m_connection.MoveResizeWindow(m_window, full);
@@ -333,6 +338,9 @@ void LockScreen::Lock(
     m_locked = true;
 
     Redraw();
+
+    if (m_lockStateChanged)
+        m_lockStateChanged(true);
 }
 
 void LockScreen::Unlock()
@@ -355,6 +363,9 @@ void LockScreen::Unlock()
     Utils::SecureErase(m_typed);
     m_showError = false;
     m_locked = false;
+
+    if (m_lockStateChanged)
+        m_lockStateChanged(false);
 }
 
 bool LockScreen::IsLocked() const
@@ -373,7 +384,8 @@ void LockScreen::HandleExpose()
 }
 
 void LockScreen::Reposition(
-    const MonitorManager& monitors)
+    const MonitorManager& monitors,
+    const WallpaperManager& wallpapers)
 {
     if (!m_locked || m_window == 0)
         return;
@@ -381,20 +393,7 @@ void LockScreen::Reposition(
     Display* display = m_connection.GetDisplay();
     int screen = m_connection.Screen();
 
-    m_monitorGeometries.clear();
-
-    for (Pixmap pixmap : m_backgroundPixmaps)
-        if (pixmap)
-            XFreePixmap(display, pixmap);
-
-    m_backgroundPixmaps.clear();
-
-    for (const auto& monitor : monitors.All())
-    {
-        m_monitorGeometries.push_back(monitor->Geometry());
-        m_backgroundPixmaps.push_back(
-            LoadImageStretched(m_backgroundImagePath, monitor->Geometry().width, monitor->Geometry().height));
-    }
+    RenderBackgroundPixmaps(monitors, wallpapers);
 
     Rect full{0, 0, DisplayWidth(display, screen), DisplayHeight(display, screen)};
     m_connection.MoveResizeWindow(m_window, full);

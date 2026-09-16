@@ -1,7 +1,7 @@
 # Kohiko Project History
 
 This document traces the evolution of Kohiko, a C++20 / X11 tiling window
-manager, across its released versions from 0.1.0 through 0.19.2. It is
+manager, across its released versions from 0.1.0 through 0.20.0. It is
 derived from a direct comparison of the source, configuration, and
 documentation of each released version against the one before it.
 
@@ -493,38 +493,180 @@ actually app-specific.
 
 --------------------------------------------------------------------------
 
+## Phase 12 — Persistence, Recovery, Session Integration, and Wallpaper (0.20.0)
+
+**Versions:** 0.20.0
+
+**Goals:**
+Shift from adding features to polishing Kohiko into a complete desktop
+environment, per an explicit brief covering eight named areas
+(persistent learning, launcher auto-refresh, tray integration, the BSP
+algorithm, taskbar rendering, wallpaper, login experience, general
+polish) plus seven cross-cutting requirements (config migration,
+recovery mode, session robustness, plugin-architecture preparation,
+background-work auditing, memory/resource cleanup, a full consistency
+review) - with an explicit instruction to verify before changing
+anything, and a follow-up brief specifically for the login experience:
+autologin into a Kohiko session with no username ever typed, backed by
+Kohiko's own lock screen rather than a second one, integrated with the
+system's real authentication and session-lock mechanisms rather than
+duplicating either.
+
+**Major developments:**
+- **Verification-first, several times over.** Four of the eight named
+  areas turned out to already be correct and were deliberately left
+  unchanged rather than rewritten for its own sake: the BSP
+  split-direction algorithm (proved mathematically optimal for
+  minimizing child-tile distortion), session restore's robustness
+  across a changed workspace count, a disconnected monitor, a missing
+  application, and a slow-launching one (all four already handled by
+  the existing `Manage()`/`SessionStore` design), the tray integration
+  (already fully automatic status/click/scroll/right-click, confirmed
+  by reading the actual widget source rather than trusting its own
+  documentation), and the codebase's memory/resource discipline (zero
+  raw `new`/`delete` anywhere; every sampled X11 resource-creation call
+  already paired with a free).
+- **Persistent learning's one real gap** - a monitor's *starting*
+  workspace after a restart came only from static `monitor=` rules or
+  "first available", never from what it last actually showed - closed
+  by extending `SessionStore` (not a new store) with
+  `LastWorkspaceForMonitor()`.
+- **Config migration and recovery mode**, working together without
+  either needing to know the other exists: `ConfigMigration` appends
+  any `ConfigSchema` key missing from an existing `kohiko.conf` (never
+  touching a key that's already there, including one a user
+  deliberately left blank - a real bug in an early draft, caught by a
+  test before it shipped, since `GetScalar().empty()` can't tell
+  "unset" from "set to empty on purpose" the way the `ConfigWriter::
+  Contains()` written to fix it can); `RecoveryMode` detects a crash
+  before a previous startup reached "ready" and falls back to built-in
+  defaults, after backing up the suspect file - the same backup
+  `ConfigMigration` itself already writes.
+- **Launcher auto-refresh** via a new `inotify`-based `AppDirWatcher`,
+  feeding `EventLoop`'s existing `select()` loop the same way
+  `ScreenSaverInhibitor` already does - no polling thread, no new
+  timer.
+- **Two real CPU-wakeup bugs found and fixed** while auditing
+  background work: `TrayIconClient::Run()` and `UiWindow::Run()` (the
+  event loops behind seven separate processes between them) each had
+  an unconditional 250-500ms `poll()` timeout floor that fired forever
+  regardless of whether anything was actually pending - neither loop
+  needed it, since redraws were already dirty-flag-driven and the only
+  genuine periodic needs were already computed correctly and just
+  getting clamped down to the floor.
+- **`Bar::Redraw()` stopped drawing straight onto the live window** - a
+  classic X11 flicker source (full clear immediately followed by
+  several draw calls, no coalescing guarantee) - in favor of an
+  off-screen backing `Pixmap` composited in one `XCopyArea`, the same
+  pattern `UiWindow.cpp` already used elsewhere in the project but
+  `Bar` itself never had.
+- **The login/session experience**, the largest single workstream:
+  a generic (not Arch-only) `xsessions` install; a new `kohiko-session`
+  wrapper as the actual session entry point, providing crash-restart
+  supervision (exponential backoff, a hard burst limit, SIGTERM/SIGINT
+  forwarded with a SIGKILL fallback) that complements rather than
+  duplicates `RecoveryMode` - the only component this phase could
+  meaningfully test against real running processes rather than by
+  inspection, which caught a real bug (`kill` called without its
+  required `-` signal-name prefix, silently breaking signal forwarding
+  entirely); a new `SessionLockBridge` integrating the existing native
+  `LockScreen` with `systemd-logind`'s session-lock D-Bus interface
+  (`loginctl lock-session` now reaches it; lock/unlock state is
+  reported back via `SetLockedHint()`) deliberately one-way - logind's
+  own `Unlock` signal is never honored, since doing so would mean a
+  second, PAM-bypassing way to unlock the session; and an opt-in
+  `kohikoctl configure-autologin` (`AutologinConfigurator`) for
+  LightDM/SDDM (a dedicated drop-in file, never an in-place edit of an
+  existing one; GDM detected but deliberately left to documentation,
+  for lack of an equivalent safe drop-in mechanism) that defaults to
+  No, refuses outright if autologin is already configured anywhere,
+  and was verified for real - not just by inspection - inside an
+  isolated mount namespace with a fake `/etc` bind-mounted over the
+  real one. Investigating the desired "never type a username" flow
+  found the architecture already supported it: `LockScreen` already
+  resolves its username via `getpwuid(getuid())`, never prompts for
+  one, so the only genuinely new work was the pieces around it.
+- **Wallpaper support**, the second-largest workstream: independently
+  configurable per monitor and per workspace, applied as a single
+  composite `Pixmap` spanning every connected monitor set as the root
+  window's background (the same technique `feh`/`nitrogen`/
+  `xwallpaper` use, so gaps between tiled windows show it through for
+  free), four real scale modes via a new shared `ImageRenderer` used by
+  both the new `WallpaperManager` and - replacing its previous
+  stretch-only loader - `LockScreen`'s own background image, which
+  also gained the option to simply mirror the desktop wallpaper
+  instead of needing its own. Live-reloads on file changes via
+  `inotify`, watching each resolved wallpaper's containing directory
+  (the same atomic-replace-safe approach `AppDirWatcher` already
+  established, reused rather than watching files directly). Six
+  supplied wallpaper images now ship with Kohiko itself.
+- **Extension points formalized**, per an explicit "no `dlopen()` yet"
+  brief: a new `docs/ARCHITECTURE.md` section documenting the concrete,
+  already-proven shapes to follow for a new background subsystem, a
+  new setting (scalar or repeatable), a new tray icon, a new full
+  companion app, or a new `kohikoctl` command - each with a real,
+  already-shipped example to point to, several of them added by this
+  very phase.
+
+**Lessons visible from the repository:**
+This phase's testing story splits cleanly by what the sandbox it ran
+in could and couldn't do: this environment had no Xft, no D-Bus
+headers, no Imlib2, and no working X server, so every actual
+`kohiko`/`kohiko-settings` compile was blocked at the first Xft
+`#include`. Everything with no such dependency (config parsing,
+session-state resolution, the aspect-ratio math behind the four scale
+modes, `AutologinConfigurator`'s detection/write/undo logic) got real,
+thorough unit tests instead - and caught real bugs doing it, including
+one in a test itself (an initial Fit-mode test had letterbox and
+pillarbox backwards; independently re-derived the math before
+concluding the implementation, not the test, was right). The one
+component built as a plain POSIX shell script - `kohiko-session` -
+could be exercised as a real, running process regardless of any of
+that, and was the single highest-value thing tested this phase as a
+result, catching a bug (the missing `kill` signal-name prefix) that
+would have silently broken session-end handling in production.
+`AutologinConfigurator`'s system-file-touching logic went a step
+further, verified inside an isolated mount namespace against a fake
+`/etc` rather than only by code review - worth remembering as a
+technique for anything future work needs to test that would otherwise
+require root and a real system to exercise safely. Everything that
+genuinely could only be verified by code review (Imlib2 rendering
+calls, raw libdbus message construction) was written by close analogy
+to already-proven code elsewhere in the same codebase rather than from
+scratch, and flagged plainly as reviewed-not-executed rather than
+described as tested.
+
+--------------------------------------------------------------------------
+
 ## Current Direction
 
-As of 0.19.2, Kohiko presents itself as a largely self-contained X11
-tiling window manager and minimal desktop session: its own bar, native
-launcher and notepad, native lock screen with both Suspend-triggered and
-idle-timeout automatic locking, a power menu, session restore that now
-tracks BSP position as well as workspace/monitor/floating state, an
-adaptive placement system that learns per-application habits during
-ordinary use, multi-monitor support, standards-based display-sleep
-inhibition, a native settings GUI with structured editors for its
-two most syntax-heavy repeatable directives, and native audio,
-network, and Bluetooth applications - now through a second visual
-revision matching a supplied design directly, with a details-panel
-pattern, live search, and per-page "Advanced Settings" sub-pages for
-functionality outside each new mockup - with matching tray widgets
-built on PipeWire/NetworkManager/BlueZ, all on a deliberately small and
-still-optional-where-possible set of external dependencies (Xlib,
-optionally XRandr/XScreenSaver/D-Bus, Imlib2, Xft/fontconfig, libpam,
-and libdbus-1/libpipewire-0.3 together for the three newer apps
-specifically - GTK3 was removed in 0.15.0).
+As of 0.20.0, Kohiko adds persistence, recovery, and desktop-session
+integration on top of the largely self-contained window manager Phase
+11 left off with: monitor/workspace state and adaptive placement
+habits both now survive not just a restart but a monitor's own
+starting workspace across one; a bad config can no longer make Kohiko
+unusable, between automatic migration of missing settings and
+automatic recovery from a crash before startup finished; the launcher
+notices new/changed/removed applications live; and Kohiko now installs
+as a real, autologin-capable desktop session with its native lock
+screen properly integrated into `systemd-logind` rather than sitting
+beside it as an island - all on the same deliberately small,
+still-optional-where-possible set of external dependencies Phase 11
+left it with (Imlib2 now load-bearing for the main `kohiko` binary
+itself, not just `kohiko-settings`, on account of wallpaper support).
 
-Two threads seem likely to continue: first, Phase 11 shows the shared
-UI toolkit (`UiWindow`/`UiWidget` and friends) is still young enough
-that new usage patterns keep finding real bugs in it rather than
-merely new features - `docs/ARCHITECTURE.md`'s "Known limitations /
-recommendations" section lists what's still likely to surface next
-(no generic layout containers, no automated widget-tree test coverage,
-a still-manual coordinate convention). Second, the README's "Planned"
-section is empty again going into whatever comes after 0.19.2, the
-same position it was in going into Phase 10 - with the core tiling/
-session/settings surface and now the three newer apps' visual design
-both considered settled, whether new scope keeps arriving as complete
-externally-defined feature areas (as Phase 10 and this phase's mockup
-brief both did) or Kohiko returns to incrementally deepening what
-already exists remains the same open question Phase 10 left unanswered.
+Two things seem likely to matter next. First, this phase's own testing
+gap - everything touching Xft, D-Bus, Imlib2, or a real X server was
+verified by code review and close analogy to already-proven patterns,
+not execution - means real-display/real-system verification of this
+entire phase (window manager startup, the lock screen's new logind
+integration, wallpaper rendering itself, the autologin flow against an
+actual display manager) is still outstanding, the same category of gap
+Phase 9/10/11 each flagged for whatever they couldn't exercise in
+their own environment. Second, this phase's own "Extension points"
+section in `docs/ARCHITECTURE.md` is deliberately source-level, not
+dynamically loaded - worth revisiting only if a concrete need for
+genuine runtime plugin loading materializes, not preemptively.
+
+--------------------------------------------------------------------------
+

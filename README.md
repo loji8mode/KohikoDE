@@ -26,10 +26,14 @@ a full compositor.
 
 - [Building](#building)
 - [Running it](#running-it)
+- [kohiko-session](#kohiko-session)
+- [Automatic login (optional)](#automatic-login-optional)
 - [Configuration](#configuration)
 - [Kohiko Settings](#kohiko-settings)
+- [Configuration migration & recovery mode](#configuration-migration--recovery-mode)
 - [Window rules](#window-rules)
 - [Multi-monitor](#multi-monitor)
+- [Wallpaper](#wallpaper)
 - [Autostart](#autostart)
 - [Keyboard layouts / languages](#keyboard-layouts--languages)
 - [Default keybindings](#default-keybindings)
@@ -105,10 +109,12 @@ Two build systems are provided; pick whichever you'd rather have installed.
 make -j$(nproc)          # -> ./kohiko, ./kohikoctl, ./kohiko-settings, and (if libdbus-1-dev
                            #    + libpipewire-0.3-dev are present) ./kohiko-audio, ./kohiko-network,
                            #    ./kohiko-bluetooth, and their three tray widgets
-make test                 # BSP tree, launcher scoring, adaptive-placement, DBusValue unit tests (no X server needed)
+make test                 # BSP tree, launcher scoring, adaptive-placement, session persistence,
+                           # config migration, recovery mode, DBusValue unit tests (no X server needed)
 make test-monitors        # MonitorManager/XRandr tests (needs a real X server - skips gracefully without one)
 sudo make install          # installs to /usr/local, incl. every app's .desktop entry + icon,
-                           # and the tray widgets' autostart entries under /etc/xdg/autostart
+                           # the tray widgets' autostart entries under /etc/xdg/autostart, and
+                           # kohiko-session + the xsessions entry that points to it (see below)
 ```
 
 **CMake:**
@@ -142,27 +148,46 @@ scripts/install-arch.sh
 
 Installs every pacman dependency Kohiko needs (`base-devel`, `libx11`,
 `libxrandr`, `imlib2`, `xorg-fonts-misc`, `xorg-server`), builds
-with `make -j$(nproc)`, runs `sudo make install`, drops a default config
-in `~/.config/kohiko` if you don't have one yet, and registers Kohiko as
-a session: an `xsessions` `.desktop` entry so it shows up in your display
-manager's session list (SDDM/GDM/LightDM/...), plus a `~/.xinitrc` that
-starts it - but only if you don't already have one, so it never
-overwrites an existing setup. Run it as your normal user; it calls `sudo`
-itself for the steps that need it.
+with `make -j$(nproc)`, runs `sudo make install` (which registers Kohiko
+as a session - see [Running it](#running-it) below - the same as on any
+other distro; nothing here is Arch-specific about that part anymore),
+drops a default config in `~/.config/kohiko` if you don't have one yet,
+and sets up a `~/.xinitrc` that starts it - but only if you don't
+already have one, so it never overwrites an existing setup. Run it as
+your normal user; it calls `sudo` itself for the steps that need it.
 
 ## Running it
 
-Kohiko is a normal X11 window manager, so it's started the same way as any
-other (dwm, i3, ...): from your display manager's session list if you add
-a `.desktop` entry for it, or directly from `~/.xinitrc`:
+Kohiko installs as a normal, selectable X11 session, the same way any
+other window manager does: `sudo make install` (or the CMake
+equivalent) registers an `xsessions` entry, so "Kohiko" just shows up
+in your display manager's session list (SDDM/GDM/LightDM/...) - pick it
+at login like any other session, no extra setup needed. That entry
+launches `kohiko-session`, a small wrapper that's the actual session
+entry point (`Display Manager -> kohiko-session -> kohiko`) - see
+[kohiko-session](#kohiko-session) below for exactly what it adds on top
+of running `kohiko` directly: mainly, restarting it with backoff if it
+ever crashes, rather than the whole session just ending.
+
+Without a display manager, add the same thing to `~/.xinitrc` yourself
+(`scripts/install-arch.sh` already does this for you, if you don't have
+one yet):
 
 ```sh
 # ~/.xinitrc
-exec /path/to/Kohiko/build/kohiko
+exec kohiko-session
 ```
 
-To try it out **without** touching your real session, run it nested
-inside a nested X server:
+For quick testing, iterating on a config change, or anything else where
+you specifically don't want crash-restart behavior, run `kohiko` itself
+directly instead - both are always installed side by side:
+
+```sh
+kohiko                       # or ./kohiko / ./build/kohiko before installing
+```
+
+To try Kohiko out **without** touching your real session at all, run it
+nested inside a nested X server:
 
 ```sh
 scripts/run-xephyr.sh 1     # opens a 1600x900 window running Kohiko on :1
@@ -176,7 +201,137 @@ mkdir -p ~/.config/kohiko
 cp config/default.conf ~/.config/kohiko/kohiko.conf
 ```
 
-(You can also pass a config path explicitly: `kohiko /path/to/file.conf`.)
+(You can also pass a config path explicitly: `kohiko /path/to/file.conf` -
+`kohiko-session` forwards any arguments it's given straight through to
+`kohiko` unchanged.)
+
+## kohiko-session
+
+The actual process a display manager launches (`Display Manager ->
+kohiko-session -> kohiko` - see [Running it](#running-it) above), not
+`kohiko` itself - a small, deliberately simple POSIX shell script
+(`scripts/kohiko-session`) whose whole job is:
+
+- **A clean exit ends the session.** If `kohiko` exits with status 0 -
+  a deliberate logout/quit, or the same clean exit its own
+  SIGTERM/SIGINT handling already produces - `kohiko-session` doesn't
+  restart it; it just exits the same way itself.
+- **A crash gets a limited, backed-off restart.** Any other exit
+  (non-zero status, or killed by a signal) restarts `kohiko` after a
+  short delay that grows on each consecutive failure (1s, 2s, 4s, ...,
+  capped at 30s) - up to 5 restarts in a row before giving up
+  entirely and letting the session fail, rather than looping forever.
+  A crash-free run of at least 30 seconds resets that count back to
+  zero, so one crash after hours of normal use still gets the full
+  restart budget.
+- **SIGTERM/SIGINT end the session, not a "crash".** A display manager
+  or `systemd` ending your session normally signals the session leader
+  (this script) rather than `kohiko` directly - `kohiko-session`
+  forwards that signal to the running `kohiko` and waits for it to
+  exit (falling back to `SIGKILL` after 10 seconds if it doesn't),
+  then exits cleanly itself, with no restart.
+
+This complements [Recovery mode](#configuration-migration--recovery-mode)
+rather than overlapping with it, and the two need no coordination
+between them at all: `RecoveryMode` decides what a *given* start of
+`kohiko` actually does (fall back to built-in defaults if the previous
+attempt never reached "ready"); `kohiko-session` only decides whether
+there's a next start at all, and how many times that's allowed to
+happen. A config-caused crash loop is exactly the case where both
+matter together - `kohiko-session` keeps relaunching `kohiko` (up to
+its own limit), and `RecoveryMode` makes the very next one of those
+relaunches fall back to safe defaults automatically. Without a wrapper
+like this at all, a single crash would simply end the whole session -
+`RecoveryMode`'s own safe-defaults logic would never even get a next
+launch to run on.
+
+## Automatic login (optional)
+
+The full flow this enables: **boot → display manager auto-logs one
+specific user in with no username or password prompt → `kohiko-session`
+starts `kohiko` → Kohiko's own [native lock screen](#native-lock-screen)
+is shown immediately → enter that user's password once → unlock →
+desktop.** Nobody ever types a username anywhere in that flow - display
+manager greeters already show existing system users to pick from rather
+than asking you to type one, and autologin skips that step entirely for
+whichever one you've configured.
+
+This is entirely opt-in and does nothing on its own - Kohiko never
+touches your display manager's configuration unless you explicitly ask
+it to:
+
+```sh
+sudo kohikoctl configure-autologin
+```
+
+This detects your active display manager (via the `display-manager`
+systemd service, falling back to checking for a known DM binary if
+that's not applicable), checks whether autologin is already configured
+for it (in which case it stops immediately and leaves that alone - see
+below), shows you *exactly* what it's about to create and asks which
+user to log in automatically, and only ever makes any change after an
+explicit `y` at a confirmation prompt that **defaults to No** - pressing
+Enter, or anything other than `y`/`yes`, aborts with nothing changed.
+
+**LightDM and SDDM** are fully supported: configuring writes a single
+new drop-in file (`/etc/lightdm/lightdm.conf.d/60-kohiko-autologin.conf`
+or `/etc/sddm.conf.d/60-kohiko-autologin.conf`) rather than editing your
+existing `lightdm.conf`/`sddm.conf` in place - your original file is
+never touched, and removing autologin later is always exactly "delete
+that one file":
+
+```sh
+sudo kohikoctl configure-autologin --undo
+```
+
+**GDM** is detected but not automatically configured - it has no
+equivalent drop-in mechanism for this specific setting, only one shared
+`custom.conf` file this tool has no business assuming the rest of the
+structure of. Add these two lines to its `[daemon]` section by hand
+instead (`/etc/gdm/custom.conf` or `/etc/gdm3/custom.conf`, depending on
+your distro):
+
+```ini
+AutomaticLoginEnable=true
+AutomaticLogin=yourusername
+```
+
+**Any other or undetected display manager** falls back to this same
+manual documentation - `kohikoctl configure-autologin` makes no changes
+at all when it can't confidently identify a supported one, printing
+exactly why (nothing installed, more than one candidate found with none
+clearly active, or a display manager it doesn't have specific support
+for).
+
+**If autologin is already configured for your display manager** -
+however it was set up, by this tool or otherwise - `kohikoctl
+configure-autologin` finds it (checking both the main config file and
+any drop-in directory) and refuses outright, printing exactly where it
+found it. Kohiko will never modify or overwrite an existing autologin
+configuration; remove or edit it by hand first if you want to
+reconfigure it.
+
+A few things worth being explicit about:
+
+- This does **not** change the target user's password or disable their
+  normal login - it only skips the display manager's own username/
+  password prompt. Anyone with physical or console access to the
+  machine reaches a Kohiko desktop without entering a password (though
+  still has to get past the lock screen above to actually unlock it, if
+  `lockscreen.after` is configured to lock at startup - see
+  [Native lock screen](#native-lock-screen)). Only set this up on a
+  machine you trust physically.
+- Kohiko does not implement its own username/user-picker anywhere for
+  this - a Kohiko *session* always belongs to exactly one already-
+  logged-in OS user (see [Native lock screen](#native-lock-screen)'s own
+  notes on how the lock screen resolves its username), the same as any
+  other window manager; "picking a user" is inherently the display
+  manager's own job, before Kohiko ever starts.
+- No plaintext password is ever read, stored, or handled by this
+  feature at any point - it only ever writes a *username* to a config
+  file display managers already read for exactly this purpose.
+  Authentication itself is unaffected: still your normal system
+  password, still checked by PAM, exactly as without autologin.
 
 ## Configuration
 
@@ -332,6 +487,38 @@ Settings' own Save does automatically). `auto_start_programs` and
 `workspace<N>=` are the one exception - both only ever run right after
 Kohiko itself starts, never on reload, so reloading the config doesn't
 relaunch every autostart program.
+
+## Configuration migration & recovery mode
+
+Picking up a new Kohiko release never means re-diffing
+`config/default.conf` by hand: every startup, Kohiko compares your
+`kohiko.conf` against every setting the current build actually knows
+about (`ConfigSchema` - the same source of truth Kohiko Settings itself
+uses) and appends `key=default` for anything genuinely missing, under
+its own clearly marked `# --- Added automatically by Kohiko (config
+migration...) ---` section - never touching a key you already have,
+active or (deliberately) commented-out, and never "fixing" a key you
+explicitly set to an empty value on purpose. A config that's already
+fully up to date is left completely untouched, mtime included. A backup
+of the file is written to `kohiko.conf.bak` the moment there's actually
+something to migrate.
+
+If Kohiko crashes before finishing startup, the *next* launch detects
+that automatically (a small marker file records whether the previous
+attempt reached a stable running state) and falls back to built-in
+defaults instead of retrying the same configuration that most likely
+caused it - backing up the suspect file to `kohiko.conf.bak` first (the
+same backup migration itself uses) and logging exactly what happened.
+Once you've fixed the problem, restore your configuration with:
+
+```sh
+kohikoctl restore-config          # or: kohikoctl restore-config /path/to/kohiko.conf
+```
+
+This is a plain filesystem operation, not an IPC command - it works
+even while Kohiko is still running on the safe-defaults fallback (or
+isn't running at all). A broken configuration can never make Kohiko
+permanently unusable.
 
 ## Window rules
 
@@ -499,6 +686,76 @@ primary/focused one:
   "workArea":{"x":0,"y":26,"width":1920,"height":1054},
   "workspace":1,"primary":true,"focused":true}]
 ```
+
+## Wallpaper
+
+Six wallpapers ship with Kohiko itself (installed to
+`/usr/local/share/kohiko/wallpapers/`), and `wallpaper.default` is
+already set to one of them out of the box - see `config/default.conf`.
+Point it at your own image instead, or comment it out entirely for a
+plain `wallpaper.background_color` background:
+
+```
+wallpaper.default=/usr/local/share/kohiko/wallpapers/nebula.png
+wallpaper.mode=fill                # fill / fit / center / stretch
+wallpaper.background_color=0x000000
+```
+
+- **fill** scales the image to cover the whole monitor, cropping
+  whatever overflows - no distortion, but part of the image may not be
+  visible.
+- **fit** scales it to fit entirely within the monitor, preserving
+  aspect ratio - `wallpaper.background_color` fills the letterbox/
+  pillarbox bars left over on whichever axis doesn't exactly match.
+- **center** shows it at its own native size, centered - cropped if
+  larger than the monitor, padded with `wallpaper.background_color` if
+  smaller.
+- **stretch** fills the monitor exactly on both axes independently -
+  simple, but distorts the image unless its aspect ratio already
+  happens to match the monitor's.
+
+Independent per-monitor and per-workspace wallpapers, on top of
+`wallpaper.default` above - each is a repeatable rule, same
+`key,key=value,...` shape `monitor=`/`windowrule=` already use:
+
+```
+wallpaper.monitor=eDP-1,path=/path/to/image.png
+wallpaper.monitor=HDMI-1,path=/path/to/other.png,mode=fit
+wallpaper.workspace=3,path=/path/to/workspace-3.png
+```
+
+`mode=` is optional on either kind of rule - falls back to
+`wallpaper.mode` when left off. Where a monitor is currently showing a
+workspace that also has its own rule, the workspace rule wins (see
+`WallpaperManager.h` if you're curious about the exact priority
+chain); `kohikoctl monitors` shows your own output names.
+
+The wallpaper is applied the standard X11 way - a single composite
+image spanning every connected monitor, set as the root window's
+background, the same technique `feh`/`nitrogen`/`xwallpaper` use - so
+there's no separate "wallpaper window" for gaps between tiled windows
+or an empty workspace to show through; it just happens automatically.
+It's also watched live: editing a wallpaper file in place, or
+replacing it entirely (an editor's own atomic-save-via-rename included),
+is picked up and re-applied automatically, no reload needed.
+
+**Lock screen wallpaper** is independently configurable - its own
+image, or reusing whatever the desktop is currently showing:
+
+```
+lockscreen.background_image=/path/to/lockscreen-only-image.png
+lockscreen.background_mode=fill
+lockscreen.use_desktop_wallpaper=false
+```
+
+If `lockscreen.background_image` is set, that's always what shows on
+the lock screen, regardless of the setting below it. Leave it empty
+and turn on `lockscreen.use_desktop_wallpaper` instead to have the
+lock screen simply mirror the desktop wallpaper - including
+per-monitor/per-workspace rules, resolved per monitor at lock time.
+Leave both alone and the lock screen just uses
+`lockscreen.background_color`, exactly as if no image were configured
+at all.
 
 ## Autostart
 
@@ -792,13 +1049,19 @@ depends entirely on actually holding X input focus, on top, to be usable
 at all; Kohiko re-raises it after every single window-stacking change for
 exactly that reason, the same way `Super+N`'s notepad below does.
 
-The application list (from `/usr/share/applications/*.desktop`) and the
-file index (from `$HOME`) are both cached in memory rather than
-re-scanned on every `Super+D` - walking your entire home directory on
-every keystroke would make the launcher feel slow. Install something
-new, or add/remove a file, and it won't show up until that cache is
-refreshed - either `Super+Shift+D` or `kohikoctl reloadlauncher` does
-that immediately, live, with no restart required.
+The application list (from `/usr/share/applications/*.desktop`,
+`~/.local/share/applications/*.desktop`, and anywhere else
+`$XDG_DATA_DIRS` points) and the file index (from `$HOME`) are both
+cached in memory rather than re-scanned on every `Super+D` - walking
+your entire home directory on every keystroke would make the launcher
+feel slow. The application list watches those directories automatically
+(via `inotify(7)`, no polling) and refreshes itself the moment a
+`.desktop` file is installed, edited, or removed - install something new
+and it just shows up, no restart or manual action needed. The file index
+doesn't watch `$HOME` the same way (that would mean a watch per
+subdirectory, for comparatively little benefit); `Super+Shift+D` or
+`kohikoctl reloadlauncher` refreshes both immediately, live, if you ever
+need to force it.
 
 ## The notepad (Super+N)
 
@@ -898,6 +1161,22 @@ it can only ever reach Kohiko's own copy of the string, not anything a
 prior reallocation or swap may already have copied elsewhere - but it
 means a plaintext password doesn't just sit in Kohiko's own heap for the
 rest of the session the way a plain `clear()` would leave it.
+
+Integrated with systemd-logind's own session-lock mechanism, rather than
+being an isolated WM feature: `loginctl lock-session` (or anything else
+that asks logind to lock the current session - a suspend hook, for
+instance) triggers this same lock screen, and locking/unlocking here
+reports the session's locked state back to logind via `SetLockedHint()`,
+so `loginctl session-status` and a display manager's own user switcher
+see the truth. This is one-way on purpose: Kohiko does *not* act on
+logind's own `Unlock` signal, since honoring an external unlock request
+would mean bypassing the PAM check above entirely - there is still
+exactly one way to unlock a locked Kohiko session, the same as always.
+Gracefully absent (falling back to exactly the local-only behavior
+described above) on any system without a session bus, without logind
+running, or where Kohiko isn't running as a logind-managed session at
+all (a bare `startx` outside any login manager, for instance) - none of
+which are errors.
 
 ## Suspend integration
 
@@ -1032,13 +1311,22 @@ kohikoctl activewindow                 # JSON: the focused window, or null
 kohikoctl tree                         # JSON: the focused monitor's workspace's BSP tree (or `tree <id>` for any workspace)
 kohikoctl reload
 kohikoctl reloadlauncher              # re-scan applications/files live, no restart needed
+kohikoctl restore-config [path]       # restore kohiko.conf from its .bak backup - works even
+                                       # if kohiko isn't running; see Recovery mode below
+kohikoctl configure-autologin [--undo]
+                                       # opt-in display-manager autologin setup; see
+                                       # Automatic login above
 kohikoctl quit
 ```
 
 `dispatch` accepts exactly the same action text as a `bind=` line (minus
 the key combo), so anything you can bind to a key you can also trigger
 from a script or a keybinding daemon that doesn't know about Kohiko
-directly.
+directly. `restore-config` and `configure-autologin` are the two
+exceptions to all of this - neither touches the socket above at all
+(the first has to work even when kohiko isn't running; the second edits
+system-wide files kohiko itself has no part in) - both are plain,
+direct filesystem operations instead.
 
 ## Architecture
 
@@ -1073,7 +1361,12 @@ Roughly the file layout the project was designed around, one responsibility each
 | `PowerMenu`                | The bar's `[Power]` popup - exactly Shutdown/Restart/Suspend, see [The power menu](#the-power-menu) |
 | `LockScreen` / `Authenticator` | The native lock screen and its PAM authentication (run in a short-lived forked child, never inline in the main process) - see [Native lock screen](#native-lock-screen) |
 | `ConfigSchema`             | Metadata about `Config`'s keys (category/group/type/default/description/allowed values) - what Kohiko Settings actually renders from; `Config` itself doesn't reference this at all, see [Kohiko Settings](#kohiko-settings) |
-| `ConfigWriter`             | Kohiko Settings' write path back into `kohiko.conf` - edits existing lines in place rather than regenerating the file, see [Kohiko Settings](#kohiko-settings) |
+| `ConfigWriter`             | Line-preserving `kohiko.conf` write path - edits existing lines in place rather than regenerating the file; both Kohiko Settings' own Save and `ConfigMigration` (see below) are built on this, see [Kohiko Settings](#kohiko-settings) |
+| `ConfigMigration` / `RecoveryMode` | Auto-appends missing `ConfigSchema` keys on startup, and falls back to built-in defaults after a crash before startup finished - see [Configuration migration & recovery mode](#configuration-migration--recovery-mode) |
+| `AutologinConfigurator`    | Backs `kohikoctl configure-autologin` - display manager detection, existing-autologin checking, and the drop-in file write/undo itself, kept separate from the interactive confirmation prompt (`tools/kohikoctl.cpp`) - see [Automatic login](#automatic-login-optional) |
+| `ImageRenderer`            | Shared Imlib2-based image scaling (fill/fit/center/stretch) into a `Pixmap` - used by both `WallpaperManager` and `LockScreen`'s own background image, see [Wallpaper](#wallpaper) |
+| `WallpaperManager`         | Resolves and renders the desktop wallpaper, independently per monitor and per workspace, with live file-change reloading via `inotify` - see [Wallpaper](#wallpaper) |
+| `AppDirWatcher`            | `inotify`-based watch on every launcher application directory, feeding `EventLoop`'s `select()` set - see [The launcher](#the-launcher-superd) |
 | `SettingsWindow`           | `kohiko-settings` itself - a separate ordinary application, not part of the `kohiko` process, see [Kohiko Settings](#kohiko-settings) |
 
 A `BSPNode`'s `Geometry()` is its raw tree-partition rect (no gaps - used
@@ -1225,6 +1518,38 @@ into a tile it's already shown it won't render into correctly.
   matching tray widgets, built on PipeWire, NetworkManager, and BlueZ
   respectively - Kohiko still doesn't replace any of those, just adds
   a native UI in front of each.
+- **Persistent monitor preferences** - a monitor that isn't pinned by
+  an explicit `monitor=` rule remembers whatever workspace it was
+  actually showing as of the last clean shutdown and starts back on
+  it, rather than resetting to "first available" on every restart -
+  see [Configuration migration & recovery mode](#configuration-migration--recovery-mode)'s
+  neighbourhood in `SessionStore`.
+- **Automatic config migration and recovery mode** - an existing
+  `kohiko.conf` is kept in sync with whatever settings the current
+  build actually knows about automatically (never touching a key
+  that's already there), and a crash before startup finishes falls
+  back to built-in defaults on the next launch rather than repeating
+  the same failure forever - see
+  [Configuration migration & recovery mode](#configuration-migration--recovery-mode).
+- **Live launcher refresh** - installing, editing, or removing a
+  `.desktop` file anywhere the launcher scans is picked up
+  automatically (`inotify`, no polling), no restart or manual
+  `kohikoctl reloadlauncher` needed - see
+  [The launcher](#the-launcher-superd).
+- **Wallpaper**, independently configurable per monitor and per
+  workspace, four scale modes, live-reloading on file changes, and
+  optionally shared with the native lock screen - see
+  [Wallpaper](#wallpaper).
+- **A proper installable session**: `kohiko-session` (crash-restart
+  supervision with backoff, complementing Recovery mode above rather
+  than duplicating it) as the actual session entry point, an
+  `xsessions` entry on every install method (not just Arch), the
+  native lock screen integrated with `systemd-logind`'s own
+  session-lock mechanism (`loginctl lock-session` reaches it; its
+  locked state is reported back correctly), and opt-in
+  `kohikoctl configure-autologin` for LightDM/SDDM - see
+  [kohiko-session](#kohiko-session) and
+  [Automatic login](#automatic-login-optional).
 
 ## Planned
 

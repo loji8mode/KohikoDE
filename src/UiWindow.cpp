@@ -472,18 +472,29 @@ void UiWindow::Run()
         for (auto& watch : m_fdWatches)
             pfds.push_back({ watch.fd, POLLIN, 0 });
 
-        // Wake up early for whichever timer is due soonest, so
-        // level-meter/spinner animation stays smooth even with
-        // nothing else happening on any fd.
-        int timeoutMs = 250;
+        // No unconditional polling floor: block indefinitely
+        // (timeout -1) when nothing is actually pending, rather than
+        // waking up several times a second forever regardless of
+        // whether any timer is even registered - most windows built
+        // on UiWindow never call SetInterval() at all. Whichever
+        // timer (if any) is due soonest still wakes this up exactly
+        // on time, so level-meter/spinner animation stays just as
+        // smooth as before wherever one is actually running.
+        bool haveDeadline = false;
+        int timeoutMs = 0;
+
         auto now = std::chrono::steady_clock::now();
+
         for (auto& timer : m_timers)
         {
-            auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(timer.next - now).count();
-            timeoutMs = std::min<int>(timeoutMs, std::max<int>(0, static_cast<int>(remaining)));
+            int remaining = std::max<int>(0,
+                static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(timer.next - now).count()));
+
+            timeoutMs = haveDeadline ? std::min(timeoutMs, remaining) : remaining;
+            haveDeadline = true;
         }
 
-        poll(pfds.data(), pfds.size(), timeoutMs);
+        poll(pfds.data(), pfds.size(), haveDeadline ? timeoutMs : -1);
 
         if (pfds[0].revents & POLLIN)
         {

@@ -32,6 +32,14 @@ class ConfigWriter
 {
 public:
 
+    // The section marker every ordinary SetScalar() call (i.e. every
+    // call that doesn't pass its own `marker`) appends new keys under -
+    // what Kohiko Settings itself has always used. Public so
+    // ConfigMigration.cpp doesn't need to duplicate this string to
+    // recognise/skip Settings' own section, even though migration
+    // writes under its own distinct marker instead.
+    static const char* const kDefaultMarker;
+
     bool Load(
         const std::string& path
     );
@@ -56,14 +64,32 @@ public:
         const std::string& key
     ) const;
 
+    // Whether `key` has an active line at all, regardless of its
+    // value - unlike GetScalar(key).empty(), this correctly says
+    // "yes" for a key the user deliberately set to an empty value
+    // (several ConfigSchema defaults, e.g. lockscreen.background_image,
+    // are themselves "" - GetScalar() alone can't tell "never set"
+    // apart from "set to the empty string on purpose", but this can).
+    // Mirrors Config::Contains() exactly, for the read-only class this
+    // one otherwise parallels.
+    bool Contains(
+        const std::string& key
+    ) const;
+
     // Updates the last active `key=...` line's value in place if one
     // exists; otherwise appends a new `key=value` line under a
-    // clearly-marked "added by Kohiko Settings" section at the end of
-    // the file (created once, reused for every later addition) rather
-    // than silently guessing where it belongs.
+    // clearly-marked section at the end of the file (created once,
+    // reused for every later addition under the same `marker`) rather
+    // than silently guessing where it belongs. `marker` defaults to
+    // Kohiko Settings' own section, so every existing call site keeps
+    // writing to exactly the section it always has; ConfigMigration
+    // passes its own distinct marker (see ConfigMigration.h) so an
+    // auto-migrated key is never mislabeled as something the user
+    // configured through the GUI.
     void SetScalar(
         const std::string& key,
-        const std::string& value
+        const std::string& value,
+        const std::string& marker = kDefaultMarker
     );
 
     // Every active line whose trimmed content starts with `prefix`
@@ -94,10 +120,12 @@ private:
     std::string m_path;
     std::vector<std::string> m_lines;
 
-    // Index of an existing "# --- Added by Kohiko Settings ---"
-    // marker line, or npos if one hasn't been created yet this
-    // session - see EnsureAddedMarker().
-    std::size_t EnsureAddedMarker();
+    // Index of an existing `marker` line, or `m_lines.size()` (append
+    // at the very end) if that marker hasn't been created yet this
+    // session - see SetScalar()/ReplaceRawBlock().
+    std::size_t EnsureAddedMarker(
+        const std::string& marker
+    );
 
 };
 

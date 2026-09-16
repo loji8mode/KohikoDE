@@ -101,8 +101,12 @@ public:
     // root-relative coordinates PowerMenu::Open() expects.
     const Rect& Geometry() const;
 
-    // Redraws everything, including the clock. Cheap enough to call
-    // on every relevant WindowManager event plus once a second.
+    // Redraws everything, including the clock, into the off-screen
+    // backing Pixmap (see m_backing) and composites it onto the real
+    // window in one XCopyArea - cheap enough to call on every relevant
+    // WindowManager event plus once a second, and unlike drawing
+    // straight onto the window (this bar's original approach), the
+    // window itself never shows a briefly-blank intermediate frame.
     void Redraw();
 
     int Height() const;
@@ -116,6 +120,18 @@ private:
         unsigned long color
     );
 
+    // (Re)creates m_backing/m_xftDraw sized to `width` x `height` -
+    // called once from Configure() when the window is first created,
+    // and again any time its width actually changes afterward (bar
+    // height is fixed from config, but width follows monitor
+    // geometry, which a hotplug/resolution change can and does alter).
+    // Same "destroy the old pixmap/XftDraw, create fresh ones sized to
+    // match" shape as UiWindow::ResizeBacking(), which this mirrors.
+    void ResizeBacking(
+        int width,
+        int height
+    );
+
 private:
 
     XConnection& m_connection;
@@ -124,6 +140,19 @@ private:
     GC m_gc = nullptr;
     Font m_font;
     XftDraw* m_xftDraw = nullptr;
+
+    // Off-screen buffer everything in Redraw() actually draws onto -
+    // see Redraw()'s own comment for why (eliminates the
+    // clear-then-redraw flicker a plain-Xlib bar would otherwise show
+    // on every single tick of its own clock).
+    Pixmap m_backing = 0;
+
+    // Width m_backing was last sized to - compared against
+    // m_geometry.width in Configure() to decide whether the backing
+    // pixmap needs recreating (see ResizeBacking()'s comment). Bar
+    // height never changes at runtime, so unlike UiWindow this only
+    // needs to track width.
+    int m_backingWidth = 0;
 
     Rect m_geometry;
     int m_height = 26;

@@ -26,14 +26,18 @@ INCLUDES += $(shell pkg-config --cflags xft fontconfig)
 LIBS := -lX11 -lImlib2 -lpam
 LIBS += $(shell pkg-config --libs xft fontconfig)
 
-# SettingsWindow.cpp/ConfigWriter.cpp exist only for kohiko-settings
-# (its own separate binary/process - see include/SettingsWindow.h's
-# own header comment for why) - keeping them out of $(OBJ) is what
-# keeps the `kohiko` binary itself free of GUI code it never runs,
-# per "keep the WM lightweight". The desktop-integration apps'
-# sources (kohiko-audio/network/bluetooth and their shared
-# infrastructure) get the exact same treatment for the exact same
-# reason - see DESKTOP_SHARED_SRC/DESKTOP_APP_ONLY_SRC below.
+# SettingsWindow.cpp exists only for kohiko-settings (its own separate
+# binary/process - see include/SettingsWindow.h's own header comment
+# for why) - keeping it out of $(OBJ) is what keeps the `kohiko`
+# binary itself free of GUI code it never runs, per "keep the WM
+# lightweight". ConfigWriter.cpp used to get the same treatment, but
+# ConfigMigration.cpp (part of ordinary WM startup - see
+# Application::Run()) now reuses it too, so it's shared infrastructure
+# now, the same as ConfigSchema.cpp already was. The
+# desktop-integration apps' sources (kohiko-audio/network/bluetooth
+# and their shared infrastructure) still get the GUI-only treatment,
+# for the same "lightweight WM binary" reason - see
+# DESKTOP_SHARED_SRC/DESKTOP_APP_ONLY_SRC below.
 DESKTOP_SHARED_SRC := src/DBusValue.cpp src/DBusClient.cpp src/AppInstanceLock.cpp \
     src/AppConfigStore.cpp src/NotificationClient.cpp src/UiWindow.cpp src/UiWidget.cpp \
     src/UiListRow.cpp src/UiScrollView.cpp src/UiSidebar.cpp src/UiPopupMenu.cpp \
@@ -41,7 +45,7 @@ DESKTOP_SHARED_SRC := src/DBusValue.cpp src/DBusClient.cpp src/AppInstanceLock.c
 DESKTOP_APP_ONLY_SRC := src/PipeWireClient.cpp src/NetworkManagerClient.cpp src/BluezClient.cpp \
     src/AudioWindow.cpp src/NetworkWindow.cpp src/BluetoothWindow.cpp
 
-GUI_ONLY_SRC := src/SettingsWindow.cpp src/ConfigWriter.cpp $(DESKTOP_SHARED_SRC) $(DESKTOP_APP_ONLY_SRC)
+GUI_ONLY_SRC := src/SettingsWindow.cpp $(DESKTOP_SHARED_SRC) $(DESKTOP_APP_ONLY_SRC)
 
 SRC := $(filter-out $(GUI_ONLY_SRC),$(wildcard src/*.cpp))
 OBJ := $(patsubst src/%.cpp,build/%.o,$(SRC))
@@ -122,7 +126,7 @@ build/%.o: src/%.cpp | build
 build:
 	mkdir -p build
 
-kohikoctl: tools/kohikoctl.cpp src/IpcPath.cpp
+kohikoctl: tools/kohikoctl.cpp src/IpcPath.cpp src/AutologinConfigurator.cpp src/Utils.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
 
 # A completely ordinary X11 client application (not part of the WM
@@ -177,11 +181,18 @@ kohiko-bluetooth-tray: $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) build/BluezCl
 build/kohiko-bluetooth-tray-main.o: tools/kohiko-bluetooth-tray.cpp | build
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
-test: build/test_bsptree build/test_launcherscoring build/test_placementhabits build/test_dbusvalue
+test: build/test_bsptree build/test_launcherscoring build/test_placementhabits build/test_dbusvalue build/test_sessionstore build/test_configmigration build/test_recoverymode build/test_appdirwatcher build/test_autologinconfigurator build/test_wallpapermanager
 	./build/test_bsptree
 	./build/test_launcherscoring
 	./build/test_placementhabits
 	./build/test_dbusvalue
+	./build/test_sessionstore
+	./build/test_configmigration
+	./build/test_recoverymode
+	./build/test_appdirwatcher
+	./build/test_autologinconfigurator
+	./build/test_wallpapermanager
+	sh tests/test_kohiko_session.sh
 
 build/test_bsptree: tests/test_bsptree.cpp src/BSPTree.cpp src/BSPLeaf.cpp src/BSPSplit.cpp src/ManagedWindow.cpp src/LayoutEngine.cpp | build
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
@@ -202,6 +213,49 @@ build/test_placementhabits: tests/test_placementhabits.cpp src/PlacementHabitSto
 # connection involved - see the file itself).
 build/test_dbusvalue: tests/test_dbusvalue.cpp src/DBusValue.cpp | build
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
+
+# Like test_placementhabits, this only exercises Load()'s on-disk
+# format by hand-writing session files (no live X11/XRandr connection
+# needed - see the file itself), but SessionStore.cpp's Save() still
+# references the full Monitor/Workspace/BSP chain, so that has to be
+# linked in too even though this test never calls Save(). -lX11 is
+# needed for the same reason (XConnection.o references it), not
+# because any test here opens a real display.
+build/test_sessionstore: tests/test_sessionstore.cpp src/SessionStore.cpp src/Xdg.cpp src/ManagedWindow.cpp src/Monitor.cpp src/MonitorRule.cpp src/MonitorManager.cpp src/Workspace.cpp src/WorkspaceManager.cpp src/BSPTree.cpp src/BSPLeaf.cpp src/BSPSplit.cpp src/LayoutEngine.cpp src/XConnection.cpp src/XAtoms.cpp src/Config.cpp src/ConfigParser.cpp src/IniFile.cpp src/Utils.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ -lX11
+
+# Pure logic + plain file I/O, no X11 needed at all - see the file
+# itself. Exercises ConfigMigration.cpp against ConfigSchema's real,
+# full option list, so it also incidentally re-validates that every
+# schema entry is well-formed enough to round-trip through
+# ConfigWriter.
+build/test_configmigration: tests/test_configmigration.cpp src/ConfigMigration.cpp src/ConfigWriter.cpp src/ConfigSchema.cpp src/Utils.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
+
+# Pure logic + plain file I/O too - no X11, no real crash involved,
+# just the marker file described in RecoveryMode.h's own comment.
+build/test_recoverymode: tests/test_recoverymode.cpp src/RecoveryMode.cpp src/Xdg.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
+
+# Real functional test against actual Linux inotify (via throwaway
+# temp directories) - no X11 needed, see the file itself.
+build/test_appdirwatcher: tests/test_appdirwatcher.cpp src/AppDirWatcher.cpp src/Xdg.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
+
+# Pure logic + plain file I/O, no X11 needed - every scenario runs
+# against a real throwaway fake filesystem tree (see the file itself
+# and AutologinConfigurator.h's own `root` parameter).
+build/test_autologinconfigurator: tests/test_autologinconfigurator.cpp src/AutologinConfigurator.cpp src/Utils.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
+
+# Only exercises Configure()/ResolveFor() (pure parsing/priority
+# logic) - never ApplyToRoot() itself, which needs a live X connection
+# and isn't something a unit test should be driving anyway (see the
+# file itself). Still needs Imlib2/X11 to link, since WallpaperManager.o
+# references ImageRenderer::Render() regardless of whether this test
+# calls the code path that uses it.
+build/test_wallpapermanager: tests/test_wallpapermanager.cpp src/WallpaperManager.cpp src/ImageRenderer.cpp src/Config.cpp src/ConfigParser.cpp src/IniFile.cpp src/Monitor.cpp src/MonitorManager.cpp src/MonitorRule.cpp src/Workspace.cpp src/WorkspaceManager.cpp src/BSPTree.cpp src/BSPLeaf.cpp src/BSPSplit.cpp src/ManagedWindow.cpp src/LayoutEngine.cpp src/XConnection.cpp src/XAtoms.cpp src/Utils.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ -lX11 -lImlib2
 
 # Needs a real X11/XRandr connection - gracefully skips the checks
 # that need one if $DISPLAY isn't set (see the file itself), so it's
@@ -225,6 +279,9 @@ install: kohiko kohikoctl kohiko-settings
 	install -Dm755 kohikoctl $(DESTDIR)/usr/local/bin/kohikoctl
 	install -Dm755 kohiko-settings $(DESTDIR)/usr/local/bin/kohiko-settings
 	install -Dm644 config/default.conf $(DESTDIR)/usr/local/share/kohiko/default.conf
+	for wallpaper in assets/wallpapers/*.png; do \
+		install -Dm644 "$$wallpaper" "$(DESTDIR)/usr/local/share/kohiko/wallpapers/$$(basename $$wallpaper)"; \
+	done
 	install -Dm644 desktop/kohiko-settings.desktop $(DESTDIR)/usr/local/share/applications/kohiko-settings.desktop
 	install -Dm644 assets/icons/kohiko-settings.svg $(DESTDIR)/usr/local/share/icons/hicolor/scalable/apps/kohiko-settings.svg
 	# Belt-and-suspenders alongside the properly-themed hicolor install
@@ -238,6 +295,19 @@ install: kohiko kohikoctl kohiko-settings
 	# subject to that, and isn't affected by $PREFIX either - it's
 	# always /usr/share/pixmaps regardless (see Xdg::PixmapsDir()).
 	install -Dm644 assets/icons/kohiko-settings.svg $(DESTDIR)/usr/share/pixmaps/kohiko-settings.svg
+	# scripts/kohiko-session - the actual session entry point (see its
+	# own header comment); the .desktop entry below execs this, not
+	# `kohiko` directly. Installed alongside the other binaries even
+	# though it's a shell script, not a compiled one - same -Dm755
+	# either way.
+	install -Dm755 scripts/kohiko-session $(DESTDIR)/usr/local/bin/kohiko-session
+	# Deliberately *not* under /usr/local like everything else above -
+	# display managers (LightDM/SDDM/GDM) scan the fixed, well-known
+	# /usr/share/xsessions regardless of where Kohiko itself is
+	# installed; a copy under /usr/local/share/xsessions would go
+	# entirely unfound by most of them. Same reasoning, and the same
+	# kind of deliberate exception, as the pixmaps fallback just above.
+	install -Dm644 desktop/kohiko.desktop $(DESTDIR)/usr/share/xsessions/kohiko.desktop
 
 .PHONY: install-desktop-apps
 ifeq ($(KOHIKO_HAVE_PIPEWIRE)-$(KOHIKO_HAVE_DBUS_PKG),yes-yes)

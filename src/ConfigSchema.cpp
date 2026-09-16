@@ -356,6 +356,34 @@ const std::vector<ConfigOption>& ConfigSchema::All()
         },
 
         // ==================================================================
+        // Wallpaper
+        // ==================================================================
+        {
+            "Wallpaper", "", "wallpaper.default", ConfigValueType::String, "",
+            "Path to the desktop wallpaper image shown wherever no more "
+            "specific wallpaper.monitor=/wallpaper.workspace= rule applies "
+            "(see those below). Leave empty for a plain black background.",
+            {}
+        },
+        {
+            "Wallpaper", "", "wallpaper.mode", ConfigValueType::Enum, "fill",
+            "How the image is fit to each monitor when its own rule (or "
+            "wallpaper.default above) doesn't specify a mode of its own: "
+            "fill crops to cover the whole monitor with no distortion; fit "
+            "shows the whole image with letterbox/pillarbox bars; center "
+            "shows it at its own native size; stretch fills the monitor "
+            "exactly, distorting the image if its aspect ratio doesn't "
+            "already match.",
+            { "fill", "fit", "center", "stretch" }
+        },
+        {
+            "Wallpaper", "", "wallpaper.background_color", ConfigValueType::Color, "0x000000",
+            "Fills whatever fit mode's letterbox/pillarbox bars, or an "
+            "unset wallpaper.default, leave showing.",
+            {}
+        },
+
+        // ==================================================================
         // Lock Screen
         // ==================================================================
         {
@@ -388,8 +416,26 @@ const std::vector<ConfigOption>& ConfigSchema::All()
         },
         {
             "Lock Screen", "Appearance", "lockscreen.background_image", ConfigValueType::String, "",
-            "Optional path to an image, stretched to fill each monitor. Leave "
-            "empty to just use lockscreen.background_color.",
+            "Optional path to an image of its own for the lock screen - "
+            "independent of the desktop wallpaper above unless left empty "
+            "with lockscreen.use_desktop_wallpaper turned on. Leave both "
+            "unset to just use lockscreen.background_color.",
+            {}
+        },
+        {
+            "Lock Screen", "Appearance", "lockscreen.background_mode", ConfigValueType::Enum, "fill",
+            "How lockscreen.background_image is fit to each monitor - same "
+            "four modes as wallpaper.mode above. Not used when "
+            "lockscreen.background_image is empty.",
+            { "fill", "fit", "center", "stretch" }
+        },
+        {
+            "Lock Screen", "Appearance", "lockscreen.use_desktop_wallpaper", ConfigValueType::Boolean, "false",
+            "When lockscreen.background_image is left empty, show the same "
+            "wallpaper the desktop is currently showing on each monitor "
+            "instead of lockscreen.background_color. Ignored when "
+            "lockscreen.background_image is set - that always takes "
+            "priority.",
             {}
         },
         {

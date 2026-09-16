@@ -1,12 +1,14 @@
 #pragma once
 
 #include "Font.h"
+#include "ImageRenderer.h"
 #include "Types.h"
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 
 #include <chrono>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -16,6 +18,7 @@ namespace Kohiko
 class XConnection;
 class Config;
 class MonitorManager;
+class WallpaperManager;
 
 // Kohiko's own lock screen - no i3lock/betterlockscreen dependency,
 // authenticated via PAM (see Authenticator.h). Full-screen password
@@ -56,8 +59,13 @@ public:
     // password configured at all (see Authenticator's own header
     // comment for exactly how that's detected), in which case this
     // returns without ever mapping anything, per the spec.
+    //
+    // `wallpapers` is consulted only when lockscreen.background_image
+    // is empty and lockscreen.use_desktop_wallpaper is turned on -
+    // see Redraw()'s own comment for exactly how the two combine.
     void Lock(
-        const MonitorManager& monitors
+        const MonitorManager& monitors,
+        const WallpaperManager& wallpapers
     );
 
     // Only ever called internally, once Authenticate() actually
@@ -83,9 +91,11 @@ public:
     // Re-covers every monitor after a hotplug/topology change while
     // still locked - WindowManager's own HandleMonitorTopologyChanged()
     // calls this the same way it already rebuilds bars. A no-op if
-    // not currently locked.
+    // not currently locked. Same `wallpapers` reasoning as Lock()
+    // above.
     void Reposition(
-        const MonitorManager& monitors
+        const MonitorManager& monitors,
+        const WallpaperManager& wallpapers
     );
 
     // Clears the brief post-failed-attempt error message once its
@@ -94,21 +104,44 @@ public:
     // driven from.
     void Tick();
 
+    // Fires exactly once per genuine m_locked transition - true right
+    // after Lock() actually engages (never for the "account has no
+    // password, unlocked immediately" early-return case - nothing
+    // ever became locked there), false right after Unlock(). Fires
+    // regardless of *what* triggered the transition (a keybind,
+    // kohikoctl, the automatic suspend/startup config triggers, or an
+    // external session-lock request), since this is the one place
+    // every one of those paths already funnels through. Set once, by
+    // WindowManager, to relay into SessionLockBridge's
+    // SetLockedHint() - see that class's own header comment for why
+    // this needs to be a callback here rather than WindowManager
+    // wrapping every individual call site itself (Unlock() in
+    // particular is only ever called from inside HandleKeyPress()).
+    using LockStateChangedCallback = std::function<void(bool locked)>;
+
+    void SetLockStateChangedCallback(
+        LockStateChangedCallback callback
+    );
+
 private:
 
     void Redraw();
 
-    // Loads `path` via Imlib2 at exactly `width`x`height`, stretched
-    // to fill (not aspect-preserving - see this function's one call
-    // site in Redraw() for why that's an acceptable simplification
-    // here). Returns 0 on any failure (missing file, bad path, ...),
-    // which every caller already treats as "fall back to a solid
-    // color" rather than a hard error.
-    Pixmap LoadImageStretched(
-        const std::string& path,
-        int width,
-        int height
-    ) const;
+    // (Re)renders m_backgroundPixmaps/m_monitorGeometries for every
+    // monitor in `monitors`, freeing whatever was there before -
+    // shared by Lock() and Reposition(), which previously each had
+    // their own copy of this exact loop. Resolves each monitor's
+    // effective image/mode itself (own lockscreen.background_image/
+    // lockscreen.background_mode if set, else `wallpapers`' current
+    // resolution for that monitor if lockscreen.use_desktop_wallpaper
+    // is on, else neither - Redraw() already falls back to
+    // lockscreen.background_color whenever a pixmap here is 0) via
+    // the shared ImageRenderer, rather than a lock-screen-specific
+    // stretch-only loader.
+    void RenderBackgroundPixmaps(
+        const MonitorManager& monitors,
+        const WallpaperManager& wallpapers
+    );
 
 private:
 
@@ -138,9 +171,11 @@ private:
 
     // The background image, if configured, rendered once per monitor
     // at that monitor's own size - the same Lock()/Reposition() calls
-    // that refresh m_monitorGeometries above refresh this too. See
-    // LoadImageStretched()'s own comment for why a fresh render per
-    // monitor (rather than one shared pixmap) is simplest here.
+    // that refresh m_monitorGeometries above refresh this too (via
+    // RenderBackgroundPixmaps()) - a fresh render per monitor rather
+    // than one shared pixmap, since each monitor can be a different
+    // size (and, with lockscreen.use_desktop_wallpaper on, can even
+    // resolve to a completely different image).
     std::vector<Pixmap> m_backgroundPixmaps;
 
     // The optional logo, loaded once at a fixed size and reused
@@ -152,6 +187,8 @@ private:
     int m_logoSize = 96;
 
     std::string m_backgroundImagePath;
+    ImageScaleMode m_backgroundMode = ImageScaleMode::Fill;
+    bool m_useDesktopWallpaper = false;
     std::string m_logoPath;
 
     unsigned long m_backgroundPixel = 0;
@@ -170,6 +207,8 @@ private:
     std::string m_clockFormat;
     std::string m_dateFormat;
     std::string m_hostname;
+
+    LockStateChangedCallback m_lockStateChanged;
 
 };
 

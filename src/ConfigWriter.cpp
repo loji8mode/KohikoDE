@@ -12,8 +12,6 @@ namespace Kohiko
 namespace
 {
 
-const char* const kAddedMarker = "# --- Added by Kohiko Settings ---";
-
 // Mirrors Config::Load()'s own per-line parsing exactly (trim, skip
 // blank/comment lines, split at the first '=') - so a scalar key or a
 // repeatable-directive prefix ConfigWriter finds "active" is always
@@ -40,6 +38,8 @@ bool SplitActiveLine(
 }
 
 }
+
+const char* const ConfigWriter::kDefaultMarker = "# --- Added by Kohiko Settings ---";
 
 bool ConfigWriter::Load(
     const std::string& path)
@@ -113,9 +113,24 @@ std::string ConfigWriter::GetScalar(
     return result;
 }
 
+bool ConfigWriter::Contains(
+    const std::string& key) const
+{
+    for (const std::string& rawLine : m_lines)
+    {
+        std::string lineKey, lineValue;
+
+        if (SplitActiveLine(rawLine, lineKey, lineValue) && lineKey == key)
+            return true;
+    }
+
+    return false;
+}
+
 void ConfigWriter::SetScalar(
     const std::string& key,
-    const std::string& value)
+    const std::string& value,
+    const std::string& marker)
 {
     std::string newLine = key + "=" + value;
 
@@ -133,7 +148,7 @@ void ConfigWriter::SetScalar(
         }
     }
 
-    std::size_t insertAt = EnsureAddedMarker();
+    std::size_t insertAt = EnsureAddedMarker(marker);
     m_lines.insert(m_lines.begin() + static_cast<std::ptrdiff_t>(insertAt), newLine);
 }
 
@@ -183,7 +198,7 @@ void ConfigWriter::ReplaceRawBlock(
     }
     else
     {
-        insertAt = EnsureAddedMarker();
+        insertAt = EnsureAddedMarker(kDefaultMarker);
     }
 
     std::vector<std::string> newLines;
@@ -196,18 +211,19 @@ void ConfigWriter::ReplaceRawBlock(
         newLines.begin(), newLines.end());
 }
 
-std::size_t ConfigWriter::EnsureAddedMarker()
+std::size_t ConfigWriter::EnsureAddedMarker(
+    const std::string& marker)
 {
     for (std::size_t i = 0; i < m_lines.size(); ++i)
     {
-        if (Utils::Trim(m_lines[i]) == kAddedMarker)
+        if (Utils::Trim(m_lines[i]) == marker)
             return m_lines.size(); // marker exists - new entries still just go at the end, after it and everything already added below it
     }
 
     if (!m_lines.empty() && !Utils::Trim(m_lines.back()).empty())
         m_lines.push_back("");
 
-    m_lines.push_back(kAddedMarker);
+    m_lines.push_back(marker);
 
     return m_lines.size();
 }

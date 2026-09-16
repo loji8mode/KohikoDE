@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Animator.h"
+#include "AppDirWatcher.h"
 #include "Bar.h"
 #include "CursorManager.h"
 #include "EventDispatcher.h"
@@ -17,9 +18,11 @@
 #include "PowerMenu.h"
 #include "Scratchpad.h"
 #include "ScreenSaverInhibitor.h"
+#include "SessionLockBridge.h"
 #include "SessionStore.h"
 #include "SystemTray.h"
 #include "Types.h"
+#include "WallpaperManager.h"
 #include "WindowRepository.h"
 #include "WindowRule.h"
 #include "WorkspaceManager.h"
@@ -82,6 +85,41 @@ public:
     // For EventLoop's own select() set, exactly like Ipc() above -
     // see ScreenSaverInhibitor::Fd()/Dispatch().
     ScreenSaverInhibitor& SleepInhibitor();
+
+    // Fd() for EventLoop's select() set, same as SleepInhibitor()
+    // above - but unlike ScreenSaverInhibitor::Dispatch(), draining
+    // AppDirWatcher's events isn't self-contained: "an application
+    // directory changed" has to reach m_launcher (private to
+    // WindowManager, same as everywhere else Launcher is touched -
+    // see ReloadDesktopEntries()'s other call sites), so that part is
+    // this method instead of something EventLoop calls directly on
+    // the watcher object itself.
+    AppDirWatcher& AppWatcher();
+
+    // Called by EventLoop once AppWatcher().Fd() is readable - drains
+    // the pending events and, if anything actually changed, re-scans
+    // the launcher's application list the exact same way `kohikoctl
+    // reloadlauncher` already does.
+    void HandleAppDirChanged();
+
+    // Fd() for EventLoop's select() set, same shape as AppWatcher()
+    // above - see SessionLockBridge.h for what this actually
+    // integrates with and why. Dispatch() is fully self-contained
+    // (unlike AppWatcher(), it needs no separate WindowManager-side
+    // "what to do" method - see SessionLockBridge::HandleMessage()),
+    // so EventLoop calls .Fd()/.Dispatch() on it directly, the exact
+    // same shape as SleepInhibitor() above.
+    SessionLockBridge& LockBridge();
+
+    // Fd() for EventLoop's select() set, same pattern as AppWatcher()
+    // above (unlike LockBridge() just above, WallpaperManager also
+    // needs a separate WindowManager-side "what to do" method - see
+    // HandleWallpaperFileChanged()).
+    WallpaperManager& Wallpaper();
+
+    // Called by EventLoop once Wallpaper().Fd() is readable - if a
+    // currently-in-use wallpaper file changed on disk, re-renders it.
+    void HandleWallpaperFileChanged();
 
     // Called by EventLoop: roughly once a second when idle so the
     // bar's clock keeps ticking with no X11/IPC activity, or as often
@@ -794,6 +832,9 @@ private:
     LockScreen m_lockScreen;
     IdleWatcher m_idleWatcher;
     ScreenSaverInhibitor m_sleepInhibitor;
+    AppDirWatcher m_appDirWatcher;
+    SessionLockBridge m_sessionLockBridge;
+    WallpaperManager m_wallpaperManager;
     Animator m_animator;
 
     bool m_running = true;

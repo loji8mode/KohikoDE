@@ -55,16 +55,19 @@ pkg_check_modules(PipeWire IMPORTED_TARGET libpipewire-0.3)
 
 file(GLOB KOHIKO_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/*.cpp)
 
-# SettingsWindow.cpp/ConfigWriter.cpp exist only for kohiko-settings,
-# its own separate binary/process (see include/SettingsWindow.h's own
-# header comment for why) - excluded here so `kohiko` itself stays
-# free of GUI code it never runs, per "keep the WM lightweight". The
-# desktop-integration apps' sources (kohiko-audio/network/bluetooth
-# and their shared infrastructure, built as their own targets further
-# down) get the same treatment for the same reason.
+# SettingsWindow.cpp exists only for kohiko-settings, its own separate
+# binary/process (see include/SettingsWindow.h's own header comment
+# for why) - excluded here so `kohiko` itself stays free of GUI code
+# it never runs, per "keep the WM lightweight". ConfigWriter.cpp used
+# to get the same treatment, but ConfigMigration.cpp (part of ordinary
+# WM startup - see Application::Run()) now reuses it too, so it's
+# shared infrastructure now, the same as ConfigSchema.cpp already was
+# (never excluded here to begin with). The desktop-integration apps'
+# sources (kohiko-audio/network/bluetooth and their shared
+# infrastructure, built as their own targets further down) still get
+# the GUI-only exclusion, for the same "lightweight WM binary" reason.
 list(REMOVE_ITEM KOHIKO_SOURCES
     ${CMAKE_SOURCE_DIR}/src/SettingsWindow.cpp
-    ${CMAKE_SOURCE_DIR}/src/ConfigWriter.cpp
     ${CMAKE_SOURCE_DIR}/src/DBusValue.cpp
     ${CMAKE_SOURCE_DIR}/src/DBusClient.cpp
     ${CMAKE_SOURCE_DIR}/src/AppInstanceLock.cpp
@@ -115,7 +118,7 @@ endif()
 
 # --- kohikoctl: the IPC command-line client --------------------------------------
 
-add_executable(kohikoctl tools/kohikoctl.cpp src/IpcPath.cpp)
+add_executable(kohikoctl tools/kohikoctl.cpp src/IpcPath.cpp src/AutologinConfigurator.cpp src/Utils.cpp)
 target_include_directories(kohikoctl PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_compile_options(kohikoctl PRIVATE -Wall -Wextra)
 
@@ -298,10 +301,130 @@ add_executable(test_dbusvalue
 target_include_directories(test_dbusvalue PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME DBusValue COMMAND test_dbusvalue)
 
+# Like test_placementhabits, only exercises Load()'s on-disk format by
+# hand-writing session files - no X11/XRandR connection needed (see
+# the file itself) - but SessionStore.cpp's Save() still references
+# the full Monitor/Workspace/BSP chain, so that has to be linked in
+# too even though this test never calls Save().
+add_executable(test_sessionstore
+    tests/test_sessionstore.cpp
+    src/SessionStore.cpp
+    src/Xdg.cpp
+    src/ManagedWindow.cpp
+    src/Monitor.cpp
+    src/MonitorManager.cpp
+    src/MonitorRule.cpp
+    src/Workspace.cpp
+    src/WorkspaceManager.cpp
+    src/BSPTree.cpp
+    src/BSPLeaf.cpp
+    src/BSPSplit.cpp
+    src/LayoutEngine.cpp
+    src/XConnection.cpp
+    src/XAtoms.cpp
+    src/Config.cpp
+    src/ConfigParser.cpp
+    src/IniFile.cpp
+    src/Utils.cpp
+    src/Logger.cpp
+)
+target_include_directories(test_sessionstore PRIVATE ${CMAKE_SOURCE_DIR}/include ${X11_INCLUDE_DIR})
+target_link_libraries(test_sessionstore PRIVATE ${X11_LIBRARIES})
+if(X11_Xrandr_FOUND)
+    target_compile_definitions(test_sessionstore PRIVATE KOHIKO_HAVE_XRANDR)
+    target_link_libraries(test_sessionstore PRIVATE ${X11_Xrandr_LIB})
+endif()
+add_test(NAME SessionStore COMMAND test_sessionstore)
+
+# Pure logic + plain file I/O, no X11 needed at all - see the file
+# itself.
+add_executable(test_configmigration
+    tests/test_configmigration.cpp
+    src/ConfigMigration.cpp
+    src/ConfigWriter.cpp
+    src/ConfigSchema.cpp
+    src/Utils.cpp
+)
+target_include_directories(test_configmigration PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME ConfigMigration COMMAND test_configmigration)
+
+# Pure logic + plain file I/O too - no X11, no real crash involved,
+# just the marker file described in RecoveryMode.h's own comment.
+add_executable(test_recoverymode
+    tests/test_recoverymode.cpp
+    src/RecoveryMode.cpp
+    src/Xdg.cpp
+)
+target_include_directories(test_recoverymode PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME RecoveryMode COMMAND test_recoverymode)
+
+# A real functional test against actual Linux inotify (via throwaway
+# temp directories) - no X11 needed, see the file itself.
+add_executable(test_appdirwatcher
+    tests/test_appdirwatcher.cpp
+    src/AppDirWatcher.cpp
+    src/Xdg.cpp
+)
+target_include_directories(test_appdirwatcher PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME AppDirWatcher COMMAND test_appdirwatcher)
+
+# Pure logic + plain file I/O, no X11 needed - every scenario runs
+# against a real throwaway fake filesystem tree (see the file itself
+# and AutologinConfigurator.h's own `root` parameter).
+add_executable(test_autologinconfigurator
+    tests/test_autologinconfigurator.cpp
+    src/AutologinConfigurator.cpp
+    src/Utils.cpp
+)
+target_include_directories(test_autologinconfigurator PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME AutologinConfigurator COMMAND test_autologinconfigurator)
+
+# Only exercises Configure()/ResolveFor() (pure parsing/priority
+# logic) - never ApplyToRoot() itself, which needs a live X
+# connection and isn't something a unit test should be driving anyway
+# (see the file itself).
+add_executable(test_wallpapermanager
+    tests/test_wallpapermanager.cpp
+    src/WallpaperManager.cpp
+    src/ImageRenderer.cpp
+    src/Config.cpp
+    src/ConfigParser.cpp
+    src/IniFile.cpp
+    src/Monitor.cpp
+    src/MonitorManager.cpp
+    src/MonitorRule.cpp
+    src/Workspace.cpp
+    src/WorkspaceManager.cpp
+    src/BSPTree.cpp
+    src/BSPLeaf.cpp
+    src/BSPSplit.cpp
+    src/ManagedWindow.cpp
+    src/LayoutEngine.cpp
+    src/XConnection.cpp
+    src/XAtoms.cpp
+    src/Utils.cpp
+)
+target_include_directories(test_wallpapermanager PRIVATE ${CMAKE_SOURCE_DIR}/include ${X11_INCLUDE_DIR})
+target_link_libraries(test_wallpapermanager PRIVATE ${X11_LIBRARIES} PkgConfig::Imlib2)
+if(X11_Xrandr_FOUND)
+    target_compile_definitions(test_wallpapermanager PRIVATE KOHIKO_HAVE_XRANDR)
+    target_link_libraries(test_wallpapermanager PRIVATE ${X11_Xrandr_LIB})
+endif()
+add_test(NAME WallpaperManager COMMAND test_wallpapermanager)
+
+# Shell-script regression test for scripts/kohiko-session - no
+# compiled binary involved, see the test file itself.
+add_test(
+    NAME KohikoSession
+    COMMAND sh ${CMAKE_SOURCE_DIR}/tests/test_kohiko_session.sh
+)
+
 # --- install ------------------------------------------------------------------------
 
 install(TARGETS kohiko kohikoctl kohiko-settings RUNTIME DESTINATION bin)
 install(FILES config/default.conf DESTINATION share/kohiko)
+file(GLOB WALLPAPER_ASSETS ${CMAKE_SOURCE_DIR}/assets/wallpapers/*.png)
+install(FILES ${WALLPAPER_ASSETS} DESTINATION share/kohiko/wallpapers)
 install(FILES desktop/kohiko-settings.desktop DESTINATION share/applications)
 install(FILES assets/icons/kohiko-settings.svg DESTINATION share/icons/hicolor/scalable/apps)
 # See the Makefile's own install: target for why this second copy,
@@ -309,6 +432,20 @@ install(FILES assets/icons/kohiko-settings.svg DESTINATION share/icons/hicolor/s
 # IconResolver's guaranteed-checked pixmaps fallback, working around
 # its theme search only reading one base directory per theme.
 install(FILES assets/icons/kohiko-settings.svg DESTINATION /usr/share/pixmaps)
+
+# scripts/kohiko-session - the actual session entry point (see its
+# own header comment); the .desktop entry below execs this, not
+# `kohiko` directly. install(PROGRAMS ...), not FILES, to preserve
+# the executable bit on a plain shell script the same way a compiled
+# TARGETS install already would.
+install(PROGRAMS scripts/kohiko-session DESTINATION bin)
+
+# Deliberately an absolute, non-${CMAKE_INSTALL_PREFIX}-relative path -
+# same reasoning, and the same kind of deliberate exception, as the
+# pixmaps install just above: display managers (LightDM/SDDM/GDM) scan
+# the fixed, well-known /usr/share/xsessions regardless of where
+# Kohiko itself is installed.
+install(FILES desktop/kohiko.desktop DESTINATION /usr/share/xsessions)
 
 if(KOHIKO_DESKTOP_APPS_AVAILABLE)
     install(TARGETS

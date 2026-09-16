@@ -4,12 +4,12 @@
 #
 # Installs build/runtime dependencies via pacman, builds with the same
 # `make -j$(nproc)` used everywhere else in this project, installs the
-# binaries system-wide (`sudo make install`), drops a default config
-# in ~/.config/kohiko if one isn't there yet, and registers Kohiko as
-# a selectable session (an xsessions .desktop entry for display
-# managers like SDDM/GDM/LightDM, plus a ~/.xinitrc fallback for
-# plain startx - but only if you don't already have one, so it never
-# clobbers an existing session setup).
+# binaries system-wide (`sudo make install` - which is also what
+# registers Kohiko as a selectable session for display managers like
+# SDDM/GDM/LightDM, see the Makefile's own install: target), drops a
+# default config in ~/.config/kohiko if one isn't there yet, and sets
+# up a ~/.xinitrc fallback for plain startx - but only if you don't
+# already have one, so it never clobbers an existing session setup.
 set -e
 
 if ! command -v pacman >/dev/null 2>&1; then
@@ -71,9 +71,13 @@ make -j"$(nproc)"
 echo "==> Installing binaries (sudo make install)"
 sudo make install
 # This also installs kohiko-settings (Kohiko Settings' GUI) and its
-# .desktop entry/icon - see the Makefile's own install: target. No
-# extra dependency for it: it's plain X11/Xft, both already installed
-# above for kohiko itself.
+# .desktop entry/icon, the kohiko-session wrapper, and the xsessions
+# entry that points to it (see the Makefile's own install: target,
+# and scripts/kohiko-session's own header comment for what the
+# wrapper does) - registering Kohiko as a selectable session is no
+# longer Arch-specific, so this script doesn't need to do it itself
+# anymore. No extra dependency for kohiko-settings either: it's plain
+# X11/Xft, both already installed above for kohiko itself.
 
 CONFIG_DIR="$HOME/.config/kohiko"
 CONFIG_FILE="$CONFIG_DIR/kohiko.conf"
@@ -86,28 +90,17 @@ else
     echo "==> $CONFIG_FILE already exists - leaving it alone"
 fi
 
-XSESSION_FILE="/usr/share/xsessions/kohiko.desktop"
-
-echo "==> Registering the Kohiko session ($XSESSION_FILE)"
-sudo tee "$XSESSION_FILE" >/dev/null <<'EOF'
-[Desktop Entry]
-Name=Kohiko
-Comment=Minimalist X11 tiling window manager
-Exec=/usr/local/bin/kohiko
-Type=Application
-EOF
-
 XINITRC="$HOME/.xinitrc"
 
 if [ ! -f "$XINITRC" ]; then
     echo "==> No ~/.xinitrc - creating one that starts Kohiko (for plain startx, no display manager)"
-    echo "exec /usr/local/bin/kohiko" > "$XINITRC"
+    echo "exec /usr/local/bin/kohiko-session" > "$XINITRC"
 elif grep -q "kohiko" "$XINITRC"; then
     echo "==> ~/.xinitrc already starts kohiko - leaving it alone"
 else
     echo "==> ~/.xinitrc already exists and doesn't mention kohiko - leaving it alone."
     echo "    If you use 'startx' (no display manager), add this line to it yourself:"
-    echo "        exec /usr/local/bin/kohiko"
+    echo "        exec /usr/local/bin/kohiko-session"
 fi
 
 echo

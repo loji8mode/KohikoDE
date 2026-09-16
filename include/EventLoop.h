@@ -6,11 +6,13 @@ namespace Kohiko
 class XConnection;
 class WindowManager;
 
-// Multiplexes the X11 connection and the IPC socket with select().
-// Every pass drains whatever X events are already pending through
-// WindowManager's EventDispatcher, then polls IPCServer if it has a
-// waiting connection. A short timeout keeps the bar's clock ticking
-// even when nothing else happens - no threads anywhere in Kohiko.
+// Multiplexes the X11 connection, the IPC socket, and a handful of
+// other subsystems' file descriptors (ScreenSaverInhibitor's D-Bus
+// connection, AppDirWatcher's inotify fd) with select(). Every pass
+// drains whatever X events are already pending through WindowManager's
+// EventDispatcher, then polls whichever of the others have something
+// waiting. A short timeout keeps the bar's clock ticking even when
+// nothing else happens - no threads anywhere in Kohiko.
 class EventLoop
 {
 public:

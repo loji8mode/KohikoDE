@@ -1,6 +1,275 @@
 # Changelog
 
-## Version 0.19.2 (unreleased)
+## Version 0.20.0
+
+### Added
+- Wallpaper support: independently configurable per monitor and per
+  workspace, applied the standard X11 way (one composite `Pixmap`
+  spanning every connected monitor, set as the root window's
+  background - the same technique `feh`/`nitrogen`/`xwallpaper` use, so
+  gaps between tiled windows and empty workspaces show it through for
+  free, no separate "wallpaper window" needed). New `wallpaper.default`/
+  `wallpaper.mode`/`wallpaper.background_color`, plus repeatable
+  `wallpaper.monitor=<name>,path=...,mode=...` and
+  `wallpaper.workspace=<id>,path=...,mode=...` rules (workspace rule
+  wins over monitor rule wherever both could apply to the same screen
+  at once) using the exact same `key,key=value,...` shape `monitor=`/
+  `windowrule=` already use. Four real scale modes (fill/fit/center/
+  stretch) via a new shared `ImageRenderer` class, built on a single
+  Imlib2 `imlib_render_image_part_on_drawable_at_size()` call per mode
+  with different source/dest rectangle math - verified with 33 unit
+  tests covering every mode against both the six shipped wallpapers'
+  own aspect ratio and several target resolutions (including two cases
+  where an initial test draft had Fit's letterbox-vs-pillarbox
+  direction backwards; independently re-derived the math to confirm
+  the implementation was correct and fixed the test, not the code).
+  Live-reloads automatically on file changes (`inotify`, watching each
+  resolved wallpaper's containing directory - the same
+  atomic-replace-safe approach `AppDirWatcher` already uses - rather
+  than the file itself, so both an in-place edit and an editor's
+  atomic-save-via-rename are both caught correctly) via a new
+  `WallpaperManager` class, whose parsing/priority-resolution logic
+  (19 checks, `test_wallpapermanager`) is fully unit tested against
+  real `Config`/`Monitor`/`Workspace` objects. Six wallpapers now ship
+  with Kohiko itself (`assets/wallpapers/`, installed to
+  `/usr/local/share/kohiko/wallpapers/`), with `wallpaper.default`
+  already pointing at one of them in `config/default.conf` out of the
+  box. New `wallpaper.monitor=`/`wallpaper.workspace=` sections in
+  Kohiko Settings (raw-text editing, same as `bind=`/`exec.`).
+- Lock screen background image gained the same four real scale modes
+  above (`lockscreen.background_mode`) - it was previously always
+  stretched, via its own separate, less capable Imlib2 loader, now
+  replaced by the shared `ImageRenderer`. New
+  `lockscreen.use_desktop_wallpaper`: when `lockscreen.background_image`
+  is left empty, shows whatever the desktop wallpaper currently
+  resolves to for each monitor instead of the plain
+  `lockscreen.background_color` - an explicit `background_image` still
+  always takes priority when set. `LockScreen::Lock()`/`Reposition()`
+  previously each had their own copy of the per-monitor pixmap-loading
+  loop; consolidated into one shared `RenderBackgroundPixmaps()`.
+- `kohikoctl configure-autologin [--undo]`: opt-in, interactive
+  display-manager autologin setup, backed by a new
+  `AutologinConfigurator` class. Detects the active display manager
+  (the systemd `display-manager` service symlink, falling back to
+  known binaries), refuses outright if autologin is already configured
+  for it anywhere (main config file or a drop-in directory - existing
+  autologin configurations are never modified or overwritten), shows
+  exactly what will be created, and only ever writes anything after an
+  explicit confirmation prompt that **defaults to No**. LightDM and
+  SDDM get full support, via a single new drop-in config file each
+  (`.../lightdm.conf.d/60-kohiko-autologin.conf`,
+  `.../sddm.conf.d/60-kohiko-autologin.conf`) rather than an in-place
+  edit of the existing `lightdm.conf`/`sddm.conf` - the original file
+  is never touched, and `--undo` is always exactly "delete that one
+  file". GDM is detected but deliberately left to manual documentation
+  (no equivalent drop-in mechanism for this setting - only one shared
+  `custom.conf` this tool has no business assuming the rest of the
+  structure of); any other or ambiguous case also falls back to
+  documentation rather than guessing. No plaintext password is ever
+  read, stored, or handled - only a username gets written, to a file
+  the display manager already reads for exactly this purpose.
+  `AutologinConfigurator`'s every filesystem path is parameterized by a
+  `root` argument (defaulting to `/`) specifically so this could be
+  genuinely, thoroughly tested (30 checks,
+  `test_autologinconfigurator`, covering detection - including
+  ambiguous/unknown cases - existing-config checks across main-file and
+  drop-in variants, section-scoped INI parsing correctness, refusal
+  behavior, and undo) against a real throwaway fake filesystem tree
+  rather than reviewed by inspection alone; `tools/kohikoctl.cpp`'s
+  actual CLI/prompt flow was additionally verified for real, end to
+  end, inside an isolated mount namespace with a fake `/etc` bind-
+  mounted over the real one (detection, full configure with the exact
+  written file content, refuse-on-existing, undo, and the empty-input/
+  explicit-`n` "default is No" cases all confirmed against the real
+  binary, not just the library).
+- `kohiko-session`: a new, minimal POSIX shell wrapper that's now the
+  actual session entry point a display manager (or `~/.xinitrc`)
+  launches (`Display Manager -> kohiko-session -> kohiko`), providing
+  session-level crash supervision on top of - not instead of -
+  `RecoveryMode`'s own internal, config-focused recovery: on a clean
+  exit, propagates it and stops (a deliberate logout); on a crash,
+  restarts with exponential backoff (1s, 2s, 4s, ... capped at 30s),
+  up to 5 consecutive failures before giving up and letting the
+  session fail rather than looping forever; a crash-free run of at
+  least 30s resets that count, so one crash after hours of normal use
+  still gets the full restart budget. Forwards SIGTERM/SIGINT to the
+  running `kohiko` (falling back to SIGKILL if it doesn't exit within
+  10s) rather than treating an intentional session-end signal as a
+  crash to restart from. The two systems need zero coordination:
+  `RecoveryMode` decides what a *given* start of `kohiko` does; this
+  script only decides whether there's a next one at all. Without a
+  wrapper at all, a single crash simply ends the session outright -
+  `RecoveryMode`'s own safe-defaults logic would never even get a next
+  launch to run on. Thoroughly tested against real fake-`kohiko`
+  stand-ins covering every branch (`tests/test_kohiko_session.sh`,
+  wired into `make test`/`ctest`) - a genuine, non-mocked functional
+  test, unlike most of this phase's other C++ changes, which this
+  sandbox can't compile against real Xft/D-Bus headers to test
+  end-to-end.
+- The `xsessions` `.desktop` entry (letting Kohiko appear as a
+  selectable session in display managers) is no longer Arch-only: a
+  checked-in `desktop/kohiko.desktop` (`Exec=kohiko-session`, not
+  `kohiko` directly - see above) is now installed by the plain
+  `make install`/`cmake --install` path too, at the fixed
+  `/usr/share/xsessions` every display manager actually scans -
+  deliberately not `$PREFIX`-relative, the same kind of exception
+  already made for the pixmaps icon fallback just below.
+  `scripts/install-arch.sh` no longer generates its own separate copy
+  of this file (it now comes from `make install` like everything
+  else) and points its `~/.xinitrc` fallback at `kohiko-session` too.
+- Native lock screen now integrates with systemd-logind's session-lock
+  mechanism instead of being an isolated WM feature: a new
+  `SessionLockBridge` class (same raw-libdbus/private-connection shape
+  as `ScreenSaverInhibitor`) subscribes to the current session's own
+  `org.freedesktop.login1.Session` `Lock` signal - so `loginctl
+  lock-session`, a suspend hook, or any other standard tool asking
+  this session to lock reaches Kohiko's real `LockScreen`, the same as
+  every other way of locking it - and calls `SetLockedHint()` after
+  every genuine lock/unlock transition (via a new
+  `LockScreen::SetLockStateChangedCallback()`, since `Unlock()` is
+  only ever called internally from `HandleKeyPress()`), so
+  `loginctl session-status`/a display manager's user switcher sees the
+  truth. Deliberately one-way: does not subscribe to logind's own
+  `Unlock` signal, since honoring an external unlock request would
+  mean bypassing `LockScreen`'s PAM-backed `Authenticator` entirely -
+  a second, weaker authentication path this exists specifically to
+  avoid creating. No new lock screen, no duplicated authentication, no
+  plaintext-password handling beyond what `Authenticator` already did.
+  Resolves this session's own logind session via
+  `Manager.GetSessionByPID(getpid())`, not `$XDG_SESSION_ID`, so it
+  still works even where that variable isn't set. Gracefully
+  unavailable (falls back to exactly today's local-only lock screen
+  behavior) with no logging on any system without a session bus,
+  without logind running, or where this process isn't a logind-managed
+  session at all - none of which are errors.
+- `SessionStore` now also remembers the workspace each monitor (by
+  XRandr output name) was actually showing as of the last clean
+  shutdown, independently of any window's own saved state. On restart,
+  `MonitorManager::Detect()` consults this - via a new
+  `SetSessionWorkspaceLookup()` callback, wired up in
+  `WindowManager::Initialize()` - as a fallback for a monitor's
+  starting workspace: below an explicit `monitor=` rule (which is
+  still a deliberate pin and always wins), but above "first workspace
+  nothing else is showing". Previously an unpinned monitor reset to
+  whatever workspace happened to be free on every single restart, even
+  if the user had been using it on a completely different one for
+  weeks; adaptive placement's per-window and per-app-class learning
+  already survived restarts (`PlacementHabitStore`), but this
+  per-monitor piece of "don't make the user teach Kohiko twice" did
+  not. The on-disk session file format gains a trailing `MONITORS
+  <count>` section for this (still `KOHIKO_SESSION_V2` - purely
+  additive, so an older file with no such section still loads its
+  window records exactly as before). New `test_sessionstore`
+  regression suite (`make test` / `ctest`) covers the parsing directly,
+  including that backward-compatibility case.
+- Automatic config migration: on every normal startup, `Application::Run()`
+  now calls the new `ConfigMigration::MigrateIfNeeded()` before loading
+  `kohiko.conf`, which appends `key=default` (from `ConfigSchema`,
+  already Kohiko Settings' own source of truth for every setting) for
+  any schema key genuinely missing from the file - never a key that's
+  already there, active or (deliberately) commented-out, and never a
+  key the user set to an explicit empty value on purpose (several
+  schema defaults, e.g. `lockscreen.background_image`, are themselves
+  `""` - `ConfigWriter` gained a proper `Contains()` to tell "never
+  set" apart from "set to empty on purpose", since `GetScalar().empty()`
+  alone can't). Reuses `ConfigWriter` - the same line-preserving engine
+  Kohiko Settings' own Save() already relies on - rather than a second
+  way of editing `kohiko.conf`; `ConfigWriter.cpp` moved out of the
+  Makefile/CMakeLists' GUI-only source list accordingly, since it's now
+  linked into the main `kohiko` binary too, not just `kohiko-settings`.
+  A config that's already fully up to date is left with its mtime
+  completely untouched. New `test_configmigration` regression suite.
+- Recovery mode: a new `RecoveryMode` class detects a Kohiko that
+  crashed before finishing startup last time (a single small marker
+  file, set at the very top of `Application::Run()` and cleared right
+  after `Logger::Info("ready")` - see `RecoveryMode.h` for the full
+  mechanism) and, on the next launch, skips loading/migrating the
+  user's config entirely in favor of built-in defaults, after backing
+  up the suspect file to `kohiko.conf.bak` (the same backup
+  `ConfigMigration` itself writes before altering anything, via the
+  now-shared `ConfigMigration::BackupConfig()`) and logging a clear,
+  actionable `Logger::Warning`. `kohikoctl` gained a `restore-config
+  [path]` subcommand that copies that backup back over `kohiko.conf` -
+  deliberately a plain filesystem operation rather than going through
+  `IpcServer` like every other `kohikoctl` command, since it has to
+  work precisely when Kohiko isn't running at all. New
+  `test_recoverymode` regression suite. A bad configuration can no
+  longer make Kohiko unusable.
+- Launcher auto-refresh: the application list now watches every
+  directory it scans (`Xdg::ApplicationDirs()` -
+  `/usr/share/applications`, `~/.local/share/applications`, and
+  anywhere else `$XDG_DATA_DIRS` points) via Linux `inotify(7)`, and
+  automatically re-scans - the exact same path `kohikoctl
+  reloadlauncher` already used - the moment a `.desktop` file is
+  installed, edited, or removed. New `AppDirWatcher` class feeds its
+  fd into `EventLoop`'s existing `select()` multiplexing (identical
+  treatment to `ScreenSaverInhibitor`'s D-Bus fd) - no polling timer,
+  no extra thread. Gracefully unavailable (falls back to exactly
+  today's manual-refresh-only behavior) if `inotify_init1()` itself
+  ever fails, which is not expected on Linux but is never treated as
+  fatal. New `test_appdirwatcher` regression suite exercises this
+  against real inotify with throwaway temp directories - no X server
+  needed.
+
+### Fixed
+- Several new files (`SessionLockBridge.cpp`, `AppDirWatcher.cpp`,
+  `WallpaperManager.cpp`, `RecoveryMode.cpp`) used `std::uint32_t`/
+  `std::error_code` without including `<cstdint>`/`<system_error>`
+  directly, relying on another header happening to provide them
+  transitively - which held in the sandbox this phase was developed in,
+  but not on every real toolchain (reported as a build failure in
+  `SessionLockBridge.cpp` specifically: `'uint32_t' is not a member of
+  'std'`). Fixed by including what each file actually uses directly,
+  rather than relying on transitive availability - also applied
+  defensively to `TrayIconClient.cpp` (missing `<algorithm>` for
+  `std::min`/`std::max`, same risk, not yet reported broken) and
+  `UiWindow.h` (a pre-existing `std::uint32_t` usage that turned out to
+  already be covered transitively via `Types.h`, so not a live bug,
+  but now stated explicitly rather than left implicit).
+- `TrayIconClient::Run()` (shared by `kohiko-audio-tray`/
+  `kohiko-network-tray`/`kohiko-bluetooth-tray`) and `UiWindow::Run()`
+  (shared by `kohiko-settings`/`kohiko-audio`/`kohiko-network`/
+  `kohiko-bluetooth`'s own windows) each had a hardcoded 250-500ms
+  `poll()` timeout floor that fired unconditionally forever, even
+  fully idle with no timer registered at all, waking every one of
+  these seven processes several times a second for no reason. Neither
+  needed it: redraws are already driven directly by the fd/click/
+  scroll callbacks that set the dirty flag (checked at the very next
+  loop iteration regardless of what woke it), and the only genuine
+  periodic need in either loop - the dock-retry attempt in
+  `TrayIconClient` and each window's own registered timers - was
+  already being computed correctly and just getting clamped down to
+  that floor. Both now compute the actual next deadline and pass it
+  straight to `poll()`, blocking indefinitely (`-1`) when nothing is
+  pending. Verified with isolated unit tests of the exact
+  timeout-computation logic (covering idle/dock-retry-due/timer-due/
+  overdue-clamps-to-zero/soonest-of-two-competing-deadlines), since
+  neither file builds without Xft/libpipewire/libdbus.
+- `Bar::Redraw()` drew straight onto the live bar window - a full
+  `XClearWindow` immediately followed by several `XftDrawString`
+  calls repainting it - on every relevant event *and* once a second
+  for the clock, which is a classic X11 flicker source: the window
+  briefly shows blank/background-colored before the following draw
+  calls paint it back in, with no guarantee the X server coalesces
+  that into one visible frame. Now draws into an off-screen backing
+  `Pixmap` (created/resized alongside the window - width follows
+  monitor geometry and can change on a hotplug/resolution change,
+  height never does) and composites the finished frame onto the real
+  window with a single `XCopyArea` at the end - the exact same
+  backing-pixmap pattern `UiWindow.cpp` already used, just not
+  something `Bar` itself had. The window is now touched exactly once
+  per `Redraw()`, so there's no intermediate state left for the X
+  server to ever actually display. Verified by isolating the exact
+  `XCreatePixmap`/`XFillRectangle`/`XCopyArea` call shapes into a
+  standalone compile-only check against the real `<X11/Xlib.h>`
+  prototypes, since `Bar.cpp` itself needs Xft to build.
+- Investigated the "hover title" behavior described as needing
+  removal in favor of the border highlight alone indicating focus -
+  traced every `Bar::SetTitle()` call site and found the bar's title
+  is already driven purely by `WindowManager`'s own focus state
+  (`focusedWindow->Title()`), not mouse hover; there is no separate
+  hover-driven title path anywhere in the codebase to remove. No code
+  change made here - existing behavior already matches the goal.
 
 ### Changed
 - Rebuilt `kohiko-audio`/`kohiko-network`/`kohiko-bluetooth`'s main
@@ -62,6 +331,38 @@
   object code against fresh code with no warning - intermittent,
   hard-to-reproduce crashes with no code-level cause. Fixed by adding
   `-MMD -MP` and including the generated `build/*.d` files.
+- `TrayIconClient::Run()` (shared by `kohiko-audio-tray`/
+  `kohiko-network-tray`/`kohiko-bluetooth-tray`) had a hardcoded
+  250ms/500ms `poll()` timeout floor that fired unconditionally
+  forever, even fully idle and already docked, waking each of the
+  three tray-widget processes 2-4 times a second for no reason - none
+  of the events it existed to catch actually needed that granularity:
+  redraws are already driven directly by the fd/click/scroll callbacks
+  that set the dirty flag (checked at the very next loop iteration
+  regardless of what woke it), and the only genuine periodic need -
+  the dock-retry attempt while not yet docked, plus each widget's own
+  registered timers - was already being computed correctly and just
+  getting clamped down to that floor. Now computes the actual next
+  deadline (the sooner of the dock retry and every registered timer)
+  and passes it straight to `poll()`, blocking indefinitely (`-1`) if
+  there's genuinely nothing to wait for. Verified with an isolated
+  unit test of the exact timeout-computation logic (five edge cases -
+  fully idle, dock-retry due, a timer due, an already-overdue timer
+  clamping to 0 rather than going negative, and picking the sooner of
+  two competing deadlines), since `TrayIconClient.cpp` itself needs
+  Xft/libpipewire/libdbus to build.
+- `UiWindow::Run()` - the shared event loop `kohiko-settings`,
+  `kohiko-audio`, `kohiko-network`, and `kohiko-bluetooth` are all
+  actually built on - had the exact same unconditional 250ms `poll()`
+  floor as `TrayIconClient::Run()` above, and for the same reason
+  wasn't needed: most windows built on `UiWindow` never call
+  `SetInterval()` at all, so they were waking up 4 times a second with
+  nothing whatsoever to check. Same fix: block indefinitely when no
+  timer is registered, otherwise wake exactly when the soonest one is
+  actually due - `kohiko-audio`'s 66ms level-meter animation and
+  `kohiko-network`/`kohiko-bluetooth`'s 300ms live-refresh timers are
+  completely unaffected either way. Also isolated-unit-tested for the
+  same reason as the entry above.
 
 ## Version 0.19.1
 
