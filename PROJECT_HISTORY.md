@@ -1513,5 +1513,180 @@ the loop was supposed to be serving still working, and both still
 triggered exactly one re-render each, watched directly in the same
 strace output, with the watch itself left untouched throughout.
 
+The task after that was broader and open-ended by design: a full
+performance audit of the entire running desktop, not a single
+reported symptom - "profile everything, rank what you find by
+measured cost, fix the real bottlenecks one at a time, prove each one
+with a before/after measurement, and don't touch anything a
+measurement didn't justify." That last clause turned out to matter
+more than it might have read on first pass. A live session was built
+the same way the wallpaper task's had been - Xvfb, a real installed
+`kohiko`, this time also two private D-Bus buses with the existing
+`mock_networkmanager.py`/`mock_bluez.py` test harnesses actually
+running behind them, real PipeWire, real X11 client windows tiled by
+the BSP - and profiled with whatever tools the sandbox actually had:
+`strace -c`/`-f -y`, `pidstat -t`, raw `/proc/[pid]/stat` tick
+sampling. `perf` turned out to not be an option at all - this
+sandbox's kernel has no matching package available anywhere - which
+meant leaning on syscall-level and tick-level evidence throughout
+rather than a profiler's call graph, and saying so plainly rather than
+quietly working around it. The sandbox itself rebooted mid-session
+five separate times before this task was done (every background
+process lost each time, the filesystem and installed packages
+untouched) - enough that a small idempotent recovery script earned its
+keep the same way `bringup`-style scripts have elsewhere in this
+project's history, and enough that some planned live scenarios (a
+literal mouse-drag window-move, chiefly) never got a fully reliable
+reproduction in the time available and are recorded as exactly that -
+an unverified item, not a quietly-assumed pass - rather than papered
+over.
+
+Almost everything measured turned out to already be efficient.
+Workspace switching, focus cycling, window creation and close, a
+keyboard-driven BSP move, the launcher's first open (background-
+thread app-index build, already an intentional design choice, not
+something this session added), settings and lock triggering, and
+launching the network/Bluetooth tray tools against their real mock
+backends - every one of these cost roughly what the action it performs
+should cost, with nothing recurring or unconditional found underneath
+any of them. That's a real finding in its own right, in the same
+spirit as the BSP-rewrite and generic-drag-and-drop items declined
+earlier in this same version: absence of a bottleneck, checked for
+directly rather than assumed, is worth writing down with the same
+confidence as one that was found. Exactly one genuine, measured,
+*recurring* cost turned up anywhere in the whole audit: `Bar::Redraw()`
+repainting the entire bar - every workspace label, both mode
+indicators, the tray, the power button, the background fill, and the
+clock - in full, and flushing it to the X server, on every single
+`Tick()`, once a second, forever, for the entire life of the process,
+almost always to update nothing but the clock's own seconds digit.
+`strace -f -y` on a genuinely idle running session showed it directly:
+the same `poll`/`writev`/`recvmsg` shape once a second, indefinitely,
+needing no user interaction at all to keep happening - the same kind
+of "the mechanism sustains itself with nothing external required"
+signature the wallpaper regression had, just two orders of magnitude
+cheaper per cycle and entirely intentional-looking rather than a
+feedback loop, which is exactly why it had gone unnoticed rather than
+reported: nothing about it looked broken from a user's seat, only from
+underneath.
+
+The fix followed the same discipline as everything else this session:
+smallest change that addresses the actual measured cause,
+everything else byte-for-byte unchanged. `Redraw()` now compares the
+bar's current state against what it last actually painted - workspace
+count and which one's active, the two mode indicators, the
+notification text, the tray's width, and the clock text's own pixel
+width - and when only the clock differs, repaints just the clock's
+rectangle instead of the whole bar. Two correctness edges got the same
+"prove it, don't assume it" treatment as the rest of this project's
+history: `Show()` needed to force a full repaint on its very next
+`Redraw()`, because X11 doesn't guarantee a plain window's prior
+pixels survive being unmapped and remapped even though the backing
+pixmap itself is untouched by that - and `Configure()` needed the same,
+since a resolution change or hotplug moves the goalposts the cached
+state was compared against. Both were worked out by tracing what X11
+actually guarantees rather than by a failure report, the same way the
+inotify mechanism itself was worked out two tasks ago rather than
+guessed at. Verified four ways, matching the same "more than one kind
+of evidence, not just the one that was expected to succeed" discipline
+as the two tasks before it: a dedicated regression test
+(`tests/test_bar.cpp`) that measures X11 request counts directly via
+`XNextRequest()`'s own sequence counter rather than peeking at private
+state, and specifically proves both that the cheap path engages *and*
+that a real change - including the `Show()`/`Configure()` edges above -
+still forces a full repaint every time; the entire existing suite
+re-run clean on both the Makefile and, for the first time this
+session, a from-scratch CMake build (`ctest`, 27/27); a live
+functional pass against the fix installed for real - workspace
+switching, focus cycling, a BSP move, a window close with real BSP
+retiling, launcher open/close, and a lock trigger, all watched
+directly rather than assumed unaffected; and the same live idle
+session re-measured afterward, where the exact same `strace -f -y`
+capture that had shown 836 bytes flushed every second before the fix
+showed 368 bytes after it - real, on the same running process, not
+estimated. Raw CPU-tick sampling couldn't tell before from after here
+- both were already below what 10ms ticks on a single core can
+resolve at true idle - and that gap between "the underlying X11 work
+measurably dropped" and "the crude CPU counter available in this
+sandbox couldn't see it" is itself worth being explicit about rather
+than rounding up to a CPU-percentage claim the measurements don't
+actually support.
+
+One adjacent thing was measured and deliberately left alone:
+`SystemTray::Reposition()` unconditionally issues its own
+`XMoveResizeWindow` every time it's called, the identical
+regardless-of-whether-anything-changed shape `Bar::Redraw()` had - but
+`Redraw()`'s fix already removes its own once-a-second call into it
+whenever the tray's width hasn't changed, which was the actual
+measured, unconditional, forever-running cost. What's left calls it
+only from genuine dock/undock events, not a recurring tick - and
+fixing it anyway, with no measurement showing it currently costs
+anything, would have been exactly the kind of "looks expensive so fix
+it anyway" work this task's own instructions ruled out from the
+start.
+
+The Bar fix wasn't quite the end of it. One thread left loose while
+tracing it - a `mmap`/`munmap` pattern noticed during a workspace
+switch but not yet explained - turned out to lead somewhere real once
+followed all the way through, rather than being noted and dropped. A
+workspace switch, even one where neither the old nor the new workspace
+had its own `wallpaper.workspace=` rule, was mmap-ing the wallpaper
+PNG twice and allocating (then immediately freeing) an 8MB-class XSHM
+buffer, every single time - `WallpaperManager::ApplyToRoot()`
+re-rendering the entire composite unconditionally, the identical
+shape of waste `Bar::Redraw()` had, just discovered second rather than
+ranked first going in. This session's own instructions had drawn a
+clear line around the wallpaper subsystem - the 0.20.5 inotify
+regression was explicitly someone else's fixed, closed problem, not to
+be reopened - but they'd also drawn the line in exactly the right
+place to allow this: not the same mechanism, not the same bug, an
+independent measurement finding an unrelated cost in the same file.
+Reopening `WallpaperManager.cpp` under that specific permission, and
+only that permission, mattered enough to state plainly rather than
+blur - the alternative was either ignoring a real, measured finding
+because it lived in a file with history attached, or touching that
+file on weaker grounds than the instructions actually allowed.
+
+The fix mirrored `Bar::Redraw()`'s almost exactly: compare what
+`ResolveFor()` says now against what was last actually composited -
+path, mode, geometry, background color, all of it - and skip the
+decode/render when nothing differs. But this one had a sharper edge
+the Bar fix didn't: `HandleWallpaperFileChanged()` - the *other* half
+of the 0.20.5 fix, still completely untouched itself - calls
+`ApplyToRoot()` precisely when `Poll()` has detected a real on-disk
+edit, and a real on-disk edit doesn't change the *path* ResolveFor()
+returns, only what's actually in the file at that path. A same-state
+comparison would have looked at that call and seen nothing different,
+and quietly broken live-reload - the exact feature the previous
+session had gone to such lengths to prove still worked. Catching this
+before it shipped rather than after came from the same habit as
+everywhere else in this project's history: trace what a change
+actually touches, in this case by reading `HandleWallpaperFileChanged()`
+itself rather than assuming the render path's callers were
+interchangeable, before assuming a fix is complete. The answer was a
+`forceRerender` parameter, default false, with exactly one caller ever
+passing true - explicit at the one call site that needs it rather than
+something implicit a future change could silently lose.
+
+Verified the same four ways again: a dedicated test section added to
+the existing `test_wallpapermanager.cpp` (gracefully skipped without a
+display, like the file's other X11-optional sections, rather than a
+new standalone target, since this file - unlike `test_bar` - is
+already wired into the unconditional `make test` run) measuring X11
+request counts through the same `XNextRequest()` technique as the Bar
+test: full render around 13-14 requests, the skip path 1, a genuine
+wallpaper change and `forceRerender=true` both back to full-render
+magnitude every time; the entire suite re-run clean on both build
+systems again; live confirmation that a workspace switch between two
+workspaces sharing a wallpaper dropped from 6 mmap/munmap calls to
+zero, using the identical `strace -f -y` capture that had found the
+problem in the first place; and, most carefully, both live-reload
+directions checked by hand rather than inferred from the test alone -
+an actual `wallpaper.workspace=` rule still renders the right image on
+switching to that workspace, and editing the wallpaper file in place
+still triggers a full re-render, confirmed by the mmap'd byte count
+matching the new file's own size rather than assuming a fresh decode
+happened just because something got redrawn.
+
 --------------------------------------------------------------------------
 

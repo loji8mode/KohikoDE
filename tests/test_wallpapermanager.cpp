@@ -1,13 +1,20 @@
 // Regression test for WallpaperManager's parsing/resolution logic -
 // no X11 needed (Monitor/Workspace are both deliberately X11-free -
-// see their own header comments; ApplyToRoot()'s actual rendering
-// isn't exercised here since it needs a live X connection) - plus a
-// real-inotify regression suite for RefreshWatches()/Poll() (see
-// "-- Idle-CPU regression --" below), which needs no X11 either since
-// RefreshWatches() takes a plain path list rather than a
-// MonitorManager specifically so this is possible - exercises the
-// same real Linux inotify AppDirWatcher's own test does, against
-// throwaway temp directories.
+// see their own header comments) - plus a real-inotify regression
+// suite for RefreshWatches()/Poll() (see "-- Idle-CPU regression --"
+// below), which needs no X11 either since RefreshWatches() takes a
+// plain path list rather than a MonitorManager specifically so this
+// is possible - exercises the same real Linux inotify
+// AppDirWatcher's own test does, against throwaway temp directories.
+//
+// The very last section, "-- Skipping a genuinely redundant
+// re-render --", is the one part of this file that needs a real X11
+// connection (ApplyToRoot() itself does real rendering) - same
+// "gracefully skip without a real, even if headless/Xvfb, $DISPLAY"
+// deal as test_monitormanager/test_svgrenderer/test_bar, but *only*
+// for that one section, since everything above it doesn't need one
+// and this file is (unlike those three) wired into the main `test`
+// Makefile target unconditionally.
 //
 // Build & run: see the "test-wallpapermanager" target in the Makefile.
 
@@ -15,7 +22,12 @@
 
 #include "Config.h"
 #include "Monitor.h"
+#include "MonitorManager.h"
 #include "Workspace.h"
+#include "WorkspaceManager.h"
+#include "XConnection.h"
+
+#include <X11/Xlib.h>
 
 #include <sys/select.h>
 
@@ -392,6 +404,119 @@ int main()
             Check(WaitReadable(wallpapers.Fd(), 2000),
                 "the fd becomes readable after an in-place edit");
             Check(wallpapers.Poll(), "...and Poll() reports it as a real change");
+        }
+    }
+
+    std::printf("\n-- Skipping a genuinely redundant re-render (0.20.6) --\n");
+    {
+        const char* displayEnv = std::getenv("DISPLAY");
+
+        if (!displayEnv || displayEnv[0] == '\0')
+        {
+            std::printf("  (skip: no $DISPLAY set - needs a real, even if headless/Xvfb, X server)\n");
+        }
+        else
+        {
+            XConnection connection;
+
+            if (!connection.Connect())
+            {
+                std::printf("  (skip: could not open display \"%s\")\n", displayEnv);
+            }
+            else
+            {
+                Display* display = connection.GetDisplay();
+
+                std::filesystem::path fileC = tempDir / "wallpapers-c" / "second-wallpaper.png";
+                std::filesystem::create_directories(fileC.parent_path());
+                { std::ofstream(fileC) << "not a real png - content doesn't matter for this section either"; }
+
+                std::filesystem::path fileD = tempDir / "wallpapers-d" / "first-wallpaper.png";
+                std::filesystem::create_directories(fileD.parent_path());
+                { std::ofstream(fileD) << "not a real png - content doesn't matter for this section either"; }
+
+                std::filesystem::path configPathA = tempDir / "kohiko-a.conf";
+                { std::ofstream out(configPathA); out << "wallpaper.default=" << fileD.string() << "\n"; }
+
+                std::filesystem::path configPathC = tempDir / "kohiko-c.conf";
+                { std::ofstream out(configPathC); out << "wallpaper.default=" << fileC.string() << "\n"; }
+
+                Config configA;
+                configA.Load(configPathA.string());
+
+                Config configC;
+                configC.Load(configPathC.string());
+
+                WorkspaceManager workspaces(10);
+                MonitorManager monitors(connection, workspaces);
+                monitors.Initialize(configA);
+
+                Check(!monitors.All().empty(), "at least one monitor is available to render onto (Xvfb's own fallback)");
+
+                WallpaperManager wallpapers2;
+                wallpapers2.Configure(configA);
+
+                auto requestsFor = [&](bool forceRerender) -> unsigned long
+                {
+                    unsigned long before = XNextRequest(display);
+                    wallpapers2.ApplyToRoot(connection, monitors, forceRerender);
+                    XSync(display, False);
+                    return XNextRequest(display) - before;
+                };
+
+                unsigned long firstRenderRequests = requestsFor(false);
+                std::printf("    (first-ever ApplyToRoot(): %lu X11 requests - always a full render)\n",
+                            firstRenderRequests);
+                Check(firstRenderRequests > 0, "the first-ever ApplyToRoot() call actually issues X11 requests");
+
+                unsigned long repeatRequests = requestsFor(false);
+                std::printf("    (immediate repeat, nothing changed: %lu X11 requests)\n", repeatRequests);
+                Check(repeatRequests < firstRenderRequests,
+                    "calling ApplyToRoot() again with nothing changed issues far fewer requests than the first render");
+
+                // A genuine change: point wallpaper.default at a
+                // different file (a different monitor= / workspace=
+                // resolution in practice - this is the cheapest way to
+                // make ResolveFor()'s answer actually differ without
+                // needing a second real monitor under Xvfb).
+                wallpapers2.Configure(configC);
+                unsigned long realChangeRequests = requestsFor(false);
+                std::printf("    (real change - wallpaper.default now points elsewhere: %lu X11 requests)\n",
+                            realChangeRequests);
+                Check(realChangeRequests >= firstRenderRequests / 2,
+                    "a genuine wallpaper change is back to full-render magnitude, not the cheap skip path");
+                Check(realChangeRequests > repeatRequests,
+                    "...clearly more than the cheap no-op repeat cost, confirming the skip didn't quietly \"win\" here");
+
+                // Back to a quiescent state (same config as the last
+                // render, nothing changed) - confirms the skip
+                // re-engages, not just once ever.
+                unsigned long quietAgainRequests = requestsFor(false);
+                std::printf("    (nothing changed again: %lu X11 requests)\n", quietAgainRequests);
+                Check(quietAgainRequests < firstRenderRequests / 2,
+                    "the skip path re-engages on the very next call after a real change, not just once");
+
+                // The critical live-reload-preservation case:
+                // forceRerender=true (exactly what
+                // WindowManager::HandleWallpaperFileChanged() now
+                // passes) must NOT take the cheap path even though
+                // nothing about wallpaper.default/ResolveFor()'s
+                // answer changed - this is standing in for "the file
+                // at that same path was just edited in place".
+                unsigned long forcedRequests = requestsFor(true);
+                std::printf("    (forceRerender=true, config unchanged: %lu X11 requests)\n", forcedRequests);
+                Check(forcedRequests >= firstRenderRequests / 2,
+                    "forceRerender=true always does a full render, even with an otherwise-unchanged resolved state - "
+                    "this is what keeps live-reload (Poll() detecting an in-place file edit) working");
+
+                // And forceRerender=true is a one-shot, per-call
+                // override, not something that leaks into later calls.
+                unsigned long afterForcedRequests = requestsFor(false);
+                std::printf("    (immediately after that, forceRerender=false again, nothing changed: %lu X11 requests)\n",
+                            afterForcedRequests);
+                Check(afterForcedRequests < firstRenderRequests / 2,
+                    "...and the very next ordinary call goes right back to the cheap skip path");
+            }
         }
     }
 

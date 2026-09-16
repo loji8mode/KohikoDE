@@ -186,7 +186,8 @@ unsigned long WallpaperManager::BackgroundColor() const
 
 void WallpaperManager::ApplyToRoot(
     XConnection& connection,
-    const MonitorManager& monitors)
+    const MonitorManager& monitors,
+    bool forceRerender)
 {
     Display* display = connection.GetDisplay();
 
@@ -209,77 +210,101 @@ void WallpaperManager::ApplyToRoot(
     if (totalWidth <= 0 || totalHeight <= 0)
         return;
 
-    int screen = connection.Screen();
-    ::Window root = connection.Root();
+    // What ResolveFor() currently says for every monitor - pure Config
+    // lookups, no rendering/X11 work yet. Used both to decide whether
+    // the render below can be skipped, and (via resolvedPaths) to keep
+    // the inotify watch set current either way - see this function's
+    // own header comment and RefreshWatches()'s.
+    const auto& allMonitors = monitors.All();
 
-    Pixmap composite = XCreatePixmap(
-        display, root,
-        static_cast<unsigned int>(totalWidth), static_cast<unsigned int>(totalHeight),
-        DefaultDepth(display, screen));
-
-    GC gc = XCreateGC(display, composite, 0, nullptr);
-
-    // Fills the whole composite first - covers any area no monitor's
-    // rectangle happens to reach (shouldn't normally exist, but
-    // defensive) with something sane rather than undefined pixmap
-    // contents.
-    XSetForeground(display, gc, m_backgroundColor);
-    XFillRectangle(display, composite, gc, 0, 0,
-        static_cast<unsigned int>(totalWidth), static_cast<unsigned int>(totalHeight));
-
-    for (const auto& monitor : monitors.All())
-    {
-        Resolved resolved = ResolveFor(*monitor);
-        const Rect& geometry = monitor->Geometry();
-
-        if (resolved.path.empty() || geometry.width <= 0 || geometry.height <= 0)
-            continue; // background color fill above already covers this monitor's area
-
-        Pixmap rendered = ImageRenderer::Render(
-            connection, root, resolved.path,
-            geometry.width, geometry.height, resolved.mode, m_backgroundColor);
-
-        if (rendered)
-        {
-            XCopyArea(display, rendered, composite, gc,
-                0, 0,
-                static_cast<unsigned int>(geometry.width), static_cast<unsigned int>(geometry.height),
-                geometry.x, geometry.y);
-
-            XFreePixmap(display, rendered);
-        }
-    }
-
-    XFreeGC(display, gc);
-
-    XSetWindowBackgroundPixmap(display, root, composite);
-    XClearWindow(display, root);
-    XFlush(display);
-
-    if (m_currentRootPixmap)
-        XFreePixmap(display, m_currentRootPixmap);
-
-    m_currentRootPixmap = composite;
-
-    // Gathers exactly the paths ResolveFor() returned above for this
-    // render (recomputing via ResolveFor() again here, rather than
-    // saving the ones the loop above already resolved per-monitor, is
-    // deliberately avoided - not needed for correctness, but a
-    // std::vector<std::string> built at once here is simpler than
-    // threading one out of the loop above). RefreshWatches() itself
-    // decides what actually needs touching from this - see its own
-    // comment for why calling it unconditionally on every ApplyToRoot()
-    // (including one Poll() itself triggered) is safe.
+    std::vector<CompositedMonitor> desired;
     std::vector<std::string> resolvedPaths;
 
-    for (const auto& monitor : monitors.All())
+    desired.reserve(allMonitors.size());
+
+    for (const auto& monitor : allMonitors)
     {
         Resolved resolved = ResolveFor(*monitor);
+
+        desired.push_back(CompositedMonitor{
+            monitor->Id(), monitor->Geometry(), resolved.path, resolved.mode});
 
         if (!resolved.path.empty())
             resolvedPaths.push_back(resolved.path);
     }
 
+    bool sameAsLastComposite =
+        !forceRerender &&
+        m_currentRootPixmap != 0 &&
+        totalWidth == m_lastCompositedWidth &&
+        totalHeight == m_lastCompositedHeight &&
+        m_backgroundColor == m_lastCompositedBackgroundColor &&
+        desired == m_lastComposited;
+
+    if (!sameAsLastComposite)
+    {
+        int screen = connection.Screen();
+        ::Window root = connection.Root();
+
+        Pixmap composite = XCreatePixmap(
+            display, root,
+            static_cast<unsigned int>(totalWidth), static_cast<unsigned int>(totalHeight),
+            DefaultDepth(display, screen));
+
+        GC gc = XCreateGC(display, composite, 0, nullptr);
+
+        // Fills the whole composite first - covers any area no monitor's
+        // rectangle happens to reach (shouldn't normally exist, but
+        // defensive) with something sane rather than undefined pixmap
+        // contents.
+        XSetForeground(display, gc, m_backgroundColor);
+        XFillRectangle(display, composite, gc, 0, 0,
+            static_cast<unsigned int>(totalWidth), static_cast<unsigned int>(totalHeight));
+
+        for (std::size_t i = 0; i < allMonitors.size(); ++i)
+        {
+            const Rect& geometry = desired[i].geometry;
+            const std::string& path = desired[i].path;
+
+            if (path.empty() || geometry.width <= 0 || geometry.height <= 0)
+                continue; // background color fill above already covers this monitor's area
+
+            Pixmap rendered = ImageRenderer::Render(
+                connection, root, path,
+                geometry.width, geometry.height, desired[i].mode, m_backgroundColor);
+
+            if (rendered)
+            {
+                XCopyArea(display, rendered, composite, gc,
+                    0, 0,
+                    static_cast<unsigned int>(geometry.width), static_cast<unsigned int>(geometry.height),
+                    geometry.x, geometry.y);
+
+                XFreePixmap(display, rendered);
+            }
+        }
+
+        XFreeGC(display, gc);
+
+        XSetWindowBackgroundPixmap(display, root, composite);
+        XClearWindow(display, root);
+        XFlush(display);
+
+        if (m_currentRootPixmap)
+            XFreePixmap(display, m_currentRootPixmap);
+
+        m_currentRootPixmap = composite;
+
+        m_lastComposited = desired;
+        m_lastCompositedWidth = totalWidth;
+        m_lastCompositedHeight = totalHeight;
+        m_lastCompositedBackgroundColor = m_backgroundColor;
+    }
+
+    // RefreshWatches() itself decides what actually needs touching from
+    // this - see its own comment for why calling it unconditionally on
+    // every ApplyToRoot() (including a call the skip-check above just
+    // turned into a no-op, or one Poll() itself triggered) is safe.
     RefreshWatches(resolvedPaths);
 }
 

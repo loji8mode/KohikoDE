@@ -131,6 +131,14 @@ void Bar::Configure(
     m_activePixel     = std::strtoul(config.GetString("bar.active",     "0x89b4fa").c_str(), nullptr, 0);
 
     XSetWindowBackground(display, m_window, m_backgroundPixel);
+
+    // The geometry and/or colors above may just have changed (a
+    // resolution change/hotplug, or a config reload) - whatever
+    // Redraw() last painted is no longer guaranteed to still be
+    // correct on screen, so its clock-only fast path isn't safe to
+    // take until a full repaint has happened at least once more. See
+    // m_hasDrawnOnce's own comment.
+    m_hasDrawnOnce = false;
 }
 
 void Bar::Show()
@@ -142,6 +150,15 @@ void Bar::Show()
 
     m_connection.MapWindow(m_window);
     m_connection.Raise(m_window);
+
+    // Unlike m_backing (an off-screen pixmap, untouched by
+    // unmapping), X11 doesn't guarantee a plain window's prior pixels
+    // survive an unmap/remap cycle - so the next Redraw() can't trust
+    // that the window still shows what m_lastDrawn* claims it does,
+    // and needs to do a real full repaint at least once before the
+    // clock-only fast path is safe to take again. See m_hasDrawnOnce's
+    // own comment.
+    m_hasDrawnOnce = false;
 }
 
 void Bar::Hide()
@@ -226,6 +243,90 @@ void Bar::Redraw()
 
     Display* display = m_connection.GetDisplay();
 
+    if (!m_notificationText.empty() && std::chrono::steady_clock::now() >= m_notificationExpiry)
+        m_notificationText.clear();
+
+    // A plain arithmetic computation (see SystemTray::Width()), not an
+    // X11 round trip - cheap enough to call here purely to compare
+    // against m_lastDrawnTrayWidth, even though the full-redraw path
+    // below computes it again itself (unchanged) as part of actually
+    // repositioning the tray container.
+    int trayWidth = 0;
+
+    if (m_tray)
+    {
+        trayWidth = m_tray->Width();
+
+        if (trayWidth > 0)
+            trayWidth += 12;
+    }
+
+    std::time_t now = std::time(nullptr);
+    std::tm local{};
+    localtime_r(&now, &local);
+
+    char clockText[16];
+    std::strftime(clockText, sizeof(clockText), "%H:%M:%S", &local);
+
+    int clockLen = static_cast<int>(std::strlen(clockText));
+    int clockWidth = m_font.TextWidth(clockText);
+
+    if (clockWidth == 0)
+        clockWidth = clockLen * 8;
+
+    // True when every part of the bar besides the clock text itself is
+    // provably identical to what's already on screen - "provably"
+    // because it's a direct comparison against exactly what the last
+    // full redraw actually painted (m_lastDrawn*), not an assumption.
+    // trayWidth matching means the clock's own x position hasn't
+    // moved either (nothing else this bar draws depends on the
+    // system's wall-clock time), so the fast path below never has to
+    // guess at where the clock's rectangle is - it's exactly where the
+    // last full redraw put it.
+    bool onlyClockCouldDiffer =
+        m_hasDrawnOnce &&
+        m_workspaceCount == m_lastDrawnWorkspaceCount &&
+        m_currentWorkspace == m_lastDrawnCurrentWorkspace &&
+        m_scratchpadActive == m_lastDrawnScratchpadActive &&
+        m_notepadActive == m_lastDrawnNotepadActive &&
+        m_notificationText == m_lastDrawnNotificationText &&
+        trayWidth == m_lastDrawnTrayWidth &&
+        clockWidth == m_lastDrawnClockWidth;
+
+    if (onlyClockCouldDiffer && clockText == m_lastDrawnClockText)
+        return; // truly nothing changed at all - not even worth touching the X server
+
+    if (onlyClockCouldDiffer)
+    {
+        int clockX = m_geometry.width - clockWidth - 12 - trayWidth;
+        int baseline = m_height / 2 + 5;
+
+        XSetForeground(display, m_gc, m_backgroundPixel);
+        XFillRectangle(
+            display, m_backing, m_gc,
+            clockX, 0,
+            static_cast<unsigned int>(clockWidth > 0 ? clockWidth : 1),
+            static_cast<unsigned int>(m_height));
+
+        DrawText(clockX, baseline, clockText, m_foregroundPixel);
+
+        XCopyArea(
+            display, m_backing, m_window, m_gc,
+            clockX, 0,
+            static_cast<unsigned int>(clockWidth > 0 ? clockWidth : 1),
+            static_cast<unsigned int>(m_height),
+            clockX, 0);
+
+        XFlush(display);
+
+        m_lastDrawnClockText = clockText;
+        return;
+    }
+
+    // --- Full redraw - identical to how this always worked, for any
+    // call where something besides just the clock's digits changed
+    // (including the very first call). ---
+
     // Everything below draws onto m_backing (via m_xftDraw, which
     // Configure()/ResizeBacking() point at it, not m_window) - the
     // window itself is only ever touched once, by the single
@@ -265,13 +366,8 @@ void Bar::Redraw()
         x += 34;
     }
 
-    if (!m_notificationText.empty() && std::chrono::steady_clock::now() >= m_notificationExpiry)
-        m_notificationText.clear();
-
     if (!m_notificationText.empty())
         DrawText(x + 16, baseline, m_notificationText, m_activePixel);
-
-    int trayWidth = 0;
 
     if (m_tray)
     {
@@ -281,19 +377,6 @@ void Bar::Redraw()
         if (trayWidth > 0)
             trayWidth += 12;
     }
-
-    std::time_t now = std::time(nullptr);
-    std::tm local{};
-    localtime_r(&now, &local);
-
-    char clockText[16];
-    std::strftime(clockText, sizeof(clockText), "%H:%M:%S", &local);
-
-    int clockLen = static_cast<int>(std::strlen(clockText));
-    int clockWidth = m_font.TextWidth(clockText);
-
-    if (clockWidth == 0)
-        clockWidth = clockLen * 8;
 
     // The power button - see PowerButtonRect()/WindowManager's own
     // ButtonPress routing for what opens PowerMenu. Plain bracketed
@@ -327,6 +410,16 @@ void Bar::Redraw()
         0, 0);
 
     XFlush(display);
+
+    m_hasDrawnOnce = true;
+    m_lastDrawnWorkspaceCount = m_workspaceCount;
+    m_lastDrawnCurrentWorkspace = m_currentWorkspace;
+    m_lastDrawnScratchpadActive = m_scratchpadActive;
+    m_lastDrawnNotepadActive = m_notepadActive;
+    m_lastDrawnNotificationText = m_notificationText;
+    m_lastDrawnTrayWidth = trayWidth;
+    m_lastDrawnClockText = clockText;
+    m_lastDrawnClockWidth = clockWidth;
 }
 
 void Bar::DrawText(

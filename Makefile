@@ -435,6 +435,16 @@ test-svgrenderer: build/test_svgrenderer
 build/test_svgrenderer: tests/test_svgrenderer.cpp src/SvgRenderer.cpp | build
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ -lX11 $(RSVG_LIBS)
 
+# Same "needs a real X11 connection, kept out of `make test`" deal
+# again - regression/performance test for the 0.20.6 audit's
+# Bar::Redraw() fix (see that file's own header comment and the
+# CHANGELOG's 0.20.6 entry).
+test-bar: build/test_bar
+	./build/test_bar
+
+build/test_bar: tests/test_bar.cpp src/Bar.cpp src/SystemTray.cpp src/Font.cpp src/Config.cpp src/XConnection.cpp src/XAtoms.cpp src/Utils.cpp src/Logger.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ $(LIBS)
+
 # Installing kohiko always installs Kohiko Settings alongside it -
 # it's part of Kohiko itself, not a separate package (see
 # include/SettingsWindow.h) - so there's no separate `install-settings`

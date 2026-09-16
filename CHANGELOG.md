@@ -1,5 +1,117 @@
 # Changelog
 
+## Version 0.20.6
+
+Release date: 2026-09-09
+
+### Performance
+
+Full performance audit of the running desktop (idle, workspace
+switching, focus, window create/close/move, launcher, settings, lock,
+network/Bluetooth tray, and more - see this session's full findings in
+`PROJECT_HISTORY.md`). Environment: single-core sandbox VM, Xvfb, real
+`kohiko` 0.20.5 with real `mock_networkmanager.py`/`mock_bluez.py`
+D-Bus backends, real PipeWire, real X11 client windows tiled by the
+BSP. `perf` was unavailable (no matching kernel package for the
+sandbox's kernel); `strace -c`/`strace -f -y`, `pidstat -t`, and
+`/proc/[pid]/stat` tick sampling were used instead.
+
+Every scenario measured except one turned out to already be
+efficient - appropriately costed for what it does, with no recurring
+or unconditional background waste. The one genuine, measured,
+**recurring** bottleneck found:
+
+- **`Bar::Redraw()` (src/Bar.cpp) unconditionally repainted the
+  *entire* bar - background fill, every workspace label,
+  scratchpad/notepad indicators, tray reposition, power button, and
+  the clock - on every single call, including the once-a-second call
+  `WindowManager::Tick()` makes purely to keep the clock's seconds
+  live.** In the idle steady state - by far the most common reason
+  `Redraw()` runs at all - everything except the clock's own digits is
+  pixel-identical to what's already on screen. `strace -f -y` on a
+  live, fully idle session confirmed one real, unconditional X11
+  round trip every second, forever, for the life of the process:
+  `poll` -> `writev` (836 bytes, a batch of queued drawing requests) ->
+  `recvmsg` (32 bytes, a reply some call in this path expects) ->
+  `recvmsg` (drain). Fixed by having `Redraw()` compare the bar's
+  current state (workspace count/active, scratchpad/notepad flags,
+  notification text, tray width, and the clock text's own pixel
+  width) against what it last actually painted; when only the clock's
+  digits differ, it repaints just the clock's own rectangle instead of
+  the whole bar. Any real change - including the bar having been
+  hidden and shown again, since X11 doesn't guarantee a plain window's
+  pixels survive an unmap/remap, and any geometry change via
+  `Configure()` - still takes the exact original full-repaint code
+  path, unmodified. Measured live, on the same running process, after
+  the fix: the idle tick's `writev` dropped from 836 bytes to 368
+  bytes (a real `strace -f -y` capture, not an estimate) - roughly
+  56% less X11 protocol traffic per idle tick. A dedicated regression
+  test (`tests/test_bar.cpp`, `test-bar`/`Bar` in the Makefile/CMake)
+  measures the same property more precisely via `XNextRequest()`'s
+  request-sequence counter: a full repaint issues on the order of
+  20-40 X11 requests; a clock-only tick against the same running bar,
+  around 11 - and confirms the fast path never engages when something
+  real changed (a workspace switch, `Hide()`+`Show()`, or a `Configure()`
+  geometry change all correctly force a full repaint on the very next
+  call). Raw CPU-tick measurements (`/proc/[pid]/stat`, 10ms
+  resolution) could not distinguish before from after in this
+  single-core sandbox - both were already below that measurement
+  floor at idle - so this is reported honestly as an X11-protocol-
+  traffic reduction, not a raw CPU-percentage one; the same
+  unconditional-wakeup pattern is a well-understood real-hardware
+  battery-life cost independent of what it registers as in a
+  synthetic single-core VM.
+- **`WallpaperManager::ApplyToRoot()` (src/WallpaperManager.cpp)
+  unconditionally re-rendered the entire root wallpaper composite on
+  every call - including a workspace switch where neither the old nor
+  new workspace has its own `wallpaper.workspace=` rule, by far the
+  common case, where the resolved wallpaper is provably identical to
+  what's already on screen.** Found independently while investigating
+  the `Bar::Redraw()` fix above - a different mechanism from the
+  0.20.5 inotify watch-recreation regression (that fix, and its tests,
+  are untouched by this one). `strace -f -y` on a live session showed
+  the wallpaper PNG mmap'd *twice* (Imlib2's own loader behavior, not
+  something this code controls) plus an 8MB-class XSHM-style buffer
+  allocated and freed, on every single workspace switch, even when
+  nothing about the resolved wallpaper actually changed. Fixed the
+  same way as `Bar::Redraw()`: `ApplyToRoot()` now compares every
+  monitor's resolved wallpaper (path, scale mode, geometry) plus the
+  overall composite size and background color against what it last
+  actually composited, and skips the decode/render entirely when
+  nothing differs. A new `forceRerender` parameter (default `false`)
+  exists for exactly one caller, `HandleWallpaperFileChanged()` -
+  `Poll()` reporting a real on-disk change means the *file's contents*
+  changed, which the resolved path/mode comparison alone can't detect
+  (it's still the same path either way), so that one call site always
+  forces a real render rather than relying on the state comparison -
+  this is what keeps live-reload (0.20.5's own fix) working correctly
+  after this change. Measured live: a workspace switch between two
+  workspaces sharing the same wallpaper dropped from 6 mmap/munmap
+  calls (2 renders' worth) to 0, confirmed via the identical
+  `strace -f -y` capture used to find the problem. A dedicated test
+  (`tests/test_wallpapermanager.cpp`'s "Skipping a genuinely redundant
+  re-render" section, 8 new checks, X11-optional/gracefully-skipped
+  like the Bar test) measures the same property via `XNextRequest()`:
+  a full render costs ~13-14 X11 requests, the skip path costs 1 (a
+  ~93% reduction) - and separately proves a genuine wallpaper change
+  and `forceRerender=true` both still force a full render every time.
+  Verified live in both directions: a real `wallpaper.workspace=`
+  override still correctly renders the different image on switching
+  to that workspace, and editing the wallpaper file in place still
+  triggers a full re-render of the new content (confirmed via the
+  mmap'd file's byte count matching the new file's actual size, not a
+  stale cache hit).
+
+Two related things were measured and deliberately left untouched,
+since neither showed a demonstrated recurring cost once the above was
+fixed - see `docs/ARCHITECTURE.md`'s "Known limitations" section for
+the full reasoning on each: `SystemTray::Reposition()` itself still
+unconditionally issues an `XMoveResizeWindow` on every call, but its
+only remaining call sites after this fix are real tray dock/undock
+events, not a per-second cost; and a literal mouse-drag window-move
+was not reliably reproducible live in this sandbox (a keyboard-driven
+BSP-relayout proxy was used instead and measured negligible cost).
+
 ## Version 0.20.5
 
 Release date: 2026-09-08

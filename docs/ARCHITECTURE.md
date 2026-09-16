@@ -370,10 +370,33 @@ own header comment for the listening-socket/fork mechanics.
 Two independent rendering paths, matching the two independent widget
 systems:
 
-- **The WM's own `Bar`** draws directly with Xlib (`XDrawString`/
-  `XFillRectangle` and friends) - no toolkit, no backing pixmap
-  abstraction beyond what Xlib itself does. See `Bar.h`'s file-level
-  comment.
+- **The WM's own `Bar`** draws with Xlib (`XftDrawString`/
+  `XFillRectangle` and friends), no toolkit - but, like `UiWindow`
+  below, into an off-screen backing `Pixmap` (`m_backing`), composited
+  onto the real window with one `XCopyArea` per redraw rather than
+  drawn on the window directly, for the same reason: no
+  intermediate blank/half-drawn frame for the X server to ever
+  actually display. See `Bar.h`'s file-level comment.
+  `WindowManager::Tick()` calls `Bar::Redraw()` once a second purely
+  to keep the clock live, in addition to whatever real state changes
+  (a workspace switch, tray icon, notification, ...) trigger it the
+  rest of the time - by far the most common reason it's called at
+  all is that once-a-second tick, where in the idle case nothing
+  else on the bar has actually changed. `Redraw()` accounts for this:
+  it compares the bar's current state (workspace count/active,
+  scratchpad/notepad flags, notification text, tray width, and the
+  clock text's own pixel width) against what it last actually painted,
+  and if only the clock's digits differ, repaints just the clock's own
+  rectangle instead of the whole bar - measured (0.20.6) to cut the
+  X11 protocol traffic of an idle tick by roughly half in bytes (836B
+  -> 368B in one `strace -f -y` capture) and by more in request count
+  (a dedicated `XNextRequest()`-based test, `tests/test_bar.cpp`,
+  measured full redraws in the low 20s-40s of X11 requests versus
+  ~11 for a clock-only tick against the same running bar). Any real
+  change - including the bar having been hidden and shown again,
+  since X11 doesn't guarantee a plain window's pixels survive an
+  unmap/remap - still takes the exact original full-repaint path.
+  See `CHANGELOG.md`'s 0.20.6 entry for the full measurement writeup.
 - **`UiWindow`** (the shared toolkit, and separately
   `kohiko-settings`'s own hand-rolled equivalent) renders to an
   off-screen `Pixmap` the same size as the window
@@ -598,3 +621,29 @@ exist for exactly that reason (see each one's own header comment).
   a *concrete* reason `kohiko-settings` needs something the toolkit
   now has (the new `TextField`, say), that's the point at which
   migrating it becomes worth reconsidering, rather than before.
+- **`SystemTray::Reposition()` still unconditionally issues an
+  `XMoveResizeWindow` on every call**, even when the tray container's
+  computed position/size are identical to last time - the same
+  "unconditional work regardless of whether anything changed" pattern
+  `Bar::Redraw()` had (0.20.6). Measured but deliberately left
+  untouched this session: `Bar::Redraw()`'s own fast path already
+  stops calling it at all on a tick where the tray's width hasn't
+  changed, which was the actual measured, unconditional, forever-
+  running cost (see `CHANGELOG.md`'s 0.20.6 entry) - the only
+  remaining call sites are on real tray-icon dock/undock events, which
+  aren't a per-second recurring cost, so a further fix here has no
+  demonstrated impact to justify it. Worth revisiting only if a future
+  profiling pass finds tray-heavy usage (many icons docking/undocking
+  in quick succession) where it actually shows up.
+- **Live reproduction of a physical mouse-drag window-move was not
+  achieved during the 0.20.6 performance audit.** Multiple `xdotool`-
+  based Super+Button1 drag attempts against this sandbox's Xvfb did
+  not reliably register (despite confirming `Super_L` is correctly
+  bound to `Mod4` via `xmodmap`, and the default `mouse.swap=SUPER+BTN1`
+  binding is exactly what `MouseManager.cpp` grabs for) before the
+  sandbox itself reset mid-session. `kohikoctl dispatch move` (a
+  keyboard-driven BSP relayout) was used as a proxy and measured
+  negligible cost, but a literal drag's per-pixel motion-event stream
+  through `EventLoop.cpp`'s motion-compression path was not
+  independently re-confirmed live. Worth a real live-hardware or more
+  stable-sandbox pass if drag performance is ever in question.

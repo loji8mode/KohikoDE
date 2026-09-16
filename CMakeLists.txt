@@ -330,6 +330,26 @@ if(Rsvg_FOUND)
     add_test(NAME SvgRenderer COMMAND test_svgrenderer)
 endif()
 
+# Same "real X11 connection, gracefully skips if $DISPLAY isn't set"
+# deal as test_monitormanager/test_svgrenderer above -
+# regression/performance test for the 0.20.6 audit's Bar::Redraw()
+# fix (see that file's own header comment and the CHANGELOG's 0.20.6
+# entry).
+add_executable(test_bar
+    tests/test_bar.cpp
+    src/Bar.cpp
+    src/SystemTray.cpp
+    src/Font.cpp
+    src/Config.cpp
+    src/XConnection.cpp
+    src/XAtoms.cpp
+    src/Utils.cpp
+    src/Logger.cpp
+)
+target_include_directories(test_bar PRIVATE ${CMAKE_SOURCE_DIR}/include ${X11_INCLUDE_DIR})
+target_link_libraries(test_bar PRIVATE ${X11_LIBRARIES} PkgConfig::Xft PkgConfig::Imlib2)
+add_test(NAME Bar COMMAND test_bar)
+
 # Pure data-structure logic (no D-Bus connection involved - see the
 # file itself), same category as test_launcherscoring/
 # test_placementhabits above.

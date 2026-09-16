@@ -369,8 +369,16 @@ WallpaperManager& WindowManager::Wallpaper()
 
 void WindowManager::HandleWallpaperFileChanged()
 {
+    // forceRerender=true: Poll() having reported a real change means
+    // the *file's contents* changed, not necessarily which path/mode
+    // ResolveFor() returns for any monitor (typically neither did,
+    // since this is the same file at the same path) - ApplyToRoot()'s
+    // own "skip if nothing resolved differently" fast path (0.20.6)
+    // would otherwise see an unchanged path/mode/geometry and
+    // incorrectly treat an actual on-disk edit as nothing to do. See
+    // ApplyToRoot()'s own comment.
     if (m_wallpaperManager.Poll())
-        m_wallpaperManager.ApplyToRoot(m_connection, m_monitors);
+        m_wallpaperManager.ApplyToRoot(m_connection, m_monitors, /*forceRerender=*/true);
 }
 
 void WindowManager::Tick()

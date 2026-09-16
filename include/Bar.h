@@ -116,6 +116,14 @@ public:
     // WindowManager event plus once a second, and unlike drawing
     // straight onto the window (this bar's original approach), the
     // window itself never shows a briefly-blank intermediate frame.
+    // That "once a second" call is what keeps the clock live even when
+    // nothing else about the bar has changed - which is by far the
+    // most common reason this gets called at all, so a call where
+    // every other part of the bar's state is provably identical to
+    // what's already on screen skips repainting (and X-flushing) the
+    // rest of the bar entirely and only touches the clock's own
+    // rectangle. See m_hasDrawnOnce's own comment for what "provably
+    // identical" is checked against and why it's safe.
     void Redraw();
 
     int Height() const;
@@ -187,6 +195,29 @@ private:
     unsigned long m_backgroundPixel = 0;
     unsigned long m_foregroundPixel = 0;
     unsigned long m_activePixel = 0;
+
+    // Everything Redraw() actually painted onto m_backing/m_window the
+    // last time it did a full repaint - compared against the current
+    // state on every call so a tick where nothing but the clock's
+    // digits changed (the overwhelming majority of ticks, while idle)
+    // can repaint just the clock's own rectangle instead of the whole
+    // bar. False/default until the first full redraw, and deliberately
+    // reset to false any time something could make the window's actual
+    // on-screen pixels stop matching this snapshot without going
+    // through a full redraw first - m_geometry changing size
+    // (Configure()) or the window having been unmapped and remapped
+    // (Show(), which - unlike m_backing, which is untouched by this -
+    // X11 doesn't guarantee preserves prior window content for). See
+    // Redraw()'s own comment for the full reasoning.
+    bool m_hasDrawnOnce = false;
+    int m_lastDrawnWorkspaceCount = 0;
+    int m_lastDrawnCurrentWorkspace = 0;
+    bool m_lastDrawnScratchpadActive = false;
+    bool m_lastDrawnNotepadActive = false;
+    std::string m_lastDrawnNotificationText;
+    int m_lastDrawnTrayWidth = 0;
+    std::string m_lastDrawnClockText;
+    int m_lastDrawnClockWidth = 0;
 
 };
 

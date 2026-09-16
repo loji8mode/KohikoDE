@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ImageRenderer.h"
+#include "Types.h"
 
 #include <X11/Xlib.h>
 
@@ -99,17 +100,46 @@ public:
     // is responsible for calling this at each of those points; this
     // class has no way to know about any of them itself. Also
     // refreshes the inotify watch set (see RefreshWatches()) to match
-    // whatever was just rendered, so a later edit to any of *these*
-    // files is still caught even if the rules themselves haven't
-    // changed since the last Configure(). RefreshWatches() itself is
-    // idempotent (see its own comment) specifically so that calling
-    // it from here on *every* ApplyToRoot() - including one Poll()
+    // whatever ResolveFor() currently returns, so a later edit to any
+    // of *these* files is still caught even if the rules themselves
+    // haven't changed since the last Configure(). RefreshWatches()
+    // itself is idempotent (see its own comment) specifically so that
+    // calling it from here unconditionally - including one Poll()
     // itself just triggered - never touches the underlying inotify
     // watches unless the set of directories that need watching has
-    // actually changed.
+    // actually changed; that part runs every single call, regardless
+    // of `forceRerender` or whether the render itself ends up skipped
+    // below.
+    //
+    // The render itself - decoding/scaling the image via Imlib2 into
+    // a full composite Pixmap and setting it as the root window's
+    // background - is skipped when every monitor's ResolveFor() result
+    // (and the overall composite size/background color) is provably
+    // identical to what's already set, since that could only ever
+    // reproduce byte-for-byte what's already on screen. A workspace
+    // switch where neither the old nor new workspace has its own
+    // wallpaper.workspace= rule - by far the common case - used to pay
+    // for a full decode+composite anyway; measured (0.20.6) at
+    // consistently mmap-ing the wallpaper file *twice* (Imlib2's own
+    // loader behavior, not something this code controls) plus an
+    // 8MB-class XSHM-style buffer allocated and freed, every single
+    // time, for output that was already correct.
+    //
+    // `forceRerender` exists for exactly one caller,
+    // HandleWallpaperFileChanged(): Poll() having reported a real
+    // change means the *file's contents* changed, which ResolveFor()'s
+    // answer (still the same path/mode string either way) can't by
+    // itself detect - so that one call site always passes true rather
+    // than relying on the state comparison, which is guaranteed to
+    // otherwise look unchanged in exactly the live-reload case this
+    // needs to keep working. See tests/test_wallpapermanager.cpp's
+    // "Skipping a genuinely redundant re-render" section for the
+    // regression coverage on both halves of this - the skip actually
+    // engaging, and forceRerender correctly bypassing it.
     void ApplyToRoot(
         XConnection& connection,
-        const MonitorManager& monitors
+        const MonitorManager& monitors,
+        bool forceRerender = false
     );
 
     bool Available() const;
@@ -172,6 +202,29 @@ private:
     std::unordered_map<int, Rule> m_workspaceRules;         // keyed by workspace id
 
     Pixmap m_currentRootPixmap = 0;
+
+    // What ApplyToRoot() last actually rendered into
+    // m_currentRootPixmap for one monitor - see that function's own
+    // comment for why this is compared against ResolveFor()'s current
+    // answer on every call.
+    struct CompositedMonitor
+    {
+        int id = -1;
+        Rect geometry;
+        std::string path;
+        ImageScaleMode mode = ImageScaleMode::Fill;
+
+        bool operator==(const CompositedMonitor& other) const
+        {
+            return id == other.id && geometry == other.geometry &&
+                path == other.path && mode == other.mode;
+        }
+    };
+
+    std::vector<CompositedMonitor> m_lastComposited;
+    int m_lastCompositedWidth = -1;
+    int m_lastCompositedHeight = -1;
+    unsigned long m_lastCompositedBackgroundColor = 0;
 
     int m_inotifyFd = -1;
 
