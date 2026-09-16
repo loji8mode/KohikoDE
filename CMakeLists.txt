@@ -579,6 +579,17 @@ add_executable(test_notificationlayout
 target_include_directories(test_notificationlayout PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME NotificationLayout COMMAND test_notificationlayout)
 
+# Regression tests for the device-connect/disconnect diffing logic -
+# extracted into DeviceNotificationDiff.h after a real field bug
+# (duplicate notifications from a sink's own monitor-source companion)
+# shipped precisely because this logic used to live inline, untested,
+# in kohiko-audio-tray.cpp. Pure logic, no X11/PipeWire dependency.
+add_executable(test_devicenotificationdiff
+    tests/test_devicenotificationdiff.cpp
+)
+target_include_directories(test_devicenotificationdiff PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME DeviceNotificationDiff COMMAND test_devicenotificationdiff)
+
 # Pure logic, no live D-Bus connection or running NetworkManager
 # needed - but still needs libdbus-1-dev to compile (links
 # DBusClient.cpp), hence gated on DBus_FOUND rather than unconditional

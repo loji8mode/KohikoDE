@@ -274,6 +274,66 @@ int main()
         Check(center.ActiveCount() == 0, "...and ActiveCount() agrees: nothing left active");
     }
 
+    std::printf("\n-- REGRESSION: NotificationCenter::Tick() itself actually removes the window from the X "
+                "SERVER, observed from a second, independent connection --\n");
+    {
+        // Same reasoning as the NotificationPopup-level regression test
+        // above, but exercised through the real production entry point
+        // (Post()/Tick()) rather than the lower-level class directly -
+        // this is the exact call sequence kohiko-audio-tray's own
+        // SetInterval()-driven timer uses.
+        Display* observerDisplay = XOpenDisplay(nullptr);
+        Check(observerDisplay != nullptr, "test setup: opened a second, independent connection to act as an observer");
+
+        NotificationCenter center;
+        center.Initialize(display, screen, root, "monospace:pixelsize=14", theme);
+
+        Rect monitor{0, 0, 1920, 1080};
+        auto shortLifetime = std::chrono::milliseconds(250);
+        center.Post("Regression check", monitor, shortLifetime);
+
+        // Find the window id NotificationCenter just created, purely
+        // for the observer to check later - HandleExpose(0) on a
+        // window we don't actually have exposed is a no-op either way,
+        // so instead we ask the observer to enumerate the root's
+        // children and diff against a before/after snapshot, which
+        // needs no access to NotificationCenter's own internals at all.
+        auto childWindows = [&](Display* d) -> std::vector<::Window>
+        {
+            ::Window rootReturn, parentReturn;
+            ::Window* children = nullptr;
+            unsigned int count = 0;
+            std::vector<::Window> result;
+            if (XQueryTree(d, root, &rootReturn, &parentReturn, &children, &count))
+            {
+                for (unsigned int i = 0; i < count; ++i)
+                    result.push_back(children[i]);
+                if (children)
+                    XFree(children);
+            }
+            return result;
+        };
+
+        XSync(display, False); // test setup only - make sure creation is visible to the observer first
+        auto withPopup = childWindows(observerDisplay);
+
+        std::this_thread::sleep_for(shortLifetime + std::chrono::milliseconds(150));
+
+        // The only thing that happens on `display` is the real
+        // production call - no XSync/XFlush of our own after it.
+        center.Tick();
+
+        auto afterExpiry = childWindows(observerDisplay);
+
+        Check(withPopup.size() == afterExpiry.size() + 1,
+              "the observer connection sees the root's child window count drop by exactly one after "
+              "NotificationCenter::Tick() expires the popup - confirming Tick() itself (the real production "
+              "entry point, not just NotificationPopup's destructor in isolation) actually removes the window "
+              "from the X server, not merely from its own internal bookkeeping");
+
+        XCloseDisplay(observerDisplay);
+    }
+
     std::printf("\n-- Multiple notifications expiring independently --\n");
     {
         NotificationCenter center;
@@ -294,12 +354,73 @@ int main()
               "and the other keeps showing - each notification's expiry is independent of the others'");
     }
 
-    std::printf("\n-- A destroyed/nonexistent window --\n");
+    std::printf("\n-- REGRESSION: a destroyed popup's window is gone from the X SERVER, not just forgotten "
+                "locally (two independent connections, matching the real kohiko-audio-tray-vs-observer topology) --\n");
+    {
+        // The real production bug this reproduces: NotificationPopup's
+        // destructor called XDestroyWindow() but never XFlush()'d.
+        // Xlib buffers requests client-side, so without an explicit
+        // flush (or some *other* Xlib call on the same connection that
+        // happens to flush as a side effect - see below) the destroy
+        // request could sit unsent indefinitely in a host process with
+        // nothing else generating X traffic - the window stayed mapped
+        // and visible forever even though NotificationCenter had
+        // already destroyed the object and forgotten about it. That is
+        // "does not disappear after 2.5 seconds" from the actual field
+        // report.
+        //
+        // A single-connection test cannot catch this: querying the
+        // *same* connection (XGetWindowAttributes, XSync, ...) flushes
+        // the very request being tested as an unavoidable side effect
+        // of making any round-trip call at all, which is exactly how
+        // the original version of this test passed in Xvfb while the
+        // real bug shipped anyway. A second, independent connection -
+        // standing in for kohiko (or xwininfo, or anything else)
+        // observing kohiko-audio-tray's windows from a different
+        // process - has no such side effect and reports what the X
+        // server actually has, which is the only thing that matters in
+        // production.
+        Display* observerDisplay = XOpenDisplay(nullptr);
+        Check(observerDisplay != nullptr, "test setup: opened a second, independent connection to act as an observer");
+
+        ::Window windowId = 0;
+
+        {
+            Kohiko::Font popupFont;
+            popupFont.Load(display, screen, "monospace:pixelsize=14");
+
+            NotificationPopup popup;
+            popup.Create(display, screen, root, popupFont, theme);
+            popup.Show("Regression check", Point{50, 50}, std::chrono::steady_clock::now() + std::chrono::seconds(5));
+            windowId = popup.WindowId();
+
+            XSync(display, False); // test setup only: make sure the *creation* is visible to the observer before we even start timing the destruction below
+            Check(WindowStillExists(observerDisplay, windowId),
+                  "test setup: the observer connection can see the window while it's still alive");
+
+            // `popup` is destroyed here, at scope exit - deliberately
+            // the *only* thing that happens on `display` between
+            // creating it and the observer's check below. No XSync/
+            // XFlush/query of any kind on `display` itself, so nothing
+            // masks a missing flush inside the destructor the way it
+            // did before.
+        }
+
+        Check(!WindowStillExists(observerDisplay, windowId),
+              "the observer connection - which never touched `display` at all - sees the window is actually gone "
+              "from the X server immediately after the owning NotificationPopup was destroyed, with no delay and "
+              "no round-trip call of the primary connection's own needed to make that true");
+
+        XCloseDisplay(observerDisplay);
+    }
+
+    std::printf("\n-- A destroyed/nonexistent window (same-connection sanity check) --\n");
     {
         Check(!WindowStillExists(display, createdWindowId),
               "the very first popup created above, whose owning NotificationPopup has since gone out of scope, "
               "was actually destroyed (not merely unmapped and forgotten) - \"do not leave orphaned windows\", "
-              "per the spec");
+              "per the spec. (Same-connection check, kept for completeness - see the two-connection regression "
+              "test above for the one that actually exercises the flush behaviour production depends on.)");
 
         NotificationCenter center;
         Check(!center.OwnsWindow(createdWindowId),

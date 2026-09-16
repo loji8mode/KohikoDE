@@ -1,5 +1,99 @@
 # Changelog
 
+## Version 0.20.10
+
+Release date: 2026-09-14
+
+### Fixed
+- **0.20.9's native notifications failed on a real, installed session in
+  three concrete ways**, reported after real-world use: the popup never
+  disappeared after 2.5 seconds, one physical device connecting/
+  disconnecting showed two toasts instead of one, and small windows
+  from before the toasts got in the way were described as still
+  hanging around. All three were investigated by actually reproducing
+  them - a real `pipewire`+`wireplumber`+`pipewire-pulse` session (not
+  a synthetic `Post()` call), a real `kohiko`/`kohiko-audio-tray`,
+  `pactl load-module module-null-sink`/`unload-module` to fire genuine
+  PipeWire registry add/remove events, and `xwininfo`/`xprop`/`ps`
+  tracked across real elapsed wall-clock time - specifically because
+  0.20.9's own Xvfb-only test pass had missed all of this.
+  **Root cause 1, "doesn't disappear after 2.5 seconds":**
+  `NotificationPopup`'s destructor called `XDestroyWindow()` but never
+  `XFlush()`'d. Xlib buffers requests client-side; `TrayIconClient::Run()`'s
+  own loop only drains/flushes the connection when its `poll()` already
+  saw incoming data on the X socket, which an idle tray process with
+  nothing else generating X traffic may simply never do again on its
+  own - the destroy request sat unsent indefinitely, so the window
+  stayed mapped and visible forever even after `NotificationCenter` had
+  already destroyed the object and forgotten about it. Confirmed live
+  with a `SetInterval()`-driven debug trace: `NotificationCenter::Tick()`
+  was firing correctly every ~100ms and correctly reached
+  `ActiveCount() == 0` right on schedule - the X *server* just never
+  found out. `Show()`/`Redraw()` already called `XFlush()` (which is
+  why creation/showing never had this problem), so `NotificationPopup`'s
+  destructor, `Hide()`, and `MoveTo()` (used when restacking after a
+  sibling expires) now do too. The original test suite missed this
+  specifically because its own verification calls (`XGetWindowAttributes()`
+  etc.) flush the connection as an unavoidable side effect of making
+  any round-trip query at all on the *same* connection as the popup -
+  masking exactly the bug being tested for. `tests/test_notificationcenter.cpp`
+  now includes two regression tests built on a second, independent X
+  connection that never touches the popup's own connection at all
+  (the same topology as `kohiko-audio-tray` vs. an external observer
+  like `kohiko`/`xwininfo` in production) - reverting the fix locally
+  and re-running confirmed these two tests do fail without it, and
+  pass with it.
+  **Root cause 2, "the notification is duplicated":** confirmed against
+  a real PipeWire session (`pactl list short sources`) that *every*
+  `Audio/Sink` node - virtual or a real headphone/USB/Bluetooth device
+  alike - automatically gets a paired `Audio/Source` "monitor"
+  companion node (PipeWire/PulseAudio's universal `<name>.monitor`
+  convention). `kohiko-audio-tray`'s device diff, added in 0.20.9,
+  treated that companion as a second, separate new device, so one
+  physical output connecting posted two "connected" toasts. Fixed by
+  filtering `.monitor`-suffixed source nodes out before anything is
+  ever diffed (`IsMonitorSource()`) - applied only in the notification-
+  specific code path, not inside `PipeWireClient` itself, so the
+  right-click device menu and every other existing consumer of
+  `PipeWireClient::Nodes()` are unaffected. The inline, ad hoc diffing
+  logic this bug lived in - previously untested, buried in
+  `kohiko-audio-tray.cpp`'s `main()` - is now `include/DeviceNotificationDiff.h`'s
+  pure, dependency-free `IsMonitorSource()`/`ComputeDeviceChanges()`,
+  with `tests/test_devicenotificationdiff.cpp` covering the exact
+  field bug directly, one-event-one-notification, repeated connect/
+  disconnect cycles (including the same physical device reconnecting
+  under a new PipeWire node id, which never reuses ids), and that an
+  unrelated `SetChangeHandler()` firing (volume, default-device swap)
+  never re-posts a stale change.
+  **"The old connect/disconnect windows are still appearing":**
+  investigated thoroughly - re-read `NotificationClient.cpp` end to
+  end (confirmed it is a pure D-Bus call with no window-creating
+  fallback of its own), re-checked every `AppInstanceLock::LaunchOrRaise()`
+  call site (confirmed manual-click-only, nothing auto-launches
+  `kohiko-audio` on a device event), and confirmed `kohiko-audio.desktop`
+  itself is not autostarted. Found no separate code path creating a
+  literal, BSP-tiled "old" window, in this codebase, before or after
+  0.20.9. The most likely explanation, given the other two confirmed
+  bugs: root cause 1 meant popups never went away, and root cause 2
+  meant they arrived in twos - together, exactly what a user plugging
+  in and unplugging a device a few times over a session would
+  reasonably describe as "old windows piling up and never being
+  replaced", without there being a distinct legacy mechanism to find
+  and remove. Both underlying bugs are now fixed; a real end-to-end
+  session (see below) shows nothing left over.
+  **Live verification** (real `pipewire`+`wireplumber`+`pipewire-pulse`,
+  real `kohiko`+`kohiko-audio-tray`, a real `xterm` window, a pre-
+  existing decoy sink standing in for a real PC's already-present sound
+  hardware so PipeWire's own sandbox-only "no hardware at all yet"
+  fallback-sink churn doesn't confound the result): connecting one
+  device produces exactly one toast, override-redirect and
+  `_NET_WM_WINDOW_TYPE_NOTIFICATION` confirmed via `xwininfo`/`xprop`,
+  `kohikoctl clients`/`tree`/`activewindow` byte-identical throughout,
+  gone by ~3.4 real seconds; disconnecting produces exactly one toast
+  with the same lifecycle; a second full connect/disconnect cycle
+  immediately after the first leaves nothing behind; final window tree
+  has no leftover or stray windows of any kind.
+
 ## Version 0.20.9
 
 Release date: 2026-09-13

@@ -1,4 +1,5 @@
 #include "AppInstanceLock.h"
+#include "DeviceNotificationDiff.h"
 #include "NotificationCenter.h"
 #include "PipeWireClient.h"
 #include "TrayIconClient.h"
@@ -60,12 +61,21 @@ IconFallback FallbackForOutput(const TrayIconClient& tray, const AudioNode* node
 // PipeWire actually reports one (the common case), falling back to
 // node.name otherwise, same "description if we have one" convention
 // the right-click menu's own device list above already follows.
+// Filters out sinks' own monitor companions (see
+// DeviceNotificationDiff.h's own IsMonitorSource() comment) before
+// anything is ever diffed - the diffing logic itself neither knows
+// nor needs to know that distinction exists.
 std::map<std::uint32_t, std::string> NodeLabels(const PipeWireClient& pw)
 {
     std::map<std::uint32_t, std::string> labels;
 
     for (auto& node : pw.Nodes())
+    {
+        if (IsMonitorSource(node.isSource, node.name))
+            continue;
+
         labels[node.id] = node.description.empty() ? node.name : node.description;
+    }
 
     return labels;
 }
@@ -157,9 +167,13 @@ int main()
         // device switches too, not just a device actually being
         // plugged in or unplugged (see PipeWireClient::SetChangeHandler()'s
         // own comment) - diffing Nodes() by id against the last known
-        // snapshot is what isolates "a device was actually connected/
-        // disconnected" from every other kind of update, so this only
-        // ever posts a toast for the specific event the spec asks for.
+        // snapshot (see DeviceNotificationDiff.h's own
+        // ComputeDeviceChanges(), which this delegates to precisely so
+        // that logic is unit-tested rather than ad hoc and untested
+        // inline here - is what isolates "a device was actually
+        // connected/disconnected" from every other kind of update, so
+        // this only ever posts a toast for the specific event the spec
+        // asks for.
         std::map<std::uint32_t, std::string> currentNodes = NodeLabels(pipewire);
 
         if (!knownNodesSeeded)
@@ -172,13 +186,11 @@ int main()
             return;
         }
 
-        for (auto& [id, label] : currentNodes)
-            if (knownNodes.find(id) == knownNodes.end())
-                notifications.Post(label + " connected", rootGeometry());
-
-        for (auto& [id, label] : knownNodes)
-            if (currentNodes.find(id) == currentNodes.end())
-                notifications.Post(label + " disconnected", rootGeometry());
+        for (auto& change : ComputeDeviceChanges(knownNodes, currentNodes))
+        {
+            const char* verb = change.kind == DeviceChangeKind::Connected ? " connected" : " disconnected";
+            notifications.Post(change.label + verb, rootGeometry());
+        }
 
         knownNodes = std::move(currentNodes);
     });

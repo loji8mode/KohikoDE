@@ -1903,3 +1903,83 @@ monitor-shaped test case, to place correctly against either.
 
 --------------------------------------------------------------------------
 
+0.20.9's own live verification passed, in the narrow sense that every
+check it ran came back green. It still shipped a version of the
+feature that failed on a real, installed session in three separate,
+concrete ways: notifications that never went away, one physical device
+producing two toasts instead of one, and small leftover windows that
+read, to a real user, as the old problem never having actually been
+fixed. The gap between "the Xvfb tests pass" and "it works" turned out
+to be exactly the gap this document has warned about before without
+this project quite landing in it this hard: 0.20.9's live verification
+used `kohikoctl notify` - `WindowManager`'s own call path - and a
+hand-written unit test that called `NotificationCenter::Tick()`
+directly in a loop. Neither one ever actually ran `kohiko-audio-tray`'s
+own production code path - a real `PipeWireClient` registry, a real
+`TrayIconClient::SetInterval()`-driven timer, a real idle process with
+nothing else generating X traffic - the one path that mattered, and
+the one path nobody had exercised end to end before calling the
+feature done.
+
+Fixing it properly this time meant building the missing piece of
+infrastructure first: a real `pipewire` + `wireplumber` + `pipewire-pulse`
+session, `pactl load-module module-null-sink`/`unload-module` to fire
+genuine PipeWire registry events instead of synthetic ones, and
+`xwininfo`/`xprop` tracked against real wall-clock time rather than an
+accelerated test clock. That's what actually found both bugs, and
+found them precisely rather than by guessing. The first - a
+`NotificationPopup` destructor that called `XDestroyWindow()` without
+ever flushing the connection - was invisible to every previous test
+for a specific, mechanical reason: any Xlib round-trip on the *same*
+connection (an `XGetWindowAttributes()` call, say) flushes as an
+unavoidable side effect of making the call at all, so a test that
+creates a popup and then immediately queries its own state back
+through the same `Display*` can never observe a missing flush - it
+flushes the very thing it's checking, by asking. The fix this time
+added a *second*, independent connection to the regression tests
+specifically so this class of bug has nowhere left to hide - and,
+because asserting a test would have caught something isn't the same
+as knowing it would have, reverting the fix locally and re-running
+those two tests was part of confirming it, not an afterthought. The
+second bug - every PipeWire sink automatically getting a paired
+".monitor" source companion that the previous release's diffing logic
+had no idea wasn't a second real device - only became visible at all
+once a real audio graph existed to look at; nothing about it could
+have been found by more careful reasoning about code that had never
+been run against one.
+
+The duplicate-notification investigation surfaced something else worth
+recording plainly: this sandbox's own WirePlumber instance, having no
+real hardware at all, maintains a fallback "Dummy Output" sink that
+gets legitimately removed the moment any other sink appears - a real,
+correct PipeWire behavior that has nothing to do with Kohiko, but which
+produced what looked at first like a second duplicate bug during
+testing here. Telling that apart from the real monitor-companion bug
+required deliberately seeding a baseline that already had a sink
+present (a stand-in for a real PC, which already has real audio
+hardware providing a default sink long before Kohiko starts) before
+measuring - a reminder that a sandbox built to reproduce a real bug can
+just as easily manufacture a fake one of its own if the environment
+itself doesn't match production closely enough, and that the fix for
+that is to notice the mismatch and account for it, not to assume every
+symptom observed must trace back to the code under test.
+
+The third reported symptom - "old device connect/disconnect windows
+still appearing" - never turned into a third bug. `NotificationClient.cpp`
+was re-read end to end and is still exactly the plain D-Bus call it
+was in 0.20.9, with no window-creating fallback of any kind; every
+`AppInstanceLock::LaunchOrRaise()` call site is still manual-click-only;
+`kohiko-audio.desktop` is still not autostarted. No separate legacy
+window-creation path was found because, as far as this investigation
+can tell, none exists - the two real bugs above were almost certainly
+sufficient on their own to produce exactly that impression: windows
+that never left, arriving in twos, over the course of an ordinary
+session of plugging things in and unplugging them. Recorded here
+rather than quietly assumed, the same as every other "investigated and
+found nothing further" conclusion in this document - a live session
+after both fixes shows nothing left over, which is the honest form
+that answer can take without inventing a mechanism just to have
+something to point at.
+
+--------------------------------------------------------------------------
+

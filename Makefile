@@ -225,7 +225,7 @@ ifeq ($(KOHIKO_HAVE_PIPEWIRE)-$(KOHIKO_HAVE_DBUS_PKG)-$(KOHIKO_HAVE_LIBRSVG),yes
     TEST_BLUETOOTHWINDOW := build/test_bluetoothwindow
 endif
 
-test: kohiko build/x11_test_client build/test_bsptree build/test_launcherscoring build/test_placementhabits build/test_dbusvalue build/test_sessionstore build/test_configmigration build/test_recoverymode build/test_lockrecovery build/test_appdirwatcher build/test_autologinconfigurator build/test_wallpapermanager build/test_desktopentry build/test_iconresolver build/test_eventloop build/test_windowplacementnotice build/test_rect_clamping build/test_notificationlayout $(TEST_NETWORKMANAGERCLIENT) $(TEST_SCROLLHITTEST) $(TEST_NETWORKWINDOW) $(TEST_NETWORKMANAGER_LIVE_HARNESS) $(TEST_BLUETOOTHWINDOW)
+test: kohiko build/x11_test_client build/test_bsptree build/test_launcherscoring build/test_placementhabits build/test_dbusvalue build/test_sessionstore build/test_configmigration build/test_recoverymode build/test_lockrecovery build/test_appdirwatcher build/test_autologinconfigurator build/test_wallpapermanager build/test_desktopentry build/test_iconresolver build/test_eventloop build/test_windowplacementnotice build/test_rect_clamping build/test_notificationlayout build/test_devicenotificationdiff $(TEST_NETWORKMANAGERCLIENT) $(TEST_SCROLLHITTEST) $(TEST_NETWORKWINDOW) $(TEST_NETWORKMANAGER_LIVE_HARNESS) $(TEST_BLUETOOTHWINDOW)
 	./build/test_bsptree
 	./build/test_launcherscoring
 	./build/test_placementhabits
@@ -243,6 +243,7 @@ test: kohiko build/x11_test_client build/test_bsptree build/test_launcherscoring
 	./build/test_windowplacementnotice
 	./build/test_rect_clamping
 	./build/test_notificationlayout
+	./build/test_devicenotificationdiff
 	sh tests/test_kohiko_session.sh
 	sh tests/test_networkmanager_live.sh
 	sh tests/test_xembed_dock_timeout.sh
@@ -380,6 +381,15 @@ build/test_rect_clamping: tests/test_rect_clamping.cpp | build
 # below - needs a real display, so it's kept out of `make test` the
 # same way test-bar/test-windowclassification/test-trayiconclient are).
 build/test_notificationlayout: tests/test_notificationlayout.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
+
+# Regression tests for the diffing logic behind device-connect/
+# disconnect notifications, extracted into DeviceNotificationDiff.h
+# after a real field bug (duplicate notifications from a sink's own
+# monitor-source companion) shipped precisely because this logic used
+# to live inline, untested, in kohiko-audio-tray.cpp. Pure logic, no
+# X11/PipeWire dependency.
+build/test_devicenotificationdiff: tests/test_devicenotificationdiff.cpp | build
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
 
 # Pure logic, no live D-Bus connection or running NetworkManager

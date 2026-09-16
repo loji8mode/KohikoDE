@@ -385,20 +385,51 @@ matters.
 `PipeWireClient::Nodes()` by id across every `SetChangeHandler()`
 firing (which also fires for volume/default-device changes, not just a
 device being plugged in or unplugged) to isolate a genuine connect/
-disconnect, and posts through its own `NotificationCenter` instance,
-ticked via a `TrayIconClient::SetInterval()` timer and repainted via a
-new, generic `TrayIconClient::SetEventHandler()` hook (routing `Expose`
-events for the popup's own window, which shares that process's one X
-connection, somewhere - see that method's own comment, and the latent
-`HandleEvent()` Expose-routing imprecision it surfaced and fixed along
-the way). `WindowManager` itself also has a working, direct call site
-(`ShowPopupNotification()`, positioning against `FocusedMonitor()`'s
-real geometry - and, over IPC, `kohikoctl notify "<text>"`) - not
-because anything internal calls it yet, but so the exact mechanism
-`kohiko-audio-tray` uses is independently, live-triggerable, and so a
-future WM-internal caller has a real, exercised entry point to build
-on rather than a theoretical one. See [Extension
+disconnect - via `DeviceNotificationDiff.h`'s pure `ComputeDeviceChanges()`
+(0.20.10; previously this diffing lived inline, untested, in
+`kohiko-audio-tray.cpp`'s own `main()`, which is exactly how a real bug
+- see below - shipped unnoticed) - and posts through its own
+`NotificationCenter` instance, ticked via a `TrayIconClient::SetInterval()`
+timer and repainted via a new, generic `TrayIconClient::SetEventHandler()`
+hook (routing `Expose` events for the popup's own window, which shares
+that process's one X connection, somewhere - see that method's own
+comment, and the latent `HandleEvent()` Expose-routing imprecision it
+surfaced and fixed along the way). `WindowManager` itself also has a
+working, direct call site (`ShowPopupNotification()`, positioning
+against `FocusedMonitor()`'s real geometry - and, over IPC, `kohikoctl
+notify "<text>"`) - not because anything internal calls it yet, but so
+the exact mechanism `kohiko-audio-tray` uses is independently, live-
+triggerable, and so a future WM-internal caller has a real, exercised
+entry point to build on rather than a theoretical one. See [Extension
 points](#extension-points) for how a *new* component should post one.
+
+**`DeviceNotificationDiff.h`** also holds `IsMonitorSource()` - every
+PipeWire `Audio/Sink` node, virtual or real hardware alike,
+automatically gets a paired `Audio/Source` "monitor" companion node
+(the universal `<name>.monitor` PipeWire/PulseAudio convention), which
+`PipeWireClient::Nodes()` itself makes no distinction for; without this
+filter, one physical device connecting posted two toasts, not one (see
+`CHANGELOG.md`'s 0.20.10 entry). Filtered only in this notification-
+specific diff, not inside `PipeWireClient` itself, so the right-click
+device menu and every other existing `Nodes()` consumer are unaffected.
+
+**A correctness requirement worth stating plainly, because it was
+missed once already**: any code that maps, moves, or - especially -
+destroys a `NotificationPopup`'s window must ensure the connection gets
+flushed (`NotificationPopup` does this itself, in its destructor,
+`Hide()`, and `MoveTo()`), because a host process that only
+drains/flushes X traffic when its own `poll()`/`select()` already saw
+incoming data (see `TrayIconClient::Run()`) may otherwise never do so
+again on its own. 0.20.9 shipped without this, so `XDestroyWindow()`
+calls sat unsent indefinitely in an idle `kohiko-audio-tray` and
+popups never actually disappeared, despite `NotificationCenter::Tick()`
+itself running and expiring them exactly on schedule - the window just
+never told the X server. It was invisible to the original test suite
+because a same-connection Xlib round-trip (`XGetWindowAttributes()`,
+`XSync()`, ...) flushes as an unavoidable side effect of the query
+itself; `tests/test_notificationcenter.cpp`'s regression tests for
+this now use a second, independent connection specifically so that
+can't happen again.
 
 **A real, known limitation**: `kohiko-audio-tray` has no
 `MonitorManager`/XRandr awareness of its own (deliberately - see [Known

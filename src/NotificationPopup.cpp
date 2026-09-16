@@ -23,7 +23,27 @@ NotificationPopup::~NotificationPopup()
         XFreeGC(m_display, m_gc);
 
     if (m_window)
+    {
         XDestroyWindow(m_display, m_window);
+
+        // Without this, the destroy request can sit in Xlib's client-
+        // side output buffer indefinitely in a host process that only
+        // drains/flushes the connection when its own poll()/select()
+        // already saw incoming data on the X socket (see
+        // TrayIconClient::Run()) - which an idle tray process, with
+        // nothing else generating X traffic, may simply never do again
+        // on its own. The window then stays mapped and visible forever
+        // even though NotificationCenter has already destroyed this
+        // object and forgotten about it - this was the actual cause of
+        // "does not disappear after 2.5 seconds" in production (it
+        // reliably worked in the test suite only because those tests
+        // immediately follow up with an Xlib round-trip of their own,
+        // e.g. XGetWindowAttributes(), which flushes as a necessary
+        // side effect and inadvertently masked this). Show()/Redraw()
+        // already flushes for the same reason, which is why showing a
+        // popup never had this problem - only tearing one down did.
+        XFlush(m_display);
+    }
 }
 
 bool NotificationPopup::Create(
@@ -142,6 +162,10 @@ void NotificationPopup::MoveTo(
     m_geometry.y = topLeft.y;
 
     XMoveWindow(m_display, m_window, m_geometry.x, m_geometry.y);
+
+    // See the destructor's own comment - an idle host process may
+    // never otherwise flush this.
+    XFlush(m_display);
 }
 
 void NotificationPopup::Hide()
@@ -150,6 +174,10 @@ void NotificationPopup::Hide()
         return;
 
     XUnmapWindow(m_display, m_window);
+
+    // See the destructor's own comment - an idle host process may
+    // never otherwise flush this.
+    XFlush(m_display);
 }
 
 void NotificationPopup::Redraw()
