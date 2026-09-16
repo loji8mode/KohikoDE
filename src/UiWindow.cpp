@@ -356,7 +356,7 @@ void UiWindow::HandleEvent(XEvent& event)
     switch (event.type)
     {
         case Expose:
-            if (event.xexpose.count == 0)
+            if (event.xexpose.count == 0 && event.xexpose.window == m_window)
                 m_dirty = true;
             break;
 
@@ -532,6 +532,9 @@ void UiWindow::Run()
                 XEvent event;
                 XNextEvent(m_display, &event);
                 HandleEvent(event);
+
+                if (m_extraEventHandler)
+                    m_extraEventHandler(event);
             }
         }
 

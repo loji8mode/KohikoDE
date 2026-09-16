@@ -223,9 +223,10 @@ ifeq ($(KOHIKO_HAVE_PIPEWIRE)-$(KOHIKO_HAVE_DBUS_PKG)-$(KOHIKO_HAVE_LIBRSVG),yes
     TEST_SCROLLHITTEST := build/test_scrollhittest
     TEST_NETWORKWINDOW := build/test_networkwindow
     TEST_BLUETOOTHWINDOW := build/test_bluetoothwindow
+    TEST_AUDIO_LIVE_DEPS := kohiko-audio kohiko-audio-tray
 endif
 
-test: kohiko build/x11_test_client build/test_bsptree build/test_launcherscoring build/test_placementhabits build/test_dbusvalue build/test_sessionstore build/test_configmigration build/test_recoverymode build/test_lockrecovery build/test_appdirwatcher build/test_autologinconfigurator build/test_wallpapermanager build/test_desktopentry build/test_iconresolver build/test_eventloop build/test_windowplacementnotice build/test_rect_clamping build/test_notificationlayout build/test_devicenotificationdiff $(TEST_NETWORKMANAGERCLIENT) $(TEST_SCROLLHITTEST) $(TEST_NETWORKWINDOW) $(TEST_NETWORKMANAGER_LIVE_HARNESS) $(TEST_BLUETOOTHWINDOW)
+test: kohiko build/x11_test_client build/test_bsptree build/test_launcherscoring build/test_placementhabits build/test_dbusvalue build/test_sessionstore build/test_configmigration build/test_recoverymode build/test_lockrecovery build/test_appdirwatcher build/test_autologinconfigurator build/test_wallpapermanager build/test_desktopentry build/test_iconresolver build/test_eventloop build/test_windowplacementnotice build/test_rect_clamping build/test_notificationlayout build/test_devicenotificationdiff $(TEST_NETWORKMANAGERCLIENT) $(TEST_SCROLLHITTEST) $(TEST_NETWORKWINDOW) $(TEST_NETWORKMANAGER_LIVE_HARNESS) $(TEST_BLUETOOTHWINDOW) $(TEST_AUDIO_LIVE_DEPS)
 	./build/test_bsptree
 	./build/test_launcherscoring
 	./build/test_placementhabits
@@ -254,6 +255,7 @@ ifeq ($(KOHIKO_HAVE_PIPEWIRE)-$(KOHIKO_HAVE_DBUS_PKG)-$(KOHIKO_HAVE_LIBRSVG),yes
 	./build/test_scrollhittest
 	./build/test_networkwindow
 	./build/test_bluetoothwindow
+	sh tests/test_audio_notification_live.sh
 endif
 
 build/test_bsptree: tests/test_bsptree.cpp src/BSPTree.cpp src/BSPLeaf.cpp src/BSPSplit.cpp src/ManagedWindow.cpp src/LayoutEngine.cpp | build

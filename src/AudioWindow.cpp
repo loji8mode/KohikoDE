@@ -104,7 +104,20 @@ bool AudioWindow::Initialize()
     if (!m_window.Create("Kohiko Audio", "kohiko-audio", kWindowWidth, kWindowHeight))
         return false;
 
-    m_notifications.Connect();
+    // Same native mechanism, same wiring, as kohiko-audio-tray's own
+    // connect/disconnect toasts (see that file's own comment) - Tick()
+    // via SetInterval() rather than a new polling loop, Expose routed
+    // via SetEventHandler() since this window's notification popups
+    // share its one X connection.
+    Display* display = m_window.GetDisplay();
+    int screen = DefaultScreen(display);
+    m_notifications.Initialize(display, screen, RootWindow(display, screen), "monospace:pixelsize=14", m_window.Theme());
+    m_window.SetInterval(100, [this] { m_notifications.Tick(); });
+    m_window.SetEventHandler([this](XEvent& event)
+    {
+        if (event.type == Expose)
+            m_notifications.HandleExpose(event.xexpose.window);
+    });
 
     m_pipewire.Connect(); // fine if this fails - RebuildPage() just shows an empty-state message, see its own comment
     m_pipewire.SetChangeHandler([this] { m_pipewireDirty = true; });
@@ -474,7 +487,7 @@ int AudioWindow::RebuildAdvancedPage(Widget& content, int contentWidth)
 
 void AudioWindow::MaybeNotifyDefaultChanged()
 {
-    if (!m_settings.GetBool("notify_default_change", false) || !m_notifications.Available())
+    if (!m_settings.GetBool("notify_default_change", false))
         return;
 
     const AudioNode* defaultOutput = nullptr;
@@ -485,7 +498,11 @@ void AudioWindow::MaybeNotifyDefaultChanged()
 
     if (m_haveSeenDefaultOutput && currentName != m_lastDefaultOutputName && !currentName.empty())
     {
-        m_notifications.Notify("Kohiko Audio", "audio-card", "Default output changed", currentName);
+        Display* display = m_window.GetDisplay();
+        int screen = DefaultScreen(display);
+        Rect screenRect{0, 0, DisplayWidth(display, screen), DisplayHeight(display, screen)};
+
+        m_notifications.Post("Default output changed to " + currentName, screenRect);
     }
 
     m_lastDefaultOutputName = currentName;

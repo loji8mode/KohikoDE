@@ -97,6 +97,19 @@ public:
     // its own to wait on.
     void SetInterval(int intervalMs, TimerCallback callback);
 
+    // Called for every X event Run()'s own loop sees, right after this
+    // window's own HandleEvent() - regardless of which window the
+    // event was actually for. Exists so a caller that creates *other*
+    // windows sharing this same Display connection (a NotificationPopup,
+    // say - see AudioWindow's own MaybeNotifyDefaultChanged(), the same
+    // reasoning TrayIconClient::SetEventHandler() documents) can still
+    // route Expose events for those windows somewhere, rather than
+    // Run()'s loop only ever knowing about this window's own m_window.
+    // A no-op (this window's own event handling is unaffected either
+    // way) until a caller sets one.
+    using EventHandler = std::function<void(XEvent&)>;
+    void SetEventHandler(EventHandler handler) { m_extraEventHandler = std::move(handler); }
+
     void RequestRedraw() { m_dirty = true; }
 
     // True while a widget is captured for a drag, or while something
@@ -205,6 +218,7 @@ private:
     std::vector<FdWatch> m_fdWatches;
     std::vector<Timer> m_timers;
     ResizeHandler m_resizeHandler;
+    EventHandler m_extraEventHandler;
 
     Atom m_wmDeleteAtom = 0;
     Atom m_wmProtocolsAtom = 0;

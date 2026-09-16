@@ -333,16 +333,20 @@ messages and was untouched by this addition; the two mechanisms
 coexist for different purposes and neither replaces the other.
 
 **Why a from-scratch native mechanism rather than the existing D-Bus
-path**: `AudioWindow`/`NetworkWindow`/`BluetoothWindow` already have a
-`NotificationClient` that calls `org.freedesktop.Notifications` over
-D-Bus - but that's a call to an *external* notification daemon, and
-Kohiko has never shipped one of its own (see `NotificationClient.h`'s
-own long-standing comment on this). `NotificationPopup`/
-`NotificationCenter` don't replace `NotificationClient` - a component
-that wants to interoperate with a real desktop-environment notification
-daemon, if the user happens to be running one, should still use it -
-but they're what a native, no-external-daemon-required Kohiko toast
-needed, and did not exist before this release. See
+path**: `NetworkWindow`/`BluetoothWindow` still have a `NotificationClient`
+that calls `org.freedesktop.Notifications` over D-Bus - but that's a
+call to an *external* notification daemon, and Kohiko has never shipped
+one of its own (see `NotificationClient.h`'s own long-standing comment
+on this). `AudioWindow` used to have one too, for its "notify when the
+default device changes" setting - removed in 0.20.11 (see below) after
+a real user correctly identified it as still running in parallel with
+the new mechanism this section describes. `NotificationPopup`/
+`NotificationCenter` don't generally replace `NotificationClient` for
+every component - `NetworkWindow`/`BluetoothWindow` are untouched, and
+a component that genuinely wants to interoperate with a real desktop-
+environment notification daemon, if the user happens to be running
+one, still can - but they're what a native, no-external-daemon-required
+Kohiko toast needed, and did not exist before 0.20.9. See
 `CHANGELOG.md`'s 0.20.9 entry for the full investigation that led here,
 including a real, general `WindowManager::Manage()` classification gap
 this closed as a side effect (no handling at all, previously, for
@@ -400,7 +404,11 @@ against `FocusedMonitor()`'s real geometry - and, over IPC, `kohikoctl
 notify "<text>"`) - not because anything internal calls it yet, but so
 the exact mechanism `kohiko-audio-tray` uses is independently, live-
 triggerable, and so a future WM-internal caller has a real, exercised
-entry point to build on rather than a theoretical one. See [Extension
+entry point to build on rather than a theoretical one. `AudioWindow`
+(`kohiko-audio`) also owns its own instance (0.20.11 - see below),
+ticked via a new `UiWindow::SetInterval()`/`SetEventHandler()` pair
+(mirroring `TrayIconClient`'s own), for its "notify when the default
+device changes" setting. See [Extension
 points](#extension-points) for how a *new* component should post one.
 
 **`DeviceNotificationDiff.h`** also holds `IsMonitorSource()` - every
@@ -430,6 +438,28 @@ because a same-connection Xlib round-trip (`XGetWindowAttributes()`,
 itself; `tests/test_notificationcenter.cpp`'s regression tests for
 this now use a second, independent connection specifically so that
 can't happen again.
+
+**The actual "old device connect/disconnect windows" mechanism
+(0.20.11)**: after 0.20.10 shipped, a real user correctly rejected the
+conclusion that the old UI was merely the visual effect of the
+duplicate/expiry bugs above. It wasn't - `AudioWindow::
+MaybeNotifyDefaultChanged()` had been left calling `NotificationClient::Notify()`
+(the D-Bus path described above) the entire time, gated behind a real,
+persistently-toggleable "notify when the default device changes"
+setting in Kohiko Audio's own settings page. Anyone who had switched
+that on, at any point in the feature's history, would see an external,
+unclassified window from whatever notification daemon their session
+happened to be running - running in parallel with the very mechanism
+this section describes, exactly the thing "do not leave the old
+mechanism running in parallel" warns against. Fixed by giving
+`AudioWindow` its own `NotificationCenter` instead, same as
+`kohiko-audio-tray`'s. Verified with a real third-party daemon (`dunst`)
+registered on a real session bus and a real `dbus-monitor` recording
+every method call for the whole session - not just an Xvfb window-tree
+check, which is what let this slip through 0.20.10's own verification -
+confirming zero `Notify` calls happen with the setting on and a real
+device/default-output-change cycle exercised. `tests/test_audio_notification_live.sh`
+keeps this dbus-monitor check as a permanent regression test.
 
 **A real, known limitation**: `kohiko-audio-tray` has no
 `MonitorManager`/XRandr awareness of its own (deliberately - see [Known

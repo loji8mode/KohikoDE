@@ -661,6 +661,18 @@ if(KOHIKO_DESKTOP_APPS_AVAILABLE)
     target_include_directories(test_bluetoothwindow PRIVATE ${CMAKE_SOURCE_DIR}/include)
     target_link_libraries(test_bluetoothwindow PRIVATE kohiko-desktop-shared)
     add_test(NAME BluetoothWindow COMMAND test_bluetoothwindow)
+
+    # Live regression test for the 0.20.10/0.20.11 native-notification
+    # production bugs and the removal of the old D-Bus notification
+    # path (see CHANGELOG.md) - runs the real kohiko/kohiko-audio-tray/
+    # kohiko-audio binaries against a real pipewire+wireplumber session,
+    # gracefully skipped by the script itself if any of that optional
+    # runtime infrastructure isn't available.
+    add_test(
+        NAME AudioNotificationLive
+        COMMAND sh ${CMAKE_SOURCE_DIR}/tests/test_audio_notification_live.sh
+            $<TARGET_FILE:kohiko> $<TARGET_FILE:kohiko-audio-tray> $<TARGET_FILE:kohiko-audio>
+    )
 endif()
 
 # Shell-script regression test for scripts/kohiko-session - no

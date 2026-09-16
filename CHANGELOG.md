@@ -1,5 +1,74 @@
 # Changelog
 
+## Version 0.20.11
+
+Release date: 2026-09-15
+
+### Fixed
+- **The actual "old device connect/disconnect windows" mechanism,
+  found and removed** - after 0.20.10 shipped, a real user reported the
+  old UI was still appearing, and specifically that it was not merely
+  the visual effect of the duplicate/expiry bugs 0.20.10 fixed. That
+  correction was right: `AudioWindow::MaybeNotifyDefaultChanged()`
+  (the "Notify when the default device changes" toggle in Kohiko
+  Audio's settings, opt-in but real and persistently stored once
+  switched on) had been left completely untouched through both 0.20.9
+  and 0.20.10, still calling `NotificationClient::Notify()` - a D-Bus
+  method call to `org.freedesktop.Notifications`, an external daemon
+  Kohiko doesn't ship or control the window classification of. Whatever
+  third-party notification daemon a real user's session happens to be
+  running renders that call however it renders any notification, with
+  no guarantee it's override-redirect or correctly typed - exactly "an
+  old, normal X11 window" from Kohiko's own point of view, running in
+  parallel with the new, native `NotificationCenter` mechanism this
+  whole feature was supposed to replace it with. This was found by
+  re-reading every caller of `NotificationClient` across the codebase
+  from scratch (not stopping at `NotificationClient.cpp` itself, which
+  was correctly cleared of blame in 0.20.10 but is not the only place
+  that matters) and specifically re-checking `AudioWindow.cpp`'s own
+  settings page for a toggle that could make an already-known code path
+  actually fire in a way the previous investigation had reasoned past.
+  Fixed by replacing the call with the same native `NotificationCenter`
+  class `kohiko-audio-tray` already uses - `AudioWindow` (`kohiko-audio`)
+  now owns its own instance, sharing its own X connection/theme, ticked
+  via `UiWindow::SetInterval()` (a new method, mirroring
+  `TrayIconClient::SetInterval()`) and repainted via a new
+  `UiWindow::SetEventHandler()` hook (mirroring
+  `TrayIconClient::SetEventHandler()`, including the same latent
+  `HandleEvent()` Expose-routing imprecision that class's own 0.20.10
+  fix already covers, now fixed here too since `UiWindow` shares the
+  identical structure). The "notify on default change" setting/toggle
+  itself is unchanged - same key, same UI, same trigger condition -
+  only the presentation mechanism underneath it changed, from an
+  external, uncontrolled D-Bus call to Kohiko's own consistent native
+  toast.
+  **Verified live**, not merely by an Xvfb window-tree check: a real
+  `dunst` (a genuine, independent, third-party notification daemon,
+  not Kohiko's own code) registered on a real session D-Bus, alongside
+  a `dbus-monitor` recording every method call on that bus for the
+  entire session. With "notify_default_change" explicitly enabled and
+  a real device connect/disconnect/default-output-change cycle
+  exercised against real `pipewire`+`wireplumber`, zero
+  `org.freedesktop.Notifications.Notify` calls were made and dunst's
+  own log shows zero notification activity - the old mechanism is
+  provably inert, not merely unlikely to fire. `tests/test_audio_notification_live.sh`
+  (new, following the established `test_xembed_dock_timeout.sh`/
+  `test_networkmanager_live.sh` shell-script-integration-test
+  convention, gracefully skipped if the required optional runtime
+  tools aren't available) makes this a permanent regression test: a
+  real `kohiko`+`kohiko-audio-tray`+`kohiko-audio` session against real
+  `pipewire`+`wireplumber`, confirming one connect and one disconnect
+  each produce exactly one new, override-redirect,
+  `_NET_WM_WINDOW_TYPE_NOTIFICATION`-typed window that actually expires
+  (checked by that specific window's own id, not by a fragile total-
+  window-count comparison - `kohiko-audio`'s own UI has legitimate,
+  unrelated internal window churn as it settles against PipeWire, which
+  a naive count comparison flagged as a false failure during this fix's
+  own testing), that zero Kohiko-notification-typed windows are ever
+  left orphaned, and - the actual regression - zero
+  `org.freedesktop.Notifications.Notify` calls at any point, including
+  with the setting on and a forced default-output change.
+
 ## Version 0.20.10
 
 Release date: 2026-09-14

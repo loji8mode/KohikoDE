@@ -1983,3 +1983,45 @@ something to point at.
 
 --------------------------------------------------------------------------
 
+That last conclusion was wrong, and a real user was right to reject it.
+The old UI was not the perceptual residue of the other two bugs - it
+was a third, real, findable mechanism that a "no separate legacy path
+exists" conclusion had stopped one step short of. The mistake wasn't
+the investigation's thoroughness in general; `NotificationClient.cpp`
+really had been read end to end, and it really doesn't create a window
+of its own. The mistake was treating "I checked the D-Bus client class
+itself and it's clean" as equivalent to "I checked every caller of it
+thoroughly enough" - `AudioWindow::MaybeNotifyDefaultChanged()` had
+been on the list from the very first 0.20.9 investigation, quoted
+almost verbatim in that release's own reasoning, and then reasoned past
+with a justification that made sense in isolation and was wrong in
+context: that an opt-in, off-by-default D-Bus call was "legitimate
+interop with an external DE" and therefore not this feature's problem
+to solve. It is not off by default in the way that mattered - it is
+off until a real user switches it on, which a real audio-focused user
+investigating exactly this class of notification behavior is a
+plausible enough person to have done, at any point in the feature's
+history, long before 0.20.9 existed to compare against. Once switched
+on, it is exactly the mechanism the original bug report described: an
+external, unclassified window, rendered by whatever notification
+daemon a real session happens to be running, appearing on device
+events, entirely independent of anything 0.20.9 or 0.20.10 touched.
+
+Finding it this time took writing down, explicitly, the set of things
+"no old mechanism was found" actually meant to rule out - not code that
+creates a window on a device event, but code that *causes* a window to
+appear on a device event, however indirectly - and re-checking each of
+those literally rather than by memory of having looked before. It also
+took proving the negative properly rather than asserting it: a real
+`dunst` instance, a real third-party notification daemon with no
+Kohiko code in it at all, registered on a real session bus, with a real
+`dbus-monitor` watching every method call for the length of the test -
+so that "the old mechanism is gone" is a claim backed by watching for
+the one thing that would prove it wasn't, not by the absence of a
+window in a screenshot. `tests/test_audio_notification_live.sh` keeps
+that same dbus-monitor check permanently, specifically because a
+window-tree snapshot alone - as this exact investigation kept
+discovering - is never quite strong enough evidence on its own.
+
+--------------------------------------------------------------------------
+

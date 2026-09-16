@@ -2,7 +2,7 @@
 
 #include "AppConfigStore.h"
 #include "AppInstanceLock.h"
-#include "NotificationClient.h"
+#include "NotificationCenter.h"
 #include "PipeWireClient.h"
 #include "UiScrollView.h"
 #include "UiWindow.h"
@@ -62,7 +62,18 @@ private:
     PipeWireClient m_pipewire;
     AppInstanceLock m_instanceLock;
     AppConfigStore m_settings;
-    NotificationClient m_notifications;
+
+    // The "old mechanism" (0.20.10) - used to be a NotificationClient
+    // calling org.freedesktop.Notifications over D-Bus, an external
+    // daemon Kohiko doesn't ship or control the window classification
+    // of (see NotificationClient.h's own comment). Now the exact same
+    // native NotificationCenter class kohiko-audio-tray uses for its
+    // own connect/disconnect toasts, so "Notify when the default
+    // device changes" (see RebuildAdvancedPage()'s toggle - the
+    // setting/behavior itself is unchanged) reads as one consistent
+    // Kohiko-native notification, not two different mechanisms
+    // depending on which app happens to notice the change first.
+    NotificationCenter m_notifications;
 
     Page m_page = Page::Main;
     ScrollView* m_scrollView = nullptr;
