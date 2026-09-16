@@ -3,6 +3,7 @@
 
 #include <X11/Xatom.h>
 #include <X11/Xutil.h>
+#include <X11/keysym.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -109,8 +110,43 @@ void UiWindow::ResizeBacking(int width, int height)
 
 void UiWindow::SetRoot(std::unique_ptr<Widget> root)
 {
+    ClearFocus();
+    m_pressedWidget = nullptr;
+
+    // See ScrollView::SetContent()'s comment for why this can't just
+    // be `m_root = std::move(root);` - RebuildChrome()-style callers
+    // can end up here from inside a widget callback that's part of
+    // the very tree m_root points at.
+    m_retiredRoot.reset();
+    m_retiredRoot = std::move(m_root);
+
     m_root = std::move(root);
     m_dirty = true;
+}
+
+void UiWindow::SetFocus(Widget* widget)
+{
+    if (widget == m_focusedWidget)
+        return;
+
+    if (m_focusedWidget)
+        m_focusedWidget->OnBlur();
+
+    m_focusedWidget = (widget && widget->WantsFocus()) ? widget : nullptr;
+
+    if (m_focusedWidget)
+        m_focusedWidget->OnFocus();
+
+    m_dirty = true;
+}
+
+void UiWindow::ClearFocus()
+{
+    if (m_focusedWidget)
+    {
+        m_focusedWidget->OnBlur();
+        m_focusedWidget = nullptr;
+    }
 }
 
 void UiWindow::WatchFd(int fd, FdCallback callback)
@@ -320,8 +356,51 @@ void UiWindow::HandleEvent(XEvent& event)
 
             bool hit = false;
             m_pressedWidget = HitTest(m_root.get(), p, hit);
+
+            // A click moves keyboard focus: to the pressed widget if
+            // it accepts focus (see TextField), otherwise away from
+            // whatever had it before - the same "click outside a text
+            // field to leave it" behaviour as any other text input.
+            SetFocus(m_pressedWidget);
+
             if (m_pressedWidget)
                 m_pressedWidget->OnPress(p);
+            m_dirty = true;
+            break;
+        }
+
+        case KeyPress:
+        {
+            if (!m_focusedWidget)
+                break;
+
+            char buffer[32];
+            KeySym keysym = NoSymbol;
+            int len = XLookupString(&event.xkey, buffer, sizeof(buffer) - 1, &keysym, nullptr);
+
+            switch (keysym)
+            {
+                case XK_BackSpace: m_focusedWidget->OnKeyInput(KeyAction::Backspace); break;
+                case XK_Delete:    m_focusedWidget->OnKeyInput(KeyAction::Delete); break;
+                case XK_Return:
+                case XK_KP_Enter:  m_focusedWidget->OnKeyInput(KeyAction::Enter); break;
+                case XK_Escape:    m_focusedWidget->OnKeyInput(KeyAction::Escape); break;
+                case XK_Left:      m_focusedWidget->OnKeyInput(KeyAction::Left); break;
+                case XK_Right:     m_focusedWidget->OnKeyInput(KeyAction::Right); break;
+                case XK_Home:      m_focusedWidget->OnKeyInput(KeyAction::Home); break;
+                case XK_End:       m_focusedWidget->OnKeyInput(KeyAction::End); break;
+
+                default:
+                    // Anything XLookupString resolved to a printable
+                    // byte sequence (letters, digits, punctuation,
+                    // space, ...) - control characters below 0x20
+                    // (other than the named keys above) are ignored
+                    // rather than inserted as literal bytes.
+                    if (len > 0 && static_cast<unsigned char>(buffer[0]) >= 0x20)
+                        m_focusedWidget->OnKeyInput(KeyAction::Printable, std::string(buffer, len));
+                    break;
+            }
+
             m_dirty = true;
             break;
         }

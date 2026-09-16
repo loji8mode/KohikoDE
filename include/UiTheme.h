@@ -19,14 +19,14 @@ namespace Kohiko
 // without changing anything that reads from it.
 struct UiTheme
 {
-    std::uint32_t background = 0x1e1e24;
-    std::uint32_t surface = 0x282830;
-    std::uint32_t surfaceHover = 0x32323c;
-    std::uint32_t surfaceActive = 0x3c3c48;
-    std::uint32_t border = 0x3a3a44;
+    std::uint32_t background = 0x121318;
+    std::uint32_t surface = 0x1a1b22;
+    std::uint32_t surfaceHover = 0x22232c;
+    std::uint32_t surfaceActive = 0x2a2b36;
+    std::uint32_t border = 0x25262f;
     std::uint32_t foreground = 0xe8e8ec;
     std::uint32_t muted = 0x9a9aa4;
-    std::uint32_t accent = 0x5b8cff;
+    std::uint32_t accent = 0x7c5cf0;
     std::uint32_t accentForeground = 0xffffff;
     std::uint32_t danger = 0xe0554f;
     std::uint32_t success = 0x4fbf7a;

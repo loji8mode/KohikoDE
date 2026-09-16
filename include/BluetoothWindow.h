@@ -5,26 +5,28 @@
 #include "BluezClient.h"
 #include "NotificationClient.h"
 #include "UiScrollView.h"
-#include "UiSidebar.h"
 #include "UiWindow.h"
 
 namespace Kohiko
 {
 
-// kohiko-bluetooth's top-level app class. A single "Devices" page for
-// now (see RebuildPage()) - the Sidebar exists anyway (rather than a
-// bare header+list) so the spec's own "future additions" (BLE tools,
-// file transfer, audio codec information, advanced adapter
-// configuration) each become one more Sidebar entry later without
-// reshaping the window itself, the same reasoning AudioWindow's and
-// NetworkWindow's Sidebars already follow.
+// kohiko-bluetooth's top-level app class - a single page (toolbar,
+// CONNECTED DEVICES and NEARBY DEVICES lists, and a details panel for
+// whichever device is selected) matching the Kohiko Bluetooth
+// mockup, backed entirely by BluezClient. Per-device Trust isn't part
+// of that mockup (the details panel only ever *shows* "Trusted: Yes/
+// No", it's not a control there), so - same as the other two apps -
+// it lives on a second Advanced Settings page reached via the link at
+// the bottom, rather than being dropped (see RebuildAdvancedPage()).
 //
-// Paired/connected devices get a full-width card each (richer -
-// battery, trust, remove); devices still available to pair are more
-// homogeneous "tap to pair" tiles, so those go in a responsive grid
-// (1-3 columns depending on width and count) instead, the same
-// "list vs. grid depending on how much a row needs to show" split
-// AudioWindow's device cards and NetworkWindow's Wi-Fi rows both make.
+// "Connected" and "Nearby" are drawn straight from
+// BluetoothDevice::connected - the first section is every device
+// BlueZ currently reports as connected, the second is everything else
+// it knows about (paired-but-out-of-range devices and not-yet-paired
+// ones discovered by scanning alike). The device list and its details
+// panel sit side by side once the window is wide enough and stack
+// into a single column otherwise, the same responsive shape
+// NetworkWindow's Wi-Fi list/details split uses.
 //
 // Pairing/connecting to a Bluetooth device is a genuinely slow,
 // blocking D-Bus call (BluezClient::PairDevice()/ConnectDevice() use
@@ -46,11 +48,29 @@ public:
 
 private:
 
+    enum class Page { Main, Advanced };
+
     void RebuildChrome();
     void RebuildPage();
+    int RebuildMainPage(Widget& content, int contentWidth);
+    int RebuildAdvancedPage(Widget& content, int contentWidth);
 
-    std::unique_ptr<Widget> BuildPairedDeviceCard(const BluetoothDevice& device, const std::string& adapterPath, int width);
-    std::unique_ptr<Widget> BuildAvailableDeviceCard(const BluetoothDevice& device, int width);
+    int AppendToolbar(Widget& content, int y, int contentWidth);
+
+    // Appends the CONNECTED DEVICES and NEARBY DEVICES cards, plus
+    // (once there's a selection) the details panel - side by side or
+    // stacked depending on `contentWidth`, the same split
+    // NetworkWindow's network list/details uses. Returns the y
+    // position just past whichever ends up lower.
+    int AppendDeviceSection(Widget& content, int y, int contentWidth);
+
+    std::unique_ptr<Widget> BuildDeviceRow(const BluetoothDevice& device, const Rect& rowBounds, bool showDivider);
+    std::unique_ptr<Widget> BuildDetailsPanel(const BluetoothDevice& device, const std::string& adapterPath, const Rect& panelBounds);
+
+    // Picks a sensible selected device after every rebuild: keeps the
+    // current selection if it still exists, otherwise falls back to
+    // the first connected device, otherwise the first device overall.
+    void EnsureSelection(const std::vector<BluetoothDevice>& devices);
 
     UiWindow m_window;
     BluezClient m_bluez;
@@ -58,10 +78,12 @@ private:
     AppConfigStore m_settings;
     NotificationClient m_notifications;
 
-    Sidebar* m_sidebar = nullptr;
+    Page m_page = Page::Main;
     ScrollView* m_scrollView = nullptr;
 
     bool m_bluezDirty = false;
+
+    std::string m_selectedDevicePath;
 };
 
 }

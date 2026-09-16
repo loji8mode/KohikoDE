@@ -30,6 +30,21 @@ public:
     // kohiko-network's read-only "currently connected" summary row).
     bool selected = false;
 
+    // Mockup-style row: no rounded card of its own, just a thin
+    // bottom divider and (when selected) a flat highlight plus a
+    // left accent bar, meant to sit packed edge-to-edge inside a
+    // shared Card alongside sibling rows - see e.g. kohiko-network's
+    // AVAILABLE NETWORKS list or kohiko-audio's OUTPUT DEVICES list.
+    // false keeps the original look (its own rounded surface/
+    // surfaceActive background, no divider) for anything still using
+    // ListRow as a standalone card.
+    bool flat = false;
+
+    // Only meaningful when flat - the caller sets this false on the
+    // last row of a group so the enclosing Card's own bottom border
+    // is the only line there, rather than doubling up.
+    bool showDivider = true;
+
     std::function<void()> onClick;
 
     // Positions this row within `rowBounds`; if `trailing` is given,
@@ -46,8 +61,23 @@ public:
 
 private:
 
-    Rect m_iconRect;
-    Rect m_textRect;
+    // Icon/text position and size relative to bounds.x/y - not
+    // absolute Rects - computed once in Layout() and turned back into
+    // real Rects fresh in every Draw()/hit-test by adding the
+    // *current* bounds.x/y. This is what keeps them correct if bounds
+    // ever moves after Layout() (e.g. ScrollView::SetContent()
+    // translating a freshly-built page into place) without needing
+    // every such move to also know how to update a row's internal
+    // layout state.
+    bool m_hasIcon = false;
+    int m_iconOffsetX = 0;
+    int m_iconOffsetY = 0;
+    int m_iconSize = 0;
+
+    int m_textOffsetX = 0;
+    int m_textOffsetY = 0;
+    int m_textWidth = 0;
+    int m_textHeight = 0;
 };
 
 }

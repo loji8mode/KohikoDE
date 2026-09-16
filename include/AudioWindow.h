@@ -5,32 +5,30 @@
 #include "NotificationClient.h"
 #include "PipeWireClient.h"
 #include "UiScrollView.h"
-#include "UiSidebar.h"
 #include "UiWindow.h"
 
 namespace Kohiko
 {
 
-// kohiko-audio's own top-level app class - the permanent audio
-// control center the spec asks for. Two pages (Output/Input) picked
-// from a Sidebar; each page is a page header, a live level meter
-// card, a responsive grid of device cards, and an options card -
-// laid out to actually use a wide window's width (a 1- or 2-column
-// device grid depending on available space and device count, see
-// RebuildDeviceGrid()) rather than a single narrow column stretched
-// across it.
+// kohiko-audio's own top-level app class - a single scrollable page
+// (Output Devices card, Input Devices card, Advanced Settings link)
+// matching the Kohiko Audio mockup, backed entirely by
+// PipeWireClient::Nodes(). The level meters and the "notify on
+// default change" option aren't part of that mockup, so they - along
+// with everything else that isn't - live on a second Advanced
+// Settings page reached via the link at the bottom, rather than being
+// dropped (see RebuildAdvancedPage()).
 //
-// "Future-ready architecture": every device card is built from
-// PipeWireClient::Nodes() alone, so a future page (per-app volume,
-// equalizer, ...) is just another Sidebar entry and another
-// RebuildXPage()-shaped method - nothing about the window shell,
-// PipeWireClient, or the Output/Input pages needs to change to add
-// one. Likewise, the whole page reflows from scratch on every resize
-// (see UiWindow::SetResizeHandler()) rather than assuming whatever
-// width the window opened at, so a tiled half-screen window, a
-// maximized window, and an ultra-wide monitor all get a layout suited
-// to their own size instead of the same fixed one stretched or
-// clipped to fit.
+// Every device row reflows itself between a single-line layout (icon,
+// name, badge, percent, slider, mute button, all in one row) and a
+// two-line one (name/badge on top, slider/percent/mute below) once
+// the window gets too narrow for the single-line shape to stay
+// legible - see BuildDeviceRow(). The whole page reflows from scratch
+// on every resize (see UiWindow::SetResizeHandler()) rather than
+// assuming whatever width the window opened at, and content width is
+// capped and centered past a comfortable reading width so a
+// fullscreen/ultra-wide window gains breathing room instead of
+// stretched, ever-wider rows.
 class AudioWindow
 {
 public:
@@ -42,14 +40,21 @@ public:
 
 private:
 
-    enum class Page { Output, Input };
+    enum class Page { Main, Advanced };
 
     void RebuildChrome();
     void RebuildPage();
+    int RebuildMainPage(Widget& content, int contentWidth);
+    int RebuildAdvancedPage(Widget& content, int contentWidth);
 
-    std::unique_ptr<Widget> BuildMeterCard(bool isSource, int width);
-    std::unique_ptr<Widget> BuildDeviceCard(const AudioNode& node, int width);
-    std::unique_ptr<Widget> BuildOptionsCard(int width);
+    // Appends one "SECTION HEADER" + card-of-rows group (Output
+    // Devices or Input Devices) to `content`, starting at `y`
+    // (already absolute-in-content), and returns the y position just
+    // past it.
+    int AppendDeviceSection(Widget& content, int y, int contentWidth, const std::string& headerText, bool wantSource);
+
+    std::unique_ptr<Widget> BuildDeviceRow(const AudioNode& node, const Rect& rowBounds, bool narrow, bool showDivider);
+    std::unique_ptr<Widget> BuildMeterCard(bool isSource, const Rect& cardBounds);
 
     void MaybeNotifyDefaultChanged();
 
@@ -59,8 +64,7 @@ private:
     AppConfigStore m_settings;
     NotificationClient m_notifications;
 
-    Page m_currentPage = Page::Output;
-    Sidebar* m_sidebar = nullptr;
+    Page m_page = Page::Main;
     ScrollView* m_scrollView = nullptr;
 
     bool m_pipewireDirty = false;
@@ -75,4 +79,3 @@ private:
 };
 
 }
-

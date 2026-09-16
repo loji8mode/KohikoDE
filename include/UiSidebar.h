@@ -43,8 +43,13 @@ public:
 private:
 
     std::vector<Item> m_items;
-    std::vector<Rect> m_itemRects;
     int m_selected = 0;
+    int m_rowHeight = 44;
+
+    // Item i's Rect, computed from the *current* bounds rather than
+    // cached at Layout() time - see ListRow's identical fix and its
+    // longer comment for why that matters.
+    Rect ItemRect(std::size_t index) const;
 };
 
 }

@@ -17,18 +17,47 @@ void ScrollView::Translate(Widget* widget, int dx, int dy)
 
 void ScrollView::SetContent(std::unique_ptr<Widget> content)
 {
-    ClearChildren();
+    // The content retired by the *previous* SetContent() call is only
+    // actually freed now, at the start of a fresh call - never
+    // immediately when it stops being current. SetContent() is
+    // typically invoked from inside a click/keypress callback
+    // belonging to a widget *in* the tree being replaced (a row's
+    // onClick calling straight back into RebuildPage(), say) -
+    // destroying that widget (and the std::function currently
+    // executing on its behalf) while its own call stack is still
+    // unwinding is a real use-after-free in practice, not just in
+    // theory (caught by AddressSanitizer during development). Deferring
+    // the actual free to the next call - by which point we're always
+    // back at the top of a fresh, unrelated event - avoids that
+    // without requiring every onClick/onChange call site to know to
+    // defer anything itself.
+    m_retiredContent.reset();
+
+    if (m_content)
+        m_retiredContent = ReleaseChild(m_content);
+
     m_scrollOffset = 0;
 
-    // Callers set ScrollView::bounds before calling this (see the
-    // header comment) - content starts pinned to that same top-left
-    // corner and width, keeping only the height the caller already
-    // computed.
-    content->bounds.x = bounds.x;
-    content->bounds.y = bounds.y;
+    // Callers build `content` using local coordinates starting at
+    // (0, 0) - see e.g. AudioWindow::RebuildPage() - on the
+    // assumption that (0, 0) is this ScrollView's own top-left.
+    // Reconcile the two coordinate spaces in one place: shift
+    // `content` itself AND every descendant (rows, cards, sliders,
+    // ...) by this ScrollView's actual on-screen position, the same
+    // way scrolling later re-shifts everything by the wheel offset.
+    // (Previously only `content`'s own bounds were pinned here, which
+    // left every child still sitting at its original local (0, 0)-
+    // relative position - i.e. rendered at the window's absolute
+    // top-left instead of inside this ScrollView.)
+    const int dx = bounds.x - content->bounds.x;
+    const int dy = bounds.y - content->bounds.y;
+
     content->bounds.width = bounds.width;
 
     m_content = AddChild(std::move(content));
+
+    if (dx != 0 || dy != 0)
+        Translate(m_content, dx, dy);
 }
 
 void ScrollView::Draw(UiWindow& window)

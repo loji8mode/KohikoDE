@@ -1,7 +1,7 @@
 # Kohiko Project History
 
 This document traces the evolution of Kohiko, a C++20 / X11 tiling window
-manager, across its released versions from 0.1.0 through 0.19.0. It is
+manager, across its released versions from 0.1.0 through 0.19.2. It is
 derived from a direct comparison of the source, configuration, and
 documentation of each released version against the one before it.
 
@@ -428,9 +428,74 @@ binaries" instead of "skip one feature inside an existing binary".
 
 --------------------------------------------------------------------------
 
+## Phase 11 — Desktop Integration Redesign and Toolkit Hardening (0.19.1 - 0.19.2)
+
+**Versions:** 0.19.1, 0.19.2
+
+**Goals:**
+Take the three apps Phase 10 introduced from "functional, backed by
+the right services" to "matches a specific visual design", without
+touching any of the backend clients Phase 10 built - and, along the
+way, harden the one-phase-old shared UI toolkit against bugs that
+heavier use of it exposed.
+
+**Major developments:**
+- 0.19.1 was a first layout pass: the original single-column stacked
+  rows became a responsive card/grid layout (1-3 columns depending on
+  width), full-width page headers, and a growing Ethernet info grid -
+  plus `UiWindow::SetResizeHandler()`, since until this release only
+  the backing pixmap resized and a tiled or maximized window kept
+  whatever layout it opened with.
+- 0.19.2 replaced each app's main page again, this time to match a
+  supplied visual mockup closely rather than an original design: flat
+  divided-row lists inside one bordered `Card` (replacing the grid of
+  separate cards 0.19.1 had just introduced), a violet accent
+  replacing the previous blue, a live-filtering `TextField` search
+  field in `kohiko-network` (the toolkit's first real text-input
+  widget, with its own keyboard-focus system added to `UiWindow`), and
+  a selected-item details panel in `kohiko-network`/`kohiko-bluetooth`
+  sitting beside their list above ~720px content width. Anything the
+  new mockups didn't have room for (level meters, Ethernet/VPN
+  management, per-device Bluetooth trust) moved to a new per-app
+  "Advanced Settings" sub-page rather than being dropped, and every
+  page's responsive floor dropped to a genuinely usable ~420px.
+- Four bugs were found and fixed in the shared toolkit itself during
+  0.19.2, none specific to any one app: `ScrollView::SetContent()`
+  never actually translated its content into position (latent since
+  0.19.1's resize work, only surfaced by 0.19.2's heavier `ScrollView`
+  use); `ListRow`/`Sidebar` cached icon/text layout as absolute rects
+  that went stale once the above was fixed and content started
+  actually moving; a widget whose own callback synchronously rebuilt
+  its containing page could destroy itself mid-callback (fixed with a
+  one-generation-deferred destruction scheme in `ScrollView` and
+  `UiWindow`, plus a new `Widget::ReleaseChild()`); and the `Makefile`
+  never tracked header dependencies, so an incremental rebuild after
+  editing a shared header could silently link stale and fresh object
+  code together. See `docs/ARCHITECTURE.md` and `CHANGELOG.md` for the
+  full detail on each.
+
+**Lessons visible from the repository:**
+This phase is the first to substantially rework UI Phase 10 had *just*
+shipped, rather than build net-new surface - and the bugs it found were
+all latent in Phase 10's original toolkit code, not introduced by the
+redesign itself, just never exercised by that phase's lighter,
+scroll/callback-light original layouts. The general shape - a new
+capability (heavier `ScrollView` usage, a real text-input widget,
+callbacks that rebuild their own page) immediately surfacing
+correctness gaps nothing before it had reason to hit - matches Phase 9
+and Phase 10's own observations that this codebase's remaining bugs
+tend to be found by genuinely new usage patterns rather than further
+scrutiny of unchanged code. Fixing all four at the toolkit level
+(rather than working around each in the one app that happened to hit
+it first) keeps with the project's established preference for shared
+infrastructure over per-call-site patches wherever the bug isn't
+actually app-specific.
+
+--------------------------------------------------------------------------
+
 ## Current Direction
 
-As of 0.19.0, Kohiko presents itself as a largely self-contained X11
+As of 0.19.2, Kohiko presents itself as a largely self-contained X11
 tiling window manager and minimal desktop session: its own bar, native
 launcher and notepad, native lock screen with both Suspend-triggered and
 idle-timeout automatic locking, a power menu, session restore that now
@@ -438,21 +503,28 @@ tracks BSP position as well as workspace/monitor/floating state, an
 adaptive placement system that learns per-application habits during
 ordinary use, multi-monitor support, standards-based display-sleep
 inhibition, a native settings GUI with structured editors for its
-two most syntax-heavy repeatable directives, and now native audio,
-network, and Bluetooth applications with matching tray widgets built on
-PipeWire/NetworkManager/BlueZ - all on a deliberately small and
+two most syntax-heavy repeatable directives, and native audio,
+network, and Bluetooth applications - now through a second visual
+revision matching a supplied design directly, with a details-panel
+pattern, live search, and per-page "Advanced Settings" sub-pages for
+functionality outside each new mockup - with matching tray widgets
+built on PipeWire/NetworkManager/BlueZ, all on a deliberately small and
 still-optional-where-possible set of external dependencies (Xlib,
 optionally XRandr/XScreenSaver/D-Bus, Imlib2, Xft/fontconfig, libpam,
-and now libdbus-1/libpipewire-0.3 together for the three new apps
+and libdbus-1/libpipewire-0.3 together for the three newer apps
 specifically - GTK3 was removed in 0.15.0).
 
-The README's "Planned" section was empty going into this release, and
-this phase's own scope (a fully-specified feature request rather than
-something drawn from that list) is itself a data point: with the core
-tiling/session/settings surface considered largely settled (per Phase
-9's own observation), new scope is now arriving as complete, externally-
-defined feature areas - "add native desktop integration" - rather than
-emerging organically from friction with what already exists. Whether
-that pattern continues or Kohiko returns to incrementally deepening its
-existing surface is the open question this release doesn't answer by
-itself.
+Two threads seem likely to continue: first, Phase 11 shows the shared
+UI toolkit (`UiWindow`/`UiWidget` and friends) is still young enough
+that new usage patterns keep finding real bugs in it rather than
+merely new features - `docs/ARCHITECTURE.md`'s "Known limitations /
+recommendations" section lists what's still likely to surface next
+(no generic layout containers, no automated widget-tree test coverage,
+a still-manual coordinate convention). Second, the README's "Planned"
+section is empty again going into whatever comes after 0.19.2, the
+same position it was in going into Phase 10 - with the core tiling/
+session/settings surface and now the three newer apps' visual design
+both considered settled, whether new scope keeps arriving as complete
+externally-defined feature areas (as Phase 10 and this phase's mockup
+brief both did) or Kohiko returns to incrementally deepening what
+already exists remains the same open question Phase 10 left unanswered.

@@ -9,19 +9,18 @@ Widget* ListRow::Layout(const Rect& rowBounds, std::unique_ptr<Widget> trailing,
     bounds = rowBounds;
 
     const int margin = 14;
-    const int iconSize = std::min(28, rowBounds.height - 8);
+    m_hasIcon = !iconName.empty();
+    m_iconSize = std::min(28, rowBounds.height - 8);
+    m_iconOffsetX = margin;
+    m_iconOffsetY = (rowBounds.height - m_iconSize) / 2;
 
-    m_iconRect = {
-        rowBounds.x + margin,
-        rowBounds.y + (rowBounds.height - iconSize) / 2,
-        iconSize,
-        iconSize
-    };
+    int textLeft = m_hasIcon ? (margin + m_iconSize + margin) : margin;
+    int textRight = rowBounds.width - margin - (trailingWidth > 0 ? trailingWidth + margin : 0);
 
-    int textLeft = iconName.empty() ? rowBounds.x + margin : m_iconRect.Right() + margin;
-    int textRight = rowBounds.Right() - margin - (trailingWidth > 0 ? trailingWidth + margin : 0);
-
-    m_textRect = { textLeft, rowBounds.y, std::max(0, textRight - textLeft), rowBounds.height };
+    m_textOffsetX = textLeft;
+    m_textOffsetY = 0;
+    m_textWidth = std::max(0, textRight - textLeft);
+    m_textHeight = rowBounds.height;
 
     Widget* trailingPtr = nullptr;
     if (trailing)
@@ -43,22 +42,40 @@ void ListRow::Draw(UiWindow& window)
 {
     const UiTheme& theme = window.Theme();
 
-    window.FillRoundedRect(bounds, selected ? theme.surfaceActive : theme.surface, 8);
-
-    if (!iconName.empty())
-        window.DrawIcon(m_iconRect, iconName);
-
-    if (subtitle.empty())
+    if (flat)
     {
-        window.DrawTextClipped(m_textRect, title, theme.foreground, Label::Align::Left);
+        if (selected)
+        {
+            window.FillRect(bounds, theme.surfaceHover);
+            window.FillRect({ bounds.x, bounds.y, 3, bounds.height }, theme.accent);
+        }
+        if (showDivider)
+            window.FillRect({ bounds.x, bounds.Bottom() - 1, bounds.width, 1 }, theme.border);
     }
     else
     {
-        Rect titleRect = m_textRect;
-        titleRect.height = m_textRect.height / 2 + 2;
-        Rect subtitleRect = m_textRect;
-        subtitleRect.y = titleRect.Bottom();
-        subtitleRect.height = m_textRect.height - titleRect.height;
+        window.FillRoundedRect(bounds, selected ? theme.surfaceActive : theme.surface, 8);
+    }
+
+    if (m_hasIcon)
+    {
+        Rect iconRect{ bounds.x + m_iconOffsetX, bounds.y + m_iconOffsetY, m_iconSize, m_iconSize };
+        window.DrawIcon(iconRect, iconName);
+    }
+
+    Rect textRect{ bounds.x + m_textOffsetX, bounds.y + m_textOffsetY, m_textWidth, m_textHeight };
+
+    if (subtitle.empty())
+    {
+        window.DrawTextClipped(textRect, title, theme.foreground, Label::Align::Left);
+    }
+    else
+    {
+        int lineHeight = window.TextHeight() + 4;
+        int blockTop = textRect.y + (textRect.height - lineHeight * 2) / 2;
+
+        Rect titleRect{ textRect.x, blockTop, textRect.width, lineHeight };
+        Rect subtitleRect{ textRect.x, blockTop + lineHeight, textRect.width, lineHeight };
 
         window.DrawTextClipped(titleRect, title, theme.foreground, Label::Align::Left);
         window.DrawTextClipped(subtitleRect, subtitle, theme.muted, Label::Align::Left);

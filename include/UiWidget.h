@@ -12,6 +12,14 @@ namespace Kohiko
 
 class UiWindow;
 
+// What UiWindow::HandleEvent() translates an X11 KeyPress into before
+// handing it to whichever widget currently has focus (see
+// Widget::OnKeyInput below) - a small fixed vocabulary rather than a
+// raw KeySym so widgets (see TextField) don't need to pull in
+// <X11/keysym.h> themselves. `utf8` carries the actual character(s)
+// only for Printable.
+enum class KeyAction { Printable, Backspace, Delete, Enter, Escape, Left, Right, Home, End };
+
 // Base of every widget in the shared UI toolkit. Deliberately much
 // smaller than SettingsWindow's own hand-rolled per-field widget
 // handling (see include/SettingsWindow.h) - that window predates this
@@ -37,6 +45,17 @@ public:
     Widget* AddChild(std::unique_ptr<Widget> child);
     const std::vector<std::unique_ptr<Widget>>& Children() const { return m_children; }
     void ClearChildren() { m_children.clear(); }
+
+    // Removes `child` from this widget's children *without*
+    // destroying it, handing ownership back to the caller - the one
+    // thing ClearChildren()/a plain erase can't do. See
+    // ScrollView::SetContent()'s comment for why this matters: a
+    // widget can't always safely destroy one of its own children
+    // immediately, specifically when that child is the very widget
+    // currently executing the callback that triggered the removal.
+    // Returns nullptr (and does nothing) if `child` isn't actually one
+    // of this widget's children.
+    std::unique_ptr<Widget> ReleaseChild(Widget* child);
 
     // Draws this widget, then every child, in order (later children
     // paint over earlier ones and are hit-tested first - "last added
@@ -64,6 +83,18 @@ public:
     virtual void OnRelease(Point p) { (void)p; }
     virtual void OnMotion(Point p, bool pressed) { (void)p; (void)pressed; }
     virtual void OnScroll(Point p, int delta) { (void)p; (void)delta; }
+
+    // Keyboard focus, for the one widget in this toolkit that needs
+    // it (TextField). False/no-ops for everything else, so adding
+    // this to the base class doesn't touch any existing widget.
+    // UiWindow grants focus to whatever WantsFocus() widget a click
+    // lands on (and takes it away, via OnBlur(), from whatever had it
+    // before - including on a click that hits nothing focusable at
+    // all), then routes KeyPress events to it via OnKeyInput().
+    virtual bool WantsFocus() const { return false; }
+    virtual void OnFocus() {}
+    virtual void OnBlur() {}
+    virtual void OnKeyInput(KeyAction action, const std::string& utf8 = {}) { (void)action; (void)utf8; }
 
 protected:
 
@@ -123,8 +154,36 @@ class Button : public Widget
 {
 public:
 
+    // The outline color/text when !primary - e.g. kohiko-network's
+    // "Connect" (Accent) vs. "Disconnect" (Danger) buttons in a
+    // selected network's details panel, sitting side by side with
+    // otherwise-identical styling. Ignored when primary is set (that
+    // style is always a filled accent button regardless of tone).
+    enum class Tone { Neutral, Accent, Danger };
+
     std::string label;
     bool primary = false;   // filled accent style vs. plain outline style
+    Tone tone = Tone::Neutral;
+    bool enabled = true;
+    std::function<void()> onClick;
+
+    void Draw(UiWindow& window) override;
+    bool WantsInput() const override { return enabled; }
+    void OnPress(Point p) override;
+    void OnRelease(Point p) override;
+
+private:
+    bool m_pressed = false;
+};
+
+// A small square icon-only button - kohiko-network/bluetooth's
+// circular refresh control. Same press/hover states as Button, just
+// without a text label.
+class IconButton : public Widget
+{
+public:
+
+    std::string iconName;
     bool enabled = true;
     std::function<void()> onClick;
 
@@ -210,6 +269,46 @@ public:
     static int MeasureWidth(UiWindow& window, const std::string& text);
 };
 
+// A rounded-bordered box that visually groups a stack of other
+// widgets - the "boxed list"/"panel" shape used everywhere in the
+// kohiko-audio/network/bluetooth mockups (an OUTPUT DEVICES card
+// holding every output device row, a selected-network details panel,
+// a CONNECTED DEVICES card, ...). Deliberately just background +
+// border + children, same as every other container here - the caller
+// still positions every child's own bounds (see e.g.
+// AudioWindow::RebuildPage()), consistent with this toolkit's
+// existing caller-computes-the-rect convention rather than a new
+// declarative layout system.
+class Card : public Widget
+{
+public:
+    void Draw(UiWindow& window) override;
+};
+
+// A single-line text input with real keyboard focus - currently just
+// kohiko-network's "Search networks..." field, but written as a
+// general-purpose widget rather than something search-specific.
+// Needs UiWindow's focus-routing (see Widget::WantsFocus() and
+// UiWindow::HandleEvent()'s KeyPress case) to actually receive
+// OnKeyInput() calls.
+class TextField : public Widget
+{
+public:
+
+    std::string text;
+    std::string placeholder;
+    std::string iconName;   // optional leading icon, e.g. "edit-find"
+    bool focused = false;
+    std::function<void(const std::string&)> onChange;
+
+    void Draw(UiWindow& window) override;
+    bool WantsInput() const override { return true; }
+    bool WantsFocus() const override { return true; }
+    void OnFocus() override { focused = true; }
+    void OnBlur() override { focused = false; }
+    void OnKeyInput(KeyAction action, const std::string& utf8) override;
+};
+
 // Composes the title/subtitle/optional-trailing-control header every
 // page across all three apps opens with (see e.g. kohiko-network's
 // "Wi-Fi / Connected to X" header with its on/off switch, or
@@ -223,6 +322,34 @@ std::unique_ptr<Widget> MakePageHeader(
     const std::string& subtitle,
     std::unique_ptr<Widget> trailing = nullptr,
     int trailingWidth = 0
+);
+
+// A label on the left, one trailing control pinned to the right (a
+// ToggleSwitch, most often) - the settings-row shape used throughout
+// each app's Advanced Settings page (e.g. AudioWindow's "Notify when
+// the default device changes", BluetoothWindow's per-device "Trust
+// this device"). Adds both the label and `control` directly as
+// children of `parent` and returns the now-parented control (like
+// ListRow::Layout()'s return) so the caller can wire up onChange
+// right away.
+Widget* MakeSettingsRow(
+    Widget& parent,
+    const Rect& bounds,
+    const std::string& label,
+    std::unique_ptr<Widget> control,
+    int controlWidth
+);
+
+// A small caption/value pair on one line - "Status"/"Connected",
+// "Battery"/"82%" - the label/value rows inside kohiko-network's and
+// kohiko-bluetooth's selected-item details panel. Returns a plain
+// Widget wrapping both Labels; `valueColor` of 0 uses the theme's
+// default foreground.
+std::unique_ptr<Widget> MakeDetailRow(
+    const Rect& bounds,
+    const std::string& label,
+    const std::string& value,
+    std::uint32_t valueColor = 0
 );
 
 }

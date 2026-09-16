@@ -33,6 +33,10 @@ private:
     Widget* m_content = nullptr;
     int m_scrollOffset = 0;
 
+    // The *previous* content, kept alive one extra generation rather
+    // than destroyed immediately - see SetContent()'s comment.
+    std::unique_ptr<Widget> m_retiredContent;
+
     static void Translate(Widget* widget, int dx, int dy);
 };
 

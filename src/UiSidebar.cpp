@@ -7,10 +7,12 @@ namespace Kohiko
 void Sidebar::Layout(const Rect& area, int rowHeight)
 {
     bounds = area;
-    m_itemRects.clear();
+    m_rowHeight = rowHeight;
+}
 
-    for (std::size_t i = 0; i < m_items.size(); ++i)
-        m_itemRects.push_back({ area.x, area.y + static_cast<int>(i) * rowHeight, area.width, rowHeight });
+Rect Sidebar::ItemRect(std::size_t index) const
+{
+    return { bounds.x, bounds.y + static_cast<int>(index) * m_rowHeight, bounds.width, m_rowHeight };
 }
 
 void Sidebar::Draw(UiWindow& window)
@@ -19,7 +21,7 @@ void Sidebar::Draw(UiWindow& window)
 
     for (std::size_t i = 0; i < m_items.size(); ++i)
     {
-        const Rect& rect = m_itemRects[i];
+        Rect rect = ItemRect(i);
         bool isSelected = static_cast<int>(i) == m_selected;
 
         if (isSelected)
@@ -45,9 +47,9 @@ void Sidebar::Draw(UiWindow& window)
 
 void Sidebar::OnRelease(Point p)
 {
-    for (std::size_t i = 0; i < m_itemRects.size(); ++i)
+    for (std::size_t i = 0; i < m_items.size(); ++i)
     {
-        if (m_itemRects[i].Contains(p))
+        if (ItemRect(i).Contains(p))
         {
             m_selected = static_cast<int>(i);
             if (onSelect)

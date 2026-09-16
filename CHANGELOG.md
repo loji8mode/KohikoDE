@@ -1,5 +1,68 @@
 # Changelog
 
+## Version 0.19.2 (unreleased)
+
+### Changed
+- Rebuilt `kohiko-audio`/`kohiko-network`/`kohiko-bluetooth`'s main
+  pages to match their design mockups: flat divided-row lists inside
+  a single bordered card (replacing the previous grid-of-separate-
+  cards layout) for device/network/Bluetooth lists, a violet accent
+  in place of the previous blue, and a live-filtering search field in
+  `kohiko-network`. `kohiko-network` and `kohiko-bluetooth` gained a
+  details panel for whichever list row is selected, sitting beside
+  the list above ~720px content width and stacked below it otherwise.
+  See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full
+  per-app breakdown.
+- Moved features not present in the new mockups down to a new
+  "Advanced Settings" sub-page in each app, rather than dropping them:
+  level meters and the default-device-change notification toggle
+  (`kohiko-audio`); Ethernet device management and VPN profile
+  activation (`kohiko-network`); per-device Bluetooth trust
+  (`kohiko-bluetooth`, previously exposed inline on each paired
+  device's card).
+- Every page's responsive floor dropped to a genuinely usable ~420px
+  content width (narrow single-column layouts, two-line device rows
+  in `kohiko-audio`, a wrapping toolbar in `kohiko-network`/
+  `kohiko-bluetooth`), and content width is now capped and centered
+  past ~900-960px so a fullscreen/ultra-wide window gains margin
+  instead of stretching every row into one long line.
+
+### Added
+- Shared toolkit: `Card` (the bordered-box container the above lists
+  and details panels sit inside), `TextField` (a real single-line
+  text input with keyboard focus - see `UiWindow::SetFocus()`/
+  `ClearFocus()`/`WantsFocus()`/`OnKeyInput()`), `IconButton`, and a
+  `Button::Tone` (Accent/Danger outline styles, for e.g. Connect vs.
+  Disconnect). `ListRow` gained a `flat` display mode (a thin divider
+  and a left accent bar when selected, instead of its own rounded
+  card) for the "one bordered card, many divided rows" list shape the
+  new mockups use throughout.
+
+### Fixed
+- `ScrollView::SetContent()` never actually positioned its content -
+  it pinned the content widget's own top-left to the ScrollView's
+  position but never translated any of its children, so scrolled
+  content rendered at the window's absolute top-left instead of
+  inside the ScrollView. This had been latent since 0.19.1's
+  `SetResizeHandler()`-driven reflow work; nothing exercised it
+  visibly enough to notice until this session's heavier use of
+  `ScrollView` surfaced it.
+- `ListRow`/`Sidebar` cached icon/text layout as absolute rects
+  computed once, which went stale relative to a widget's later-
+  translated `bounds` (see above) - now stored as offsets from
+  `bounds`, recomputed every `Draw()`/hit-test.
+- A widget whose own `onClick`/`onChange` synchronously triggers a
+  page rebuild (row selection, tab switches, navigation links - all
+  common in the new pages) could destroy itself mid-callback -
+  `ScrollView::SetContent()` and `UiWindow::SetRoot()` now retire the
+  outgoing widget tree for one extra generation instead of destroying
+  it immediately (see the new `Widget::ReleaseChild()`).
+- `Makefile` never tracked header dependencies (no `-MMD`/`-MP`), so
+  an incremental build after editing a shared header could link stale
+  object code against fresh code with no warning - intermittent,
+  hard-to-reproduce crashes with no code-level cause. Fixed by adding
+  `-MMD -MP` and including the generated `build/*.d` files.
+
 ## Version 0.19.1
 
 Release date: 2026-08-03

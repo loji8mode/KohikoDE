@@ -5,28 +5,25 @@
 #include "NetworkManagerClient.h"
 #include "NotificationClient.h"
 #include "UiScrollView.h"
-#include "UiSidebar.h"
 #include "UiWindow.h"
 
 namespace Kohiko
 {
 
-// kohiko-network's top-level app class. Three Sidebar pages -
-// Wi-Fi, Ethernet, VPN - each rebuilt straight from
-// NetworkManagerClient's latest snapshot, the same "rebuild the page
-// from the current snapshot" shape AudioWindow uses for its Output/
-// Input pages. Airplane mode (radios on/off) lives as a toggle at the
-// top of the Wi-Fi page rather than its own sidebar entry, since it's
-// a single switch rather than something with its own list of things
-// to show.
+// kohiko-network's top-level app class - a single Wi-Fi-focused page
+// (toolbar with the Wi-Fi/VPN state and a refresh button, a live
+// search field, an AVAILABLE NETWORKS list, and a details panel for
+// whichever network is selected) matching the Kohiko Network mockup.
+// Ethernet management and VPN profile management aren't part of that
+// mockup, so - same as AudioWindow's level meters - they live on a
+// second Advanced Settings page reached via the link at the bottom,
+// rather than being dropped (see RebuildAdvancedPage()).
 //
-// Every page reflows on resize (see UiWindow::SetResizeHandler()) and
-// uses the extra width a wider window provides to show *more*
-// information rather than just stretching the same content - Wi-Fi
-// rows reveal a numeric signal percentage once there's room for it,
-// and Ethernet cards grow from a single-line summary into a proper
-// labeled Address/Gateway/DNS/MAC grid (see BuildEthernetCard() in
-// NetworkWindow.cpp).
+// The network list and its details panel sit side by side once the
+// window is wide enough (see kSplitBreakpoint) and stack into a
+// single column otherwise, same as every other page in these three
+// apps - narrow windows never lose access to a selected network's
+// details, they just see them below the list instead of beside it.
 class NetworkWindow
 {
 public:
@@ -38,24 +35,48 @@ public:
 
 private:
 
-    enum class Page { WiFi, Ethernet, Vpn };
+    enum class Page { Main, Advanced };
+    enum class AdvancedTab { Ethernet, Vpn };
 
     void RebuildChrome();
     void RebuildPage();
-    void RebuildWiFiPage(Widget* content, int& y, int contentWidth);
-    void RebuildEthernetPage(Widget* content, int& y, int contentWidth);
-    void RebuildVpnPage(Widget* content, int& y, int contentWidth);
+    int RebuildMainPage(Widget& content, int contentWidth);
+    int RebuildAdvancedPage(Widget& content, int contentWidth);
 
-    // Builds one Ethernet device's card - a single-line summary at
-    // narrow widths, growing into a labeled Address/Gateway/DNS/MAC
-    // grid once there's room (see NetworkWindow.cpp).
-    std::unique_ptr<Widget> BuildEthernetCard(const NetworkDevice& device, int width);
+    // Appends the toolbar (Wi-Fi toggle, VPN status, refresh button)
+    // to `content`, wrapping onto a second line once the window's too
+    // narrow to fit all of it on one - returns the y position just
+    // past it.
+    int AppendToolbar(Widget& content, int y, int contentWidth);
+
+    // Appends the AVAILABLE NETWORKS card and (once there's a
+    // selection) the details panel, side by side or stacked depending
+    // on `contentWidth` - returns the y position just past whichever
+    // of the two ends up lower.
+    int AppendNetworkSection(Widget& content, int y, int contentWidth);
+
+    std::unique_ptr<Widget> BuildNetworkRow(const WiFiAccessPoint& ap, const std::string& devicePath, const Rect& rowBounds, bool showDivider, bool showPercent);
+    std::unique_ptr<Widget> BuildDetailsPanel(const NetworkDevice& wifiDevice, const WiFiAccessPoint& ap, const Rect& panelBounds);
+
+    // Builds one Ethernet device's card for the Advanced Settings
+    // page - a single-line summary at narrow widths, growing into a
+    // labeled Address/Gateway/DNS/MAC grid once there's room (see
+    // NetworkWindow.cpp).
+    std::unique_ptr<Widget> BuildEthernetCard(const NetworkDevice& device, const Rect& cardBounds);
 
     // Shows a small modal password prompt (see NetworkWindow.cpp) and
     // attempts to connect `ssid` on `devicePath`/`apPath` with
     // whatever was entered - a self-contained one-off, not part of
-    // the shared UI toolkit, since no other app needs free-text input.
+    // the shared UI toolkit, since no other app needs free-text input
+    // in a modal (kohiko-network's live search field is a different,
+    // non-modal use of TextField).
     void PromptAndConnect(const std::string& devicePath, const std::string& apPath, const std::string& ssid, bool secured);
+
+    // Picks a sensible selected network after every rebuild: keeps
+    // the current selection if it's still in range, otherwise falls
+    // back to the active connection, otherwise the first network in
+    // the (possibly search-filtered) list.
+    void EnsureSelection(const std::vector<const WiFiAccessPoint*>& visibleAccessPoints);
 
     UiWindow m_window;
     NetworkManagerClient m_networkManager;
@@ -63,11 +84,20 @@ private:
     AppConfigStore m_settings;
     NotificationClient m_notifications;
 
-    Page m_currentPage = Page::WiFi;
-    Sidebar* m_sidebar = nullptr;
+    Page m_page = Page::Main;
+    AdvancedTab m_advancedTab = AdvancedTab::Ethernet;
     ScrollView* m_scrollView = nullptr;
 
+    // Non-owning; only valid while m_page == Page::Main (nulled out
+    // otherwise) - see RebuildPage()'s focus-preservation dance for
+    // why RebuildMainPage() needs the caller to be able to find it
+    // again after rebuilding.
+    TextField* m_searchField = nullptr;
+
     bool m_networkDirty = false;
+
+    std::string m_selectedApPath;
+    std::string m_searchQuery;
 };
 
 }

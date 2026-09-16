@@ -13,6 +13,20 @@ Widget* Widget::AddChild(std::unique_ptr<Widget> child)
     return raw;
 }
 
+std::unique_ptr<Widget> Widget::ReleaseChild(Widget* child)
+{
+    for (auto it = m_children.begin(); it != m_children.end(); ++it)
+    {
+        if (it->get() == child)
+        {
+            std::unique_ptr<Widget> released = std::move(*it);
+            m_children.erase(it);
+            return released;
+        }
+    }
+    return nullptr;
+}
+
 void Widget::Draw(UiWindow& window)
 {
     DrawChildren(window);
@@ -63,7 +77,7 @@ void ClickableContainer::OnRelease(Point p)
 
 void SectionHeader::Draw(UiWindow& window)
 {
-    window.DrawTextClipped(bounds, text, window.Theme().muted, Label::Align::Left);
+    window.DrawTextClipped(bounds, text, window.Theme().accent, Label::Align::Left);
     DrawChildren(window);
 }
 
@@ -73,17 +87,29 @@ void Button::Draw(UiWindow& window)
 {
     const UiTheme& theme = window.Theme();
 
+    std::uint32_t outline = theme.border;
+    std::uint32_t outlineText = theme.foreground;
+    if (!primary)
+    {
+        switch (tone)
+        {
+            case Tone::Accent: outline = theme.accent; outlineText = theme.accent; break;
+            case Tone::Danger: outline = theme.danger;  outlineText = theme.danger;  break;
+            case Tone::Neutral: default: break;
+        }
+    }
+
     std::uint32_t bg = primary ? theme.accent : theme.surface;
     if (!enabled)
         bg = theme.surface;
     else if (m_pressed)
         bg = primary ? theme.accent : theme.surfaceActive;
 
-    window.FillRoundedRect(bounds, bg, 6);
+    window.FillRoundedRect(bounds, bg, 8);
     if (!primary)
-        window.DrawBorder(bounds, theme.border);
+        window.DrawBorder(bounds, enabled ? outline : theme.border);
 
-    std::uint32_t fg = primary ? theme.accentForeground : theme.foreground;
+    std::uint32_t fg = primary ? theme.accentForeground : outlineText;
     if (!enabled)
         fg = theme.muted;
 
@@ -97,6 +123,37 @@ void Button::OnPress(Point)
 }
 
 void Button::OnRelease(Point p)
+{
+    bool wasInside = bounds.Contains(p);
+    m_pressed = false;
+
+    if (wasInside && enabled && onClick)
+        onClick();
+}
+
+// --- IconButton ------------------------------------------------------------------
+
+void IconButton::Draw(UiWindow& window)
+{
+    const UiTheme& theme = window.Theme();
+
+    std::uint32_t bg = theme.surface;
+    if (enabled && m_pressed)
+        bg = theme.surfaceActive;
+
+    window.FillRoundedRect(bounds, bg, 8);
+    window.DrawBorder(bounds, theme.border);
+    window.DrawIcon(bounds.Shrunk(9), iconName);
+
+    DrawChildren(window);
+}
+
+void IconButton::OnPress(Point)
+{
+    m_pressed = true;
+}
+
+void IconButton::OnRelease(Point p)
 {
     bool wasInside = bounds.Contains(p);
     m_pressed = false;
@@ -226,6 +283,86 @@ void Badge::Draw(UiWindow& window)
     DrawChildren(window);
 }
 
+// --- Card ------------------------------------------------------------------------
+
+void Card::Draw(UiWindow& window)
+{
+    const UiTheme& theme = window.Theme();
+    window.FillRoundedRect(bounds, theme.surface, 12);
+    window.DrawBorder(bounds, theme.border);
+    DrawChildren(window);
+}
+
+// --- TextField -------------------------------------------------------------------
+
+void TextField::Draw(UiWindow& window)
+{
+    const UiTheme& theme = window.Theme();
+
+    window.FillRoundedRect(bounds, theme.surface, 8);
+    window.DrawBorder(bounds, focused ? theme.accent : theme.border);
+
+    int textX = bounds.x + 14;
+    if (!iconName.empty())
+    {
+        int iconSize = std::min(18, bounds.height - 8);
+        Rect iconRect{ bounds.x + 12, bounds.y + (bounds.height - iconSize) / 2, iconSize, iconSize };
+        window.DrawIcon(iconRect, iconName);
+        textX = iconRect.Right() + 10;
+    }
+
+    Rect textRect{ textX, bounds.y, std::max(0, bounds.Right() - textX - 12), bounds.height };
+
+    if (text.empty() && !focused)
+    {
+        window.DrawTextClipped(textRect, placeholder, theme.muted, Label::Align::Left);
+    }
+    else
+    {
+        window.DrawTextClipped(textRect, text, theme.foreground, Label::Align::Left);
+
+        if (focused)
+        {
+            int cursorX = textRect.x + window.TextWidth(text) + 1;
+            cursorX = std::min(cursorX, textRect.Right() - 2);
+            Rect cursor{ cursorX, bounds.y + 8, 2, std::max(1, bounds.height - 16) };
+            window.FillRect(cursor, theme.accent);
+        }
+    }
+
+    DrawChildren(window);
+}
+
+void TextField::OnKeyInput(KeyAction action, const std::string& utf8)
+{
+    switch (action)
+    {
+        case KeyAction::Printable:
+            text += utf8;
+            break;
+
+        case KeyAction::Backspace:
+            if (!text.empty())
+            {
+                // Drop one whole UTF-8 codepoint, not just the last
+                // byte, so backspacing over an accented or non-Latin
+                // character removes it in a single press instead of
+                // leaving a mangled trailing byte behind.
+                std::size_t cut = text.size() - 1;
+                while (cut > 0 && (static_cast<unsigned char>(text[cut]) & 0xC0) == 0x80)
+                    --cut;
+                text.erase(cut);
+            }
+            break;
+
+        default:
+            return; // no text change - don't fire onChange for e.g. arrow keys
+    }
+
+    if (onChange)
+        onChange(text);
+}
+
 // --- MakePageHeader ------------------------------------------------------------
 
 std::unique_ptr<Widget> MakePageHeader(
@@ -266,6 +403,58 @@ std::unique_ptr<Widget> MakePageHeader(
     }
 
     return header;
+}
+
+// --- MakeSettingsRow -------------------------------------------------------------
+
+Widget* MakeSettingsRow(
+    Widget& parent,
+    const Rect& bounds,
+    const std::string& label,
+    std::unique_ptr<Widget> control,
+    int controlWidth)
+{
+    auto labelWidget = std::make_unique<Label>();
+    labelWidget->text = label;
+    labelWidget->bounds = { bounds.x, bounds.y, bounds.width - controlWidth - 16, bounds.height };
+    parent.AddChild(std::move(labelWidget));
+
+    int controlHeight = control->bounds.height > 0 ? control->bounds.height : bounds.height;
+    control->bounds = {
+        bounds.Right() - controlWidth,
+        bounds.y + (bounds.height - controlHeight) / 2,
+        controlWidth,
+        controlHeight
+    };
+
+    return parent.AddChild(std::move(control));
+}
+
+// --- MakeDetailRow -----------------------------------------------------------------
+
+std::unique_ptr<Widget> MakeDetailRow(
+    const Rect& bounds,
+    const std::string& label,
+    const std::string& value,
+    std::uint32_t valueColor)
+{
+    auto row = std::make_unique<Widget>();
+    row->bounds = bounds;
+
+    auto labelWidget = std::make_unique<Label>();
+    labelWidget->text = label;
+    labelWidget->color = UiTheme::Default().muted;
+    labelWidget->bounds = { bounds.x, bounds.y, bounds.width / 2, bounds.height };
+    row->AddChild(std::move(labelWidget));
+
+    auto valueWidget = std::make_unique<Label>();
+    valueWidget->text = value;
+    valueWidget->color = valueColor;
+    valueWidget->align = Label::Align::Right;
+    valueWidget->bounds = { bounds.x + bounds.width / 2, bounds.y, bounds.width / 2, bounds.height };
+    row->AddChild(std::move(valueWidget));
+
+    return row;
 }
 
 }

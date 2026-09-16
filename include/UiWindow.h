@@ -44,6 +44,28 @@ public:
     void SetRoot(std::unique_ptr<Widget> root);
     Widget* Root() const { return m_root.get(); }
 
+    // Drops keyboard focus, if any (calling the focused widget's own
+    // OnBlur() first). Callers about to destroy the current widget
+    // tree - SetRoot() itself, or an app's own
+    // ScrollView::SetContent() call when only rebuilding a page's
+    // content - must call this *before* doing so: a TextField that
+    // still held focus (see Widget::WantsFocus()) would otherwise
+    // leave m_focusedWidget pointing at freed memory the next time a
+    // KeyPress arrives. SetRoot() does this itself; content-only
+    // rebuilds (AudioWindow/NetworkWindow/BluetoothWindow's
+    // RebuildPage()) call this explicitly right before SetContent().
+    // Grants keyboard focus to `widget` (a no-op if it doesn't accept
+    // focus - see Widget::WantsFocus()), blurring whatever had it
+    // before. Used the same way a click would, but from app code: see
+    // NetworkWindow's search field, which rebuilds its own containing
+    // page on every keystroke (to re-filter the network list) and
+    // needs to hand focus straight back to the new TextField instance
+    // that rebuild just created, rather than dropping focus entirely
+    // the way ClearFocus() would.
+    void SetFocus(Widget* widget);
+
+    void ClearFocus();
+
     using FdCallback = std::function<void()>;
 
     // Adds `fd` to the set this window's Run() polls alongside its
@@ -76,15 +98,18 @@ public:
 
     void RequestRedraw() { m_dirty = true; }
 
-    // True while a widget is captured for a drag (see m_pressedWidget)
-    // - a widget tree rebuild triggered by an async backend change
+    // True while a widget is captured for a drag, or while something
+    // holds keyboard focus (see m_pressedWidget/m_focusedWidget) - a
+    // widget tree rebuild triggered by an async backend change
     // notification (a device's volume changing, a new Wi-Fi network
-    // appearing, ...) must be deferred while this is true, since
-    // replacing the tree out from under an in-progress drag would
-    // leave this window's own captured pointer dangling. See e.g.
-    // AudioWindow's throttled-rebuild timer for the pattern this is
-    // meant to support.
-    bool IsInteracting() const { return m_pressedWidget != nullptr; }
+    // appearing, ...) must be deferred while either is true, since
+    // replacing the tree out from under an in-progress drag or
+    // focused text entry would be just as disruptive either way (and,
+    // for focus specifically, could otherwise dangle m_focusedWidget
+    // outright - see ClearFocus()'s comment). See e.g. AudioWindow's
+    // throttled-rebuild timer for the pattern this is meant to
+    // support.
+    bool IsInteracting() const { return m_pressedWidget != nullptr || m_focusedWidget != nullptr; }
 
     void Run();
     void Quit() { m_running = false; }
@@ -140,7 +165,20 @@ private:
     std::unique_ptr<UiIconCache> m_iconCache;
 
     std::unique_ptr<Widget> m_root;
+
+    // The *previous* root, kept alive one extra generation rather
+    // than destroyed immediately - see SetRoot()'s comment, and
+    // ScrollView::SetContent()'s longer version of the same reasoning.
+    std::unique_ptr<Widget> m_retiredRoot;
+
     Widget* m_pressedWidget = nullptr;
+
+    // The widget currently receiving KeyPress events, if any - see
+    // Widget::WantsFocus()/OnFocus()/OnBlur()/OnKeyInput(). Assigned
+    // in HandleEvent()'s ButtonPress case and cleared the same way
+    // (a click that hits nothing focusable blurs whatever had focus,
+    // same as a normal text field losing focus on an outside click).
+    Widget* m_focusedWidget = nullptr;
 
     std::vector<FdWatch> m_fdWatches;
     std::vector<Timer> m_timers;

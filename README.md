@@ -50,6 +50,13 @@ a full compositor.
 - [Planned](#planned)
 - [Intentionally unsupported](#intentionally-unsupported)
 
+See also: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) - a fuller
+architecture reference covering the whole project (core WM, the
+shared UI toolkit behind `kohiko-settings`/`kohiko-audio`/
+`kohiko-network`/`kohiko-bluetooth`, IPC, configuration, and the
+rendering pipeline), kept up to date as the project evolves rather
+than describing one point in time.
+
 ## Building
 
 You need a C++20 compiler and the X11 development headers, plus Imlib2
@@ -618,36 +625,48 @@ Three standalone native applications, installed and built alongside
 `kohiko`/`kohiko-settings` (see [Building](#building)) but not part of
 the window manager process itself - each is an ordinary X11 client
 you can also launch, alt-tab to, or window-rule like any other. All
-three are laid out for a tiling window manager first: a page header,
-then cards that use the full window width rather than a single column
-of controls stacked in one corner, and every page genuinely reflows on
-resize - a wider window shows a 2- or 3-column device grid instead of
-the same narrow list stretched out, and (on `kohiko-network`'s
-Ethernet page) a labeled Address/Gateway/DNS/MAC grid instead of a
-cramped one-line summary. A tiled half-screen window, a maximized one,
-and an ultra-wide monitor each get a layout suited to their own size.
+three share one visual language with `kohiko-settings` (same dark
+violet-accented theme, same card/row/badge/button styling - see
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#ui-toolkit-uiwidget--friends))
+and are laid out for a tiling window manager first: no fixed-size
+assumptions, comfortable from a ~420px-wide tiled sliver up through a
+fullscreen ultra-wide monitor. A narrow window gets a single stacked
+column; a wide one splits a list from its details panel (network/
+Bluetooth) or reflows a row onto two lines instead of clipping
+(audio); very wide windows cap their content width and center it
+rather than stretching every row into one long line. Each app's main
+page deliberately mirrors its own design mockup closely - anything the
+mockup doesn't have room for (level meters, Ethernet/VPN management,
+per-device Bluetooth trust) lives one level down, behind that page's
+own "Advanced Settings" link, rather than being dropped.
 
-- **`kohiko-audio`** - the permanent audio control center: output/input
-  device lists, per-device volume and mute, switching the default
-  device, and live output/microphone level meters. Backed entirely by
-  PipeWire (and whatever WirePlumber policy is in effect for it) -
-  Kohiko doesn't talk to ALSA or PulseAudio directly, and doesn't
-  replace WirePlumber's own session/policy management, just the UI in
-  front of it.
-- **`kohiko-network`** - Wi-Fi (scan, connect, saved networks, signal
-  strength), Ethernet (connect/disconnect, IPv4/IPv6/DNS/gateway/MAC
-  info), VPN (activate/deactivate existing profiles), and an airplane
-  mode toggle. Backed entirely by NetworkManager over D-Bus; airplane
-  mode here means NetworkManager's own `WirelessEnabled`/`WwanEnabled`
-  flags together, the closest equivalent it exposes to a hardware
-  radio kill switch. Setting up a brand-new VPN profile isn't in
-  scope - that's `nm-connection-editor` or your VPN provider's own
-  setup tool's job; kohiko-network manages profiles that already
-  exist.
-- **`kohiko-bluetooth`** - adapter power/discoverable, scanning,
-  pairing, connecting/disconnecting, trusting, removing, and (where
-  the device reports one) battery level. Backed entirely by BlueZ over
-  D-Bus.
+- **`kohiko-audio`** - OUTPUT DEVICES and INPUT DEVICES lists (icon,
+  name/type, a Default badge, live volume, and a Mute/Unmute button
+  per device - click a row anywhere else to make it the default
+  device), backed entirely by PipeWire (and whatever WirePlumber
+  policy is in effect for it) - Kohiko doesn't talk to ALSA or
+  PulseAudio directly, and doesn't replace WirePlumber's own session/
+  policy management, just the UI in front of it. Live output/
+  microphone level meters and a "notify when the default device
+  changes" toggle are one level down, on Advanced Settings.
+- **`kohiko-network`** - a Wi-Fi/VPN toolbar, a live-filtering search
+  field, an AVAILABLE NETWORKS list, and a details panel for whichever
+  network is selected (status, signal strength, IPv4/gateway/DNS,
+  Disconnect/Connect). Backed entirely by NetworkManager over D-Bus.
+  Ethernet (connect/disconnect, IPv4/IPv6/DNS/gateway/MAC info) and
+  VPN (activate/deactivate existing profiles) management are one level
+  down, on Advanced Settings. Setting up a brand-new VPN profile isn't
+  in scope either way - that's `nm-connection-editor` or your VPN
+  provider's own setup tool's job; kohiko-network manages profiles
+  that already exist.
+- **`kohiko-bluetooth`** - adapter power/discoverable toggles, a scan
+  button, CONNECTED DEVICES and NEARBY DEVICES lists, and a details
+  panel for whichever device is selected (connection status, battery
+  where the device reports one, trusted status, and Pair/Connect/
+  Disconnect/Forget actions appropriate to that device's current
+  state). Backed entirely by BlueZ over D-Bus. The actual trust
+  on/off toggle (the details panel only ever *shows* trusted status)
+  is one level down, on Advanced Settings.
 
 Each has a matching tray widget (`kohiko-audio-tray`,
 `kohiko-network-tray`, `kohiko-bluetooth-tray`) that docks into the
@@ -670,6 +689,11 @@ None of these three apps or their tray widgets are built at all if
 `libdbus-1-dev`/`libpipewire-0.3-dev` aren't present at build time
 (see [Building](#building)) - `kohiko`, `kohikoctl`, and
 `kohiko-settings` build and work exactly as before either way.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how these three
+apps are put together internally (the shared `UiWindow`/`Widget`
+toolkit, the responsive layout conventions, current limitations, and
+recommendations for anyone picking this up next).
 
 ## EWMH support
 
@@ -1017,6 +1041,12 @@ from a script or a keybinding daemon that doesn't know about Kohiko
 directly.
 
 ## Architecture
+
+This section covers the WM core specifically. For how this fits
+together with the shared UI toolkit, the companion apps
+(`kohiko-settings`/`kohiko-audio`/`kohiko-network`/`kohiko-bluetooth`),
+IPC, and configuration as a whole, see
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 Roughly the file layout the project was designed around, one responsibility each:
 

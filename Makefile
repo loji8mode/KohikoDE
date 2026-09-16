@@ -6,6 +6,20 @@
 CXX      ?= g++
 CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra
 
+# Per-.o header dependency files (build/*.d, pulled in via -include at
+# the bottom of this file) - without these, `make` only knows a .o
+# depends on its own .cpp, not on whatever headers that .cpp
+# transitively includes. Editing a shared header (UiWidget.h, say)
+# would then leave every .o that includes it stale but unrebuilt,
+# and a subsequent incremental `make` would happily link old and new
+# object code together - readable as a valid build with no warnings,
+# but Undefined Behaviour at runtime (mismatched struct layouts,
+# ODR violations) the moment those inconsistent .o files actually
+# interact. `make clean && make` sidesteps this by rebuilding
+# everything, but shouldn't be required just to pick up a header
+# change.
+DEPFLAGS := -MMD -MP
+
 INCLUDES := -Iinclude
 INCLUDES += $(shell pkg-config --cflags xft fontconfig)
 
@@ -103,7 +117,7 @@ kohiko: $(OBJ)
 	$(CXX) $(CXXFLAGS) $(OBJ) -o $@ $(LIBS)
 
 build/%.o: src/%.cpp | build
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
 build:
 	mkdir -p build
@@ -119,7 +133,7 @@ kohiko-settings: $(SETTINGS_OBJ) build/kohiko-settings-main.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ -lX11 $(shell pkg-config --libs xft fontconfig)
 
 build/kohiko-settings-main.o: tools/kohiko-settings.cpp | build
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
 # --- kohiko-audio -----------------------------------------------------------------
 
@@ -127,13 +141,13 @@ kohiko-audio: $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) build/PipeWireClient.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LIBS) $(PIPEWIRE_LIBS)
 
 build/kohiko-audio-main.o: tools/kohiko-audio.cpp | build
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
 kohiko-audio-tray: $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) build/PipeWireClient.o build/kohiko-audio-tray-main.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LIBS) $(PIPEWIRE_LIBS)
 
 build/kohiko-audio-tray-main.o: tools/kohiko-audio-tray.cpp | build
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
 # --- kohiko-network ---------------------------------------------------------------
 
@@ -141,13 +155,13 @@ kohiko-network: $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) build/NetworkManager
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LIBS)
 
 build/kohiko-network-main.o: tools/kohiko-network.cpp | build
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
 kohiko-network-tray: $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) build/NetworkManagerClient.o build/kohiko-network-tray-main.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LIBS)
 
 build/kohiko-network-tray-main.o: tools/kohiko-network-tray.cpp | build
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
 # --- kohiko-bluetooth --------------------------------------------------------------
 
@@ -155,13 +169,13 @@ kohiko-bluetooth: $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) build/BluezClient.
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LIBS)
 
 build/kohiko-bluetooth-main.o: tools/kohiko-bluetooth.cpp | build
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
 kohiko-bluetooth-tray: $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) build/BluezClient.o build/kohiko-bluetooth-tray-main.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LIBS)
 
 build/kohiko-bluetooth-tray-main.o: tools/kohiko-bluetooth-tray.cpp | build
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
 test: build/test_bsptree build/test_launcherscoring build/test_placementhabits build/test_dbusvalue
 	./build/test_bsptree
@@ -257,3 +271,13 @@ clean:
 	rm -rf build kohiko kohikoctl kohiko-settings \
 		kohiko-audio kohiko-network kohiko-bluetooth \
 		kohiko-audio-tray kohiko-network-tray kohiko-bluetooth-tray
+
+# Must come after every other rule (a target's own rule always wins
+# over one reconstructed from a stale .d file, but make still needs
+# the "real" rules parsed first) - see DEPFLAGS' comment up top for
+# why these matter. The wildcard - rather than deriving names from
+# $(OBJ) etc. - means this also picks up build/*-main.o's .d files
+# without needing its own separate list. Silently does nothing before
+# the first build, when build/ (and so every .d file) doesn't exist
+# yet.
+-include $(wildcard build/*.d)
