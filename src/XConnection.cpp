@@ -793,6 +793,38 @@ bool XConnection::IsDockWindowType(::Window window, const XAtoms& atoms)
     return isDock;
 }
 
+bool XConnection::IsNotificationWindowType(::Window window, const XAtoms& atoms)
+{
+    Atom actualType;
+    int actualFormat = 0;
+    unsigned long itemCount = 0;
+    unsigned long bytesLeft = 0;
+    unsigned char* data = nullptr;
+
+    bool isNotification = false;
+
+    if (XGetWindowProperty(
+            m_display, window, atoms.NET_WM_WINDOW_TYPE, 0, 16, False,
+            XA_ATOM, &actualType, &actualFormat, &itemCount, &bytesLeft, &data
+        ) == Success && data)
+    {
+        Atom* types = reinterpret_cast<Atom*>(data);
+
+        for (unsigned long i = 0; i < itemCount; ++i)
+        {
+            if (types[i] == atoms.NET_WM_WINDOW_TYPE_NOTIFICATION)
+            {
+                isNotification = true;
+                break;
+            }
+        }
+
+        XFree(data);
+    }
+
+    return isNotification;
+}
+
 bool XConnection::IsXEmbedWindow(::Window window, const XAtoms& atoms)
 {
     Atom actualType;

@@ -58,6 +58,14 @@ public:
     Atom NET_WM_WINDOW_TYPE_MENU;
     Atom NET_WM_WINDOW_TYPE_DOCK;
 
+    // A transient toast/status popup - see XConnection::
+    // IsNotificationWindowType() and NotificationPopup::Create() (the
+    // only thing in this codebase that currently sets this on windows
+    // it creates itself). Interned unconditionally, the same as every
+    // other type atom above, not gated on whether NotificationCenter
+    // happens to be in use this session.
+    Atom NET_WM_WINDOW_TYPE_NOTIFICATION;
+
     // _XEMBED_INFO - required by the freedesktop XEmbed spec to be set
     // on any window that wants to be embedded into someone else's
     // window rather than managed as a normal top-level one, *before*

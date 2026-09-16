@@ -246,6 +246,24 @@ public:
     // windows.
     bool IsDockWindowType(::Window window, const XAtoms& atoms);
 
+    // True if _NET_WM_WINDOW_TYPE declares this window a NOTIFICATION -
+    // a transient toast/status popup, the type NotificationPopup::
+    // Create() sets on every window it creates (see that class for
+    // the full design). Those popups are already override-redirect,
+    // so - exactly like IsDockWindowType() just above - they never
+    // reach Manage() in the first place; this is the same "belt and
+    // suspenders" check for the one case that doesn't cover: some
+    // *other*, non-Kohiko notification window declaring this type
+    // without also being override-redirect. Before this existed,
+    // Kohiko had a classification entry for DOCK and for XEmbed but
+    // none at all for NOTIFICATION - the one EWMH type that exists
+    // specifically for this kind of window - so a non-override-
+    // redirect one would have fallen straight through into a normal
+    // BSP tile, a taskbar entry, and focus eligibility, exactly the
+    // failure mode this whole feature exists to close in general, not
+    // just for audio-device toasts specifically.
+    bool IsNotificationWindowType(::Window window, const XAtoms& atoms);
+
     // True if this window carries a _XEMBED_INFO property - the
     // freedesktop XEmbed spec requires any client that wants to be
     // embedded into someone else's window (rather than managed as a

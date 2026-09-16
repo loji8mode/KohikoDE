@@ -200,6 +200,8 @@ if(KOHIKO_DESKTOP_APPS_AVAILABLE)
         src/UiIconCache.cpp
         src/SvgRenderer.cpp
         src/TrayIconClient.cpp
+        src/NotificationPopup.cpp
+        src/NotificationCenter.cpp
         src/Font.cpp
         src/Config.cpp
         src/IconResolver.cpp
@@ -245,6 +247,20 @@ if(KOHIKO_DESKTOP_APPS_AVAILABLE)
     add_executable(test_trayiconclient tests/test_trayiconclient.cpp)
     target_link_libraries(test_trayiconclient PRIVATE kohiko-desktop-shared)
     add_test(NAME TrayIconClient COMMAND test_trayiconclient)
+
+    # Same "needs a real X11 connection, kept out of `make test`" deal
+    # again - focused tests for the new native notification mechanism
+    # itself (NotificationPopup/NotificationCenter - see that file's
+    # own header comment). Only actually needs Font.cpp (part of
+    # kohiko-desktop-shared already) - deliberately does not use
+    # XConnection/XAtoms/WindowManager at all, since neither of the
+    # classes under test depends on them; see
+    # test_windowclassification's own IsNotificationWindowType() checks
+    # for the complementary "WindowManager::Manage() leaves this window
+    # alone" coverage instead.
+    add_executable(test_notificationcenter tests/test_notificationcenter.cpp)
+    target_link_libraries(test_notificationcenter PRIVATE kohiko-desktop-shared)
+    add_test(NAME NotificationCenter COMMAND test_notificationcenter)
 endif()
 
 # --- tests ------------------------------------------------------------------------
@@ -552,6 +568,16 @@ add_executable(test_rect_clamping
 )
 target_include_directories(test_rect_clamping PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME RectClamping COMMAND test_rect_clamping)
+
+# Pure placement/sizing/stacking arithmetic behind the native
+# notification popup mechanism - no X11 dependency, same reasoning as
+# test_rect_clamping just above (in fact it directly reuses
+# Rect::ClampedTo()). See NotificationLayout.h's own header comment.
+add_executable(test_notificationlayout
+    tests/test_notificationlayout.cpp
+)
+target_include_directories(test_notificationlayout PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME NotificationLayout COMMAND test_notificationlayout)
 
 # Pure logic, no live D-Bus connection or running NetworkManager
 # needed - but still needs libdbus-1-dev to compile (links

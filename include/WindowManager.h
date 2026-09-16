@@ -13,6 +13,7 @@
 #include "LockScreen.h"
 #include "MonitorManager.h"
 #include "MouseManager.h"
+#include "NotificationCenter.h"
 #include "Notepad.h"
 #include "PlacementHabitStore.h"
 #include "PowerMenu.h"
@@ -130,6 +131,27 @@ public:
     // Tells EventLoop whether to shorten its select() timeout so a
     // Swap-drop animation plays smoothly instead of idling at ~1Hz.
     bool HasActiveAnimation() const;
+
+    // Tells EventLoop whether to shorten its select() timeout so a
+    // notification's own 2.5-second expiry (see NotificationCenter::
+    // Tick()) is caught promptly instead of only at the idle ~1Hz
+    // cadence - a much lighter cadence than HasActiveAnimation()'s own
+    // ~125Hz (an expiring toast needs to be caught promptly, not
+    // played back smoothly frame-by-frame - see EventLoop.cpp's own
+    // comment for the exact rate chosen and why).
+    bool HasActiveNotification() const;
+
+    // Posts a native toast notification (see NotificationCenter.h) on
+    // FocusedMonitor(), bottom-right, for the spec's default 2.5s
+    // lifetime - the reusable entry point every other component (see
+    // kohiko-audio-tray's own PostDeviceToast(), which uses the exact
+    // same NotificationCenter class directly rather than going through
+    // WindowManager at all, since it has no WindowManager instance to
+    // call this on) doesn't strictly need, but that WindowManager
+    // itself, and anything driving it via IPC (see HandleIpcCommand()'s
+    // "notify" verb, and `kohikoctl notify` below), can use to prove
+    // out and exercise the exact same mechanism live.
+    void ShowPopupNotification(const std::string& text);
 
     // --- X11 event handlers (called by EventDispatcher) -------------------
 
@@ -562,6 +584,20 @@ private:
     // whichever bar now corresponds to Primary().
     void RebuildBars();
 
+    // (Re)builds m_notifications' font/theme from m_config - same
+    // "bar.background/bar.foreground/general.border_color_active,
+    // general.font" palette PowerMenu::Configure() already reads, so a
+    // native toast reads as one consistent visual family with the
+    // rest of Kohiko's own UI regardless of which component actually
+    // posted it. Called once from Initialize() and again from
+    // ReloadConfig(), same as every other Configure() call in this
+    // file - safe either time (NotificationCenter::Initialize() just
+    // reloads the font and updates the theme new popups will use; any
+    // already-showing popup is left alone until it expires, exactly
+    // like Bar's own Configure() leaves whatever's on screen alone
+    // until the next Redraw()).
+    void InitializeNotificationCenter();
+
     // nullptr if `monitor` has no bar yet (shouldn't normally happen -
     // RebuildBars() keeps every connected monitor's bar current - but
     // callers that run mid-reconciliation should still check).
@@ -888,6 +924,16 @@ private:
     Notepad m_notepad;
     PowerMenu m_powerMenu;
     LockScreen m_lockScreen;
+
+    // Owns every currently-showing toast (see NotificationCenter.h) -
+    // deliberately not keyed per-monitor the way m_bars is: unlike the
+    // bar (always present, one per monitor, for the monitor's entire
+    // lifetime), notifications are rare, short-lived, and created on
+    // demand against whichever monitor Post() names, so one shared
+    // instance covering every monitor is simpler and exactly as
+    // correct.
+    NotificationCenter m_notifications;
+
     IdleWatcher m_idleWatcher;
     ScreenSaverInhibitor m_sleepInhibitor;
     AppDirWatcher m_appDirWatcher;

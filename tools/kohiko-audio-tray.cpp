@@ -1,10 +1,13 @@
 #include "AppInstanceLock.h"
+#include "NotificationCenter.h"
 #include "PipeWireClient.h"
 #include "TrayIconClient.h"
 #include "UiIconCache.h"
 #include "UiPopupMenu.h"
 
 #include <X11/Xlib.h>
+
+#include <map>
 
 using namespace Kohiko;
 
@@ -53,6 +56,20 @@ IconFallback FallbackForOutput(const TrayIconClient& tray, const AudioNode* node
     return { "\u2587", tray.Theme().foreground }; // ▇
 }
 
+// id -> what the toast should call it - node.description when
+// PipeWire actually reports one (the common case), falling back to
+// node.name otherwise, same "description if we have one" convention
+// the right-click menu's own device list above already follows.
+std::map<std::uint32_t, std::string> NodeLabels(const PipeWireClient& pw)
+{
+    std::map<std::uint32_t, std::string> labels;
+
+    for (auto& node : pw.Nodes())
+        labels[node.id] = node.description.empty() ? node.name : node.description;
+
+    return labels;
+}
+
 }
 
 int main()
@@ -67,7 +84,104 @@ int main()
     UiIconCache iconCache(tray.GetDisplay(), tray.GetVisual(), tray.GetColormap(),
         RootWindow(tray.GetDisplay(), tray.GetScreen()));
 
-    pipewire.SetChangeHandler([&] { tray.RequestRedraw(); });
+    // Native toast notifications for real device connect/disconnect
+    // events - see NotificationCenter.h for the reusable mechanism
+    // itself, and docs/ARCHITECTURE.md's "Native notifications"
+    // section for why this exists instead of relying on an external
+    // freedesktop notification daemon Kohiko doesn't ship (see
+    // NotificationClient.h's own comment on that). Shares this
+    // process's own X connection and tray theme - the exact same
+    // NotificationPopup/NotificationCenter classes WindowManager
+    // itself uses for ShowPopupNotification(), which is what makes
+    // this "a reusable Kohiko notification mechanism... used by other
+    // components" rather than something built specifically for audio.
+    NotificationCenter notifications;
+    notifications.Initialize(
+        tray.GetDisplay(), tray.GetScreen(),
+        RootWindow(tray.GetDisplay(), tray.GetScreen()),
+        "monospace:pixelsize=14",
+        tray.Theme());
+
+    // A 2.5-second-lifetime toast needs to be caught reasonably
+    // promptly, not up to ~2 seconds late - reuses TrayIconClient's
+    // own existing timer mechanism (the same one the PipeWire
+    // reconnect-retry below already uses) rather than a new polling
+    // loop, at a tighter cadence than that one specifically because
+    // this one actually needs it (see EventLoop.cpp's own comment on
+    // kohiko's equivalent choice for the exact same reason).
+    tray.SetInterval(100, [&] { notifications.Tick(); });
+
+    // Routes Expose events for the notification popups' own windows -
+    // which share this same Display connection, see NotificationPopup's
+    // own comment on why - to the right place; see
+    // TrayIconClient::SetEventHandler()'s own comment for why this
+    // hook exists at all.
+    tray.SetEventHandler([&](XEvent& event)
+    {
+        if (event.type == Expose)
+            notifications.HandleExpose(event.xexpose.window);
+    });
+
+    // This tray widget has no MonitorManager/XRandr awareness of its
+    // own (see docs/ARCHITECTURE.md's "remaining limitations" note) -
+    // positions against the whole root window instead of a specific
+    // monitor, which is exactly right on any single-monitor session
+    // and on the common multi-monitor case where XRandr monitors form
+    // one seamless virtual screen, but will land at the bottom-right
+    // of the *combined* virtual desktop rather than a specific
+    // physical monitor on a more unusual multi-screen layout.
+    auto rootGeometry = [&]
+    {
+        return Rect{0, 0,
+            DisplayWidth(tray.GetDisplay(), tray.GetScreen()),
+            DisplayHeight(tray.GetDisplay(), tray.GetScreen())};
+    };
+
+    // Seeded from whatever's already plugged in immediately after
+    // Connect() *and* re-seeded, without posting anything, on the
+    // change handler's own first invocation below - covering both
+    // "Connect() itself already populated Nodes() synchronously" and
+    // "the initial registry sync only arrives asynchronously, via
+    // that first callback" without needing to know which one this
+    // particular PipeWire/WirePlumber setup actually does. Either way,
+    // only a genuine *later* connect/disconnect ever posts a toast -
+    // startup itself never does.
+    std::map<std::uint32_t, std::string> knownNodes = NodeLabels(pipewire);
+    bool knownNodesSeeded = false;
+
+    pipewire.SetChangeHandler([&]
+    {
+        tray.RequestRedraw();
+
+        // SetChangeHandler() fires for volume changes and default-
+        // device switches too, not just a device actually being
+        // plugged in or unplugged (see PipeWireClient::SetChangeHandler()'s
+        // own comment) - diffing Nodes() by id against the last known
+        // snapshot is what isolates "a device was actually connected/
+        // disconnected" from every other kind of update, so this only
+        // ever posts a toast for the specific event the spec asks for.
+        std::map<std::uint32_t, std::string> currentNodes = NodeLabels(pipewire);
+
+        if (!knownNodesSeeded)
+        {
+            // See knownNodes' own comment above - this first callback
+            // might just be reporting the async initial registry
+            // sync, not a real event.
+            knownNodes = std::move(currentNodes);
+            knownNodesSeeded = true;
+            return;
+        }
+
+        for (auto& [id, label] : currentNodes)
+            if (knownNodes.find(id) == knownNodes.end())
+                notifications.Post(label + " connected", rootGeometry());
+
+        for (auto& [id, label] : knownNodes)
+            if (currentNodes.find(id) == currentNodes.end())
+                notifications.Post(label + " disconnected", rootGeometry());
+
+        knownNodes = std::move(currentNodes);
+    });
 
     if (pipewire.Available())
         tray.WatchFd(pipewire.Fd(), [&] { pipewire.Iterate(); });

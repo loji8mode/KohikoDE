@@ -1802,3 +1802,104 @@ never been exercised was fine.
 
 --------------------------------------------------------------------------
 
+0.20.9 is the first release in this run of real-execution-driven fixes
+that started from a feature request rather than a bug report - "make
+headphone/audio connect-disconnect messages behave like a transient
+desktop notification instead of a normal X11 window" - and the request
+came with its own explicit instruction not to take its own premise at
+face value: investigate what actually creates those messages today
+before writing anything. That instruction turned out to matter, the
+same way "this wasn't another `Bar::Redraw()` problem" mattered for the
+tray-icon investigation two releases ago: taking a report's framing
+literally would have meant hunting for a headphone-specific window that
+doesn't exist anywhere in this codebase. What actually exists is
+`AudioWindow::MaybeNotifyDefaultChanged()`, an opt-in, off-by-default
+D-Bus call into infrastructure - a freedesktop notification daemon -
+Kohiko has never shipped its own implementation of, a gap
+`NotificationClient.h` had been documenting in a parenthetical
+("including Kohiko's own, once one exists") since long before this
+release. Nothing in the reported symptom was headphone-specific; it was
+a general classification gap wearing a specific example. Confirming
+that meant reading `WindowManager::Manage()`'s classification cascade
+end to end rather than assuming it was complete: an explicit entry for
+`_NET_WM_WINDOW_TYPE_DOCK`, a second for XEmbed, and nothing at all for
+`_NET_WM_WINDOW_TYPE_NOTIFICATION` - the one EWMH type that exists
+specifically for this class of window. A non-override-redirect window
+declaring it would fall straight through into a normal BSP tile, a
+taskbar entry, and focus eligibility, which is a fair, literal
+description of "shows as a normal X11 window" even though nothing
+headphone-specific produces one today.
+
+The fix this pointed to was building the thing that was actually
+missing - a native notification mechanism - rather than patching the
+one existing, unrelated, opt-in D-Bus code path. `NotificationPopup`/
+`NotificationCenter` follow the same construction technique
+`PowerMenu`/`UiPopupMenu` already established (plain Xlib + Xft,
+override-redirect, no toolkit), but deliberately take on zero
+dependency on `XConnection` or `WindowManager` itself - a choice made
+specifically so the request's own "reusable... used by other
+components" requirement would be true by construction rather than by
+assertion. It paid off immediately: the real, always-running signal for
+"a device was actually plugged in or unplugged" doesn't live in the
+main `kohiko` binary at all (which has no PipeWire linkage, by design,
+confirmed by the Makefile's own source-list split) - it lives in
+`kohiko-audio-tray`, a separate process, which is exactly where the
+notification mechanism ended up being *used* first, with
+`WindowManager` itself gaining a real but secondary call site
+(`ShowPopupNotification()`/`kohikoctl notify`) mostly so the same code
+path used in anger by the audio tray is also directly, live-triggerable
+without a real headphone to plug in.
+
+`WindowManager::Manage()` also gained the missing
+`IsNotificationWindowType()` classification the investigation above
+found absent - mirroring `IsDockWindowType()`'s existing shape exactly,
+including that check's own honest caveat that override-redirect is a
+convention, not something EWMH requires, so a window claiming this type
+without also being override-redirect still needs an explicit backstop.
+Every popup this release's own code creates is already override-
+redirect (so in practice never reaches `Manage()` at all), which makes
+this a genuine belt-and-suspenders addition rather than something the
+new feature strictly needed to work - closing the general gap the
+investigation surfaced mattered more here than the minimum needed to
+ship the specific feature.
+
+Two smaller things came out of building this the way the rest of this
+project's history suggests they should: reusing existing machinery
+instead of adding new instances of it, and tracing a change all the way
+through what it touches rather than stopping at the obvious edit.
+`EventLoop.cpp`'s tick-rate selector already existed for exactly this
+shape of problem - "something transient needs tighter timing than the
+idle ~1Hz baseline, but only while it's actually happening" - previously
+only for Swap-drag animations; it now also runs a much lighter ~10Hz
+(deliberately not the animation path's ~125Hz - a 2.5-second-lifetime
+toast needs to be caught promptly, not played back frame-by-frame)
+while any notification is showing, rather than this release inventing
+its own timer. And giving `TrayIconClient` a second window to worry
+about (a notification popup, sharing its one X connection) surfaced
+something latent in its own `HandleEvent()`: the `Expose` case never
+checked which window an event was actually for, harmless for the
+entire time that class only ever owned one window, silently wrong the
+moment it owns two. Fixed alongside a new, generic `SetEventHandler()`
+hook rather than special-cased for notifications specifically, on the
+theory that "this class now sometimes owns more than one window" is
+the kind of thing worth handling in general once it's true at all.
+
+One honest gap, in the same spirit as the ones this document has
+recorded before rather than smoothed over: `kohiko-audio-tray` has no
+`MonitorManager`/XRandr awareness of its own (deliberately - pulling
+that WM-only machinery into a small tray tool felt like a worse trade
+than the limitation), so its own toasts position against the whole
+root window rather than a specific physical monitor. Correct on any
+single-monitor session and on the common multi-monitor case where
+XRandr outputs form one seamless virtual screen; a toast would land at
+the bottom-right of the combined virtual desktop rather than a specific
+physical monitor on a more unusual layout. `WindowManager::
+ShowPopupNotification()` doesn't share this limitation - it positions
+against `FocusedMonitor()`'s own real geometry - so the asymmetry is
+between the two call sites this release ships, not a limitation of
+`NotificationCenter` itself, which takes whatever monitor rect it's
+given and was verified independently, on paper and by a live multi-
+monitor-shaped test case, to place correctly against either.
+
+--------------------------------------------------------------------------
+

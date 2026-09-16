@@ -40,6 +40,8 @@
 #include "XAtoms.h"
 #include "XConnection.h"
 
+#include <X11/Xatom.h>
+
 #include <cstdio>
 #include <cstdlib>
 
@@ -143,6 +145,73 @@ int main()
         Window bogus = 0x7ffffff0; // astronomically unlikely to collide with anything real on this display
         Check(!connection.IsXEmbedWindow(bogus, atoms),
               "a nonexistent window ID is treated as \"not XEmbed\" rather than crashing or throwing");
+    }
+
+    // Regression test for the native-notification feature: before this
+    // existed, Kohiko had a Manage() classification entry for DOCK and
+    // for XEmbed but none at all for _NET_WM_WINDOW_TYPE_NOTIFICATION -
+    // see XConnection::IsNotificationWindowType()'s own comment for
+    // why that's a real, general gap (not just an audio-device-toast
+    // one) this closes. NotificationPopup::Create() is the only thing
+    // in this codebase that currently sets this type, and it also sets
+    // override-redirect (so its own windows never reach Manage() far
+    // enough to need this check at all) - these tests exist for the
+    // "some *other* notification window, not override-redirect" case
+    // this check is actually the backstop for, the same reasoning
+    // IsXEmbedWindow()'s own tests above already established for the
+    // XEmbed side of Manage().
+    std::printf("\nXConnection::IsNotificationWindowType() tests:\n");
+
+    std::printf("-- An ordinary window, no _NET_WM_WINDOW_TYPE set --\n");
+    {
+        Window plain = XCreateSimpleWindow(display, root, 0, 0, 10, 10, 0, 0, 0);
+        Check(!connection.IsNotificationWindowType(plain, atoms),
+              "a plain window with no _NET_WM_WINDOW_TYPE property at all is not treated as a notification");
+        XDestroyWindow(display, plain);
+    }
+
+    std::printf("\n-- A window declaring _NET_WM_WINDOW_TYPE_DOCK (a different type entirely) --\n");
+    {
+        Window dock = XCreateSimpleWindow(display, root, 0, 0, 200, 24, 0, 0, 0);
+
+        Atom dockType = atoms.NET_WM_WINDOW_TYPE_DOCK;
+        XChangeProperty(display, dock, atoms.NET_WM_WINDOW_TYPE, XA_ATOM, 32,
+            PropModeReplace, reinterpret_cast<unsigned char*>(&dockType), 1);
+        XSync(display, False);
+
+        Check(!connection.IsNotificationWindowType(dock, atoms),
+              "a window declaring some other _NET_WM_WINDOW_TYPE (DOCK here) is not mistaken for a notification "
+              "- confirms this checks the specific type value, not merely \"any type is set\"");
+        Check(connection.IsDockWindowType(dock, atoms),
+              "...and is still correctly recognized as a DOCK by the existing, unrelated check - this feature "
+              "did not regress that classification");
+
+        XDestroyWindow(display, dock);
+    }
+
+    std::printf("\n-- A window declaring _NET_WM_WINDOW_TYPE_NOTIFICATION, exactly like NotificationPopup::"
+                "Create() sets it --\n");
+    {
+        Window toast = XCreateSimpleWindow(display, root, 0, 0, 240, 48, 0, 0, 0);
+
+        Atom notificationType = atoms.NET_WM_WINDOW_TYPE_NOTIFICATION;
+        XChangeProperty(display, toast, atoms.NET_WM_WINDOW_TYPE, XA_ATOM, 32,
+            PropModeReplace, reinterpret_cast<unsigned char*>(&notificationType), 1);
+        XSync(display, False);
+
+        Check(connection.IsNotificationWindowType(toast, atoms),
+              "a window with _NET_WM_WINDOW_TYPE_NOTIFICATION set is recognized as one, so WindowManager::"
+              "Manage() will skip it - never tiled, never in the taskbar, never focus-eligible - even in the "
+              "hypothetical case where such a window isn't also override-redirect");
+
+        XDestroyWindow(display, toast);
+    }
+
+    std::printf("\n-- A destroyed/nonexistent window (notification check) --\n");
+    {
+        Window bogus = 0x7ffffff0;
+        Check(!connection.IsNotificationWindowType(bogus, atoms),
+              "a nonexistent window ID is treated as \"not a notification\" rather than crashing or throwing");
     }
 
     connection.Disconnect();

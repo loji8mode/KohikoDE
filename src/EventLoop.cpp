@@ -183,10 +183,24 @@ void EventLoop::Run()
         // A window sliding into place after a Swap needs Tick() to run
         // at something like frame rate, not once a second - but only
         // while an animation is actually in flight, so an idle Kohiko
-        // still spends almost all its time asleep in select().
-        auto tickInterval = m_windowManager.HasActiveAnimation()
-            ? std::chrono::steady_clock::duration(std::chrono::microseconds(8000)) // ~125Hz
-            : std::chrono::steady_clock::duration(std::chrono::seconds(1));
+        // still spends almost all its time asleep in select(). A
+        // showing notification (see NotificationCenter::Tick()) has
+        // the same "idle 1Hz isn't tight enough" problem for its own
+        // 2.5-second expiry, but doesn't need to be caught frame-
+        // accurately the way a moving window does - just promptly
+        // enough that "exactly 2.5 seconds" (per the spec) doesn't
+        // read as "2.5 to 3.5 seconds" in the worst case - so this
+        // uses a much lighter ~10Hz instead of reaching for the
+        // animation path's own ~125Hz, which would be the "unnecessary
+        // high-frequency timer" the spec explicitly warns against.
+        std::chrono::steady_clock::duration tickInterval;
+
+        if (m_windowManager.HasActiveAnimation())
+            tickInterval = std::chrono::microseconds(8000); // ~125Hz
+        else if (m_windowManager.HasActiveNotification())
+            tickInterval = std::chrono::milliseconds(100); // ~10Hz
+        else
+            tickInterval = std::chrono::seconds(1);
 
         auto now = std::chrono::steady_clock::now();
 

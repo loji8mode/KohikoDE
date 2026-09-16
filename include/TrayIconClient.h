@@ -73,6 +73,18 @@ public:
     using TimerCallback = std::function<void()>;
     void SetInterval(int intervalMs, TimerCallback callback);
 
+    // Called for every X event Run()'s own loop sees, right after this
+    // class's own HandleEvent() - regardless of which window the event
+    // was actually for. Exists so a caller that creates *other*
+    // windows sharing this same Display connection (a NotificationPopup,
+    // say - see kohiko-audio-tray.cpp's own PostDeviceToast()) can still
+    // route Expose events for those windows somewhere, rather than
+    // Run()'s loop only ever knowing about m_window. A no-op (this
+    // class's own event handling is unaffected either way) until a
+    // caller sets one.
+    using EventHandler = std::function<void(XEvent&)>;
+    void SetEventHandler(EventHandler handler);
+
     void RequestRedraw() { m_dirty = true; }
 
     void Run();
@@ -118,6 +130,7 @@ private:
     ClickHandler m_leftClick;
     ClickHandler m_rightClick;
     ScrollHandler m_scroll;
+    EventHandler m_extraEventHandler;
 
     std::vector<FdWatch> m_fdWatches;
     std::vector<Timer> m_timers;

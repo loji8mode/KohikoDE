@@ -48,6 +48,7 @@ void PrintUsage()
         "  kohikoctl monitors             JSON list of detected monitors\n"
         "  kohikoctl activewindow         JSON info for the focused window\n"
         "  kohikoctl tree                 JSON dump of the current workspace's BSP tree\n"
+        "  kohikoctl notify <text>        show a native toast notification (bottom-right, 2.5s)\n"
         "  kohikoctl reload               re-read the config file\n"
         "  kohikoctl reloadlauncher       re-scan applications/files for the native launcher\n"
         "  kohikoctl quit                 ask kohiko to exit\n"

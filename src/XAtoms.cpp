@@ -41,6 +41,7 @@ void XAtoms::Initialize()
     NET_WM_WINDOW_TYPE_DROPDOWN_MENU = XInternAtom(display, "_NET_WM_WINDOW_TYPE_DROPDOWN_MENU", False);
     NET_WM_WINDOW_TYPE_MENU       = XInternAtom(display, "_NET_WM_WINDOW_TYPE_MENU", False);
     NET_WM_WINDOW_TYPE_DOCK       = XInternAtom(display, "_NET_WM_WINDOW_TYPE_DOCK", False);
+    NET_WM_WINDOW_TYPE_NOTIFICATION = XInternAtom(display, "_NET_WM_WINDOW_TYPE_NOTIFICATION", False);
 
     XEMBED_INFO              = XInternAtom(display, "_XEMBED_INFO", False);
 

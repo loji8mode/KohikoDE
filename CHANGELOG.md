@@ -1,5 +1,108 @@
 # Changelog
 
+## Version 0.20.9
+
+Release date: 2026-09-13
+
+### Added
+- **Native notification popups, first used for audio device connect/
+  disconnect toasts.** Requested as "headphone/audio connect-disconnect
+  messages should behave like a transient desktop notification instead
+  of a normal X11 window/panel." Investigated the actual current
+  behavior before touching anything, per the request's own explicit
+  instruction not to blindly special-case headphones: there is no
+  headphone-specific window-creation code anywhere in this codebase.
+  The one real "audio device changed" signal that exists,
+  `AudioWindow::MaybeNotifyDefaultChanged()` (opt-in, off by default),
+  goes through `NotificationClient`'s D-Bus call to
+  `org.freedesktop.Notifications` - infrastructure Kohiko has never
+  shipped an implementation of (see `NotificationClient.h`'s own
+  long-standing comment: "every desktop notification daemon (including
+  Kohiko's own, once one exists)"), so today it silently does nothing
+  unless the user happens to be running an unrelated third-party
+  daemon. Separately - and this is the actual general-purpose gap this
+  release closes - `WindowManager::Manage()`'s classification cascade
+  had an explicit entry for `_NET_WM_WINDOW_TYPE_DOCK` and for XEmbed
+  but none at all for `_NET_WM_WINDOW_TYPE_NOTIFICATION`, the one EWMH
+  type that exists specifically for this kind of transient popup - so
+  any non-override-redirect window declaring it would have fallen
+  straight through into a normal BSP tile, a taskbar entry, and focus
+  eligibility, exactly the symptom described, just not headphone-
+  specific.
+  Built as a genuinely reusable mechanism rather than a one-off:
+  `NotificationPopup` (one override-redirect toast "card", plain Xlib +
+  Xft, the same construction technique `PowerMenu`/`UiPopupMenu`
+  already use) and `NotificationCenter` (the pool/stacking/expiry
+  policy on top of it - `Post()`/`Tick()`/`HandleExpose()`/
+  `OwnsWindow()`), plus a pure, X11-free `NotificationLayout.h` for the
+  placement/sizing/stacking arithmetic (bottom-right, `kMargin`=16px
+  from the screen edge, auto-sized to content between `kMinWidth`=180
+  and `kMaxWidth`=360, stacked with an 8px `kGap`, capped at
+  `kMaxStacked`=5 active at once). Deliberately has zero dependency on
+  `XConnection`/`WindowManager` - the exact same classes are usable by
+  any standalone process, not just the main `kohiko` binary itself
+  (confirmed by using them from `kohiko-audio-tray` below). Each popup
+  sets `_NET_WM_WINDOW_TYPE_NOTIFICATION` itself (closing the classifi-
+  cation gap above from the window's own side) and is override-
+  redirect, so it never generates a `MapRequest` at all - it is never
+  tiled, never in `_NET_CLIENT_LIST`, never focus-eligible, and never
+  touched by BSP/workspace/layout logic, independent of and in
+  addition to `WindowManager::Manage()`'s own new
+  `IsNotificationWindowType()` skip-check (mirroring the existing
+  `IsDockWindowType()` precedent exactly) for the belt-and-suspenders
+  case of some *other*, non-Kohiko notification window that isn't
+  override-redirect. Lifetime is exactly 2.5 seconds
+  (`NotificationLayout::kDefaultLifetime`), checked via the *existing*
+  Tick()-driven expiry pattern `Bar::ShowNotification()`'s own text
+  notifications already use (`WindowManager::Tick()`/`EventLoop.cpp`'s
+  `TickSchedule`) rather than a new polling loop - `EventLoop.cpp`'s
+  own tick-rate selector (previously only sped up for
+  `HasActiveAnimation()`) now also runs at a light ~10Hz (not the
+  animation path's ~125Hz - deliberately coarser, since a 2.5s-lifetime
+  toast needs to be caught promptly, not played back frame-by-frame)
+  while `WindowManager::HasActiveNotification()` is true, settling back
+  to the idle ~1Hz baseline the instant nothing is showing.
+  Wired into the real, always-running signal: `kohiko-audio-tray` (not
+  the on-demand `kohiko-audio` settings window, and not the main
+  `kohiko` binary itself, which has no PipeWire linkage at all by
+  design and gained none here) now diffs `PipeWireClient::Nodes()` by
+  id across every `SetChangeHandler()` firing - which also fires for
+  volume/default-device changes, not just connect/disconnect - to
+  isolate a device actually being plugged in or unplugged, posting
+  "<device> connected"/"<device> disconnected" through the same
+  `NotificationCenter` class, ticked via `TrayIconClient`'s own existing
+  `SetInterval()` timer (a new `SetEventHandler()` hook on that class
+  routes the popups' own Expose events correctly, which also surfaced
+  and fixed a latent imprecision in `TrayIconClient::HandleEvent()`'s
+  Expose case - it never checked which window an Expose was actually
+  for, harmless while that class only ever owned one window, no longer
+  once it shares its X connection with other windows). `WindowManager`
+  itself also gained a real, working entry point
+  (`ShowPopupNotification()`, and a `kohikoctl notify "<text>"` IPC
+  verb) - not because anything currently calls it internally, but so
+  the exact same mechanism `kohiko-audio-tray` uses is directly,
+  live-triggerable for verification and available to any future
+  component, per the request's own "reusable... used by other
+  components" requirement.
+  Tests: `tests/test_notificationlayout.cpp` (pure logic, no X11 - the
+  2.5s constant, sizing/clamping, stacking math, independent per-
+  monitor placement); `tests/test_notificationcenter.cpp` (real X11 -
+  creation, override-redirect + `_NET_WM_WINDOW_TYPE_NOTIFICATION` +
+  no key/button event mask + no `WM_HINTS`, no input-focus change
+  across `Show()`, placement, multiple/stacked notifications, eviction
+  past `kMaxStacked`, independent expiry, and that a destroyed popup's
+  window id is actually gone rather than merely unmapped); and new
+  `IsNotificationWindowType()` cases added to
+  `tests/test_windowclassification.cpp` alongside the existing
+  `IsDockWindowType()`/`IsXEmbedWindow()` ones. Verified live against a
+  real `kohiko` session with an ordinary `xterm` window present:
+  `kohikoctl clients`/`tree`/`activewindow` are byte-identical before
+  and after `kohikoctl notify`, focus never leaves the `xterm`, the
+  popup's on-screen position and multi-notification stacking (exact
+  8px gaps, no overlap) matched the layout math precisely, and it was
+  fully destroyed (confirmed via `xwininfo`) a little over 2.5 seconds
+  later.
+
 ## Version 0.20.8
 
 Release date: 2026-09-11

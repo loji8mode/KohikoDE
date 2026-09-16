@@ -23,6 +23,7 @@ current limitations, recommendations), see
 - [Core window manager](#core-window-manager)
 - [UI toolkit (`UiWidget` & friends)](#ui-toolkit-uiwidget--friends)
 - [Companion applications](#companion-applications)
+- [Native notifications](#native-notifications)
 - [Configuration system](#configuration-system)
 - [IPC](#ipc)
 - [Rendering pipeline](#rendering-pipeline)
@@ -318,6 +319,94 @@ been tested on a real display, only via Xvfb screenshots.
 toolkit and already works; see Phase 10 in `PROJECT_HISTORY.md` and
 the note in [UI toolkit](#ui-toolkit-uiwidget--friends) above.
 
+## Native notifications
+
+`NotificationPopup`/`NotificationCenter` (0.20.9) are a small, deliberately
+dependency-light pair of classes for showing a transient, bottom-right
+"toast" - first used for audio device connect/disconnect, but not
+specific to audio in any way. Not to be confused with `Bar`'s own,
+older, unrelated **notification text** (`Bar::ShowNotification()`,
+`m_notificationExpiry` - see [Rendering pipeline](#rendering-pipeline)
+and `WindowManager::ShowNotificationOnMonitor()`), which draws a line
+of text on the bar itself for window-placement/workspace-conflict
+messages and was untouched by this addition; the two mechanisms
+coexist for different purposes and neither replaces the other.
+
+**Why a from-scratch native mechanism rather than the existing D-Bus
+path**: `AudioWindow`/`NetworkWindow`/`BluetoothWindow` already have a
+`NotificationClient` that calls `org.freedesktop.Notifications` over
+D-Bus - but that's a call to an *external* notification daemon, and
+Kohiko has never shipped one of its own (see `NotificationClient.h`'s
+own long-standing comment on this). `NotificationPopup`/
+`NotificationCenter` don't replace `NotificationClient` - a component
+that wants to interoperate with a real desktop-environment notification
+daemon, if the user happens to be running one, should still use it -
+but they're what a native, no-external-daemon-required Kohiko toast
+needed, and did not exist before this release. See
+`CHANGELOG.md`'s 0.20.9 entry for the full investigation that led here,
+including a real, general `WindowManager::Manage()` classification gap
+this closed as a side effect (no handling at all, previously, for
+`_NET_WM_WINDOW_TYPE_NOTIFICATION` - the one EWMH type that exists for
+exactly this kind of window - alongside the existing `_NET_WM_WINDOW_TYPE_DOCK`
+and XEmbed entries).
+
+**`NotificationPopup`** is one popup "card": an override-redirect X11
+window (so it never generates a `MapRequest` at all - never tiled,
+never in `_NET_CLIENT_LIST`, never focus-eligible, independent of and
+in addition to the `Manage()` classification check above), drawn with
+plain Xlib + Xft, the same technique `Bar`/`PowerMenu`/`UiPopupMenu`
+already use (see [Rendering pipeline](#rendering-pipeline)). Sets
+`_NET_WM_WINDOW_TYPE_NOTIFICATION` on itself. Deliberately has **zero
+dependency on `XConnection` or `WindowManager`** - its API is plain
+`Display*`/screen/root/`Font&`/`UiTheme&`, the same shape
+`UiPopupMenu.h` already established - specifically so the same class
+is usable from a standalone process (see `kohiko-audio-tray.cpp` below)
+and not just from inside the `kohiko` binary.
+
+**`NotificationCenter`** is the pool/policy on top of it: `Post(text,
+monitorGeometry, lifetime = 2.5s)` creates one, stacking it above any
+of its own still-active popups on that same monitor rather than
+overlapping them (bottom-right corner, newest closest to the corner,
+`NotificationLayout.h`'s pure - no X11 - arithmetic for the actual
+margin/gap/sizing/clamping math, independently unit-tested); `Tick()`
+destroys whatever's expired and restacks whatever's left, and must be
+called periodically by whatever event loop the owning process already
+runs - `WindowManager::Tick()` (see `WindowManager::
+HasActiveNotification()`, which - the same way `HasActiveAnimation()`
+already did for Swap-drag animations - briefly raises `EventLoop.cpp`'s
+own tick rate, to a much lighter ~10Hz rather than the animation path's
+~125Hz, while anything here is showing) for the main `kohiko` process,
+or `TrayIconClient::SetInterval()` for a standalone tray tool. Neither
+class ever starts a timer, thread, or polling loop of its own - see
+either header's own comment for why that split of responsibility
+matters.
+
+**Where it's actually used today**: `kohiko-audio-tray` diffs
+`PipeWireClient::Nodes()` by id across every `SetChangeHandler()`
+firing (which also fires for volume/default-device changes, not just a
+device being plugged in or unplugged) to isolate a genuine connect/
+disconnect, and posts through its own `NotificationCenter` instance,
+ticked via a `TrayIconClient::SetInterval()` timer and repainted via a
+new, generic `TrayIconClient::SetEventHandler()` hook (routing `Expose`
+events for the popup's own window, which shares that process's one X
+connection, somewhere - see that method's own comment, and the latent
+`HandleEvent()` Expose-routing imprecision it surfaced and fixed along
+the way). `WindowManager` itself also has a working, direct call site
+(`ShowPopupNotification()`, positioning against `FocusedMonitor()`'s
+real geometry - and, over IPC, `kohikoctl notify "<text>"`) - not
+because anything internal calls it yet, but so the exact mechanism
+`kohiko-audio-tray` uses is independently, live-triggerable, and so a
+future WM-internal caller has a real, exercised entry point to build
+on rather than a theoretical one. See [Extension
+points](#extension-points) for how a *new* component should post one.
+
+**A real, known limitation**: `kohiko-audio-tray` has no
+`MonitorManager`/XRandr awareness of its own (deliberately - see [Known
+limitations](#known-limitations--recommendations-for-the-next-session)) -
+its own toasts position against the whole root window, not a specific
+physical monitor, unlike `WindowManager::ShowPopupNotification()`'s own
+call site.
+
 ## Configuration system
 
 Two entirely separate configuration mechanisms, for two different
@@ -583,6 +672,25 @@ draws nothing beyond the background fill, indistinguishable from a
 broken icon; see any of `kohiko-audio-tray.cpp`/`kohiko-network-tray.cpp`/
 `kohiko-bluetooth-tray.cpp`'s `FallbackFor*()` for the pattern.
 
+**A new native notification** - see [Native
+notifications](#native-notifications) for the full design. From inside
+`kohiko` itself, call the existing `WindowManager::ShowPopupNotification(text)`
+(or add a new call site if you have a real trigger, the way this
+release added `kohikoctl notify` as one) - no wiring needed, it already
+ticks and dispatches Expose correctly. From a standalone process (a new
+tray tool, say), create your own `NotificationCenter`, call
+`Initialize()` with your process's own `Display*`/screen/root/font/
+theme, `Post()` when you have something to say, and drive `Tick()` from
+whatever timer mechanism your process already has (`TrayIconClient::
+SetInterval()` if you're built on that - see `kohiko-audio-tray.cpp`'s
+own use of it - a plain `select()`/`poll()` timeout otherwise). If your
+process shares one X `Display*` connection across more than one window
+(the notification popup plus your own tray icon or app window), make
+sure whatever reads that connection's events routes `Expose` for a
+window it doesn't otherwise recognise to `NotificationCenter::
+HandleExpose()` - `TrayIconClient::SetEventHandler()` is the hook this
+release added for exactly that.
+
 **A new full companion app** (a settings page of its own, like
 `kohiko-audio`) - build on the shared UI toolkit
 (`UiWindow`/`UiWidget`/`Card`/`TextField`/...) and whichever backend
@@ -608,6 +716,19 @@ exist for exactly that reason (see each one's own header comment).
 
 ## Known limitations / recommendations for the next session
 
+- **`kohiko-audio-tray`'s native notification toasts position against
+  the whole root window, not a specific physical monitor** (0.20.9) -
+  see [Native notifications](#native-notifications). Correct on any
+  single-monitor session and on the common multi-monitor case where
+  XRandr outputs form one seamless virtual screen; a toast would land
+  at the bottom-right of the combined virtual desktop rather than a
+  specific physical monitor on a more unusual layout. Deliberate:
+  pulling `MonitorManager`/XRandr - WM-only machinery - into a small
+  tray tool felt like a worse trade than the limitation.
+  `WindowManager::ShowPopupNotification()` doesn't share this
+  limitation (it positions against `FocusedMonitor()`'s own real
+  geometry); worth fixing in `kohiko-audio-tray` itself only if a real
+  multi-monitor session actually surfaces it as a problem.
 - **No generic layout system.** Every page in
   `AudioWindow`/`NetworkWindow`/`BluetoothWindow` hand-computes pixel
   `Rect`s with an accumulating `y` offset and a handful of named width

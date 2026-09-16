@@ -116,7 +116,8 @@ DESKTOP_SHARED_OBJ := $(patsubst src/%.cpp,build/%.o,$(DESKTOP_SHARED_SRC))
 # Xft text rendering) - reused as-is via the same generic
 # `build/%.o: src/%.cpp` pattern rule below rather than recompiled a
 # second time under a different name.
-DESKTOP_COMMON_OBJ := build/Font.o build/Config.o build/IconResolver.o build/Xdg.o build/Utils.o build/IniFile.o
+DESKTOP_COMMON_OBJ := build/Font.o build/Config.o build/IconResolver.o build/Xdg.o build/Utils.o build/IniFile.o \
+    build/NotificationPopup.o build/NotificationCenter.o
 
 .PHONY: all clean test install
 
@@ -224,7 +225,7 @@ ifeq ($(KOHIKO_HAVE_PIPEWIRE)-$(KOHIKO_HAVE_DBUS_PKG)-$(KOHIKO_HAVE_LIBRSVG),yes
     TEST_BLUETOOTHWINDOW := build/test_bluetoothwindow
 endif
 
-test: kohiko build/x11_test_client build/test_bsptree build/test_launcherscoring build/test_placementhabits build/test_dbusvalue build/test_sessionstore build/test_configmigration build/test_recoverymode build/test_lockrecovery build/test_appdirwatcher build/test_autologinconfigurator build/test_wallpapermanager build/test_desktopentry build/test_iconresolver build/test_eventloop build/test_windowplacementnotice build/test_rect_clamping $(TEST_NETWORKMANAGERCLIENT) $(TEST_SCROLLHITTEST) $(TEST_NETWORKWINDOW) $(TEST_NETWORKMANAGER_LIVE_HARNESS) $(TEST_BLUETOOTHWINDOW)
+test: kohiko build/x11_test_client build/test_bsptree build/test_launcherscoring build/test_placementhabits build/test_dbusvalue build/test_sessionstore build/test_configmigration build/test_recoverymode build/test_lockrecovery build/test_appdirwatcher build/test_autologinconfigurator build/test_wallpapermanager build/test_desktopentry build/test_iconresolver build/test_eventloop build/test_windowplacementnotice build/test_rect_clamping build/test_notificationlayout $(TEST_NETWORKMANAGERCLIENT) $(TEST_SCROLLHITTEST) $(TEST_NETWORKWINDOW) $(TEST_NETWORKMANAGER_LIVE_HARNESS) $(TEST_BLUETOOTHWINDOW)
 	./build/test_bsptree
 	./build/test_launcherscoring
 	./build/test_placementhabits
@@ -241,6 +242,7 @@ test: kohiko build/x11_test_client build/test_bsptree build/test_launcherscoring
 	./build/test_eventloop
 	./build/test_windowplacementnotice
 	./build/test_rect_clamping
+	./build/test_notificationlayout
 	sh tests/test_kohiko_session.sh
 	sh tests/test_networkmanager_live.sh
 	sh tests/test_xembed_dock_timeout.sh
@@ -369,6 +371,17 @@ build/test_windowplacementnotice: tests/test_windowplacementnotice.cpp | build
 build/test_rect_clamping: tests/test_rect_clamping.cpp | build
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
 
+# Pure placement/sizing/stacking arithmetic behind the native
+# notification popup mechanism (NotificationPopup.h/NotificationCenter.h) -
+# no X11 dependency at all, same reasoning as test_rect_clamping just
+# above (in fact it directly reuses Rect::ClampedTo()). See
+# NotificationLayout.h's own header comment for why this is tested
+# separately from the live-X11 window behaviour (test-notificationcenter,
+# below - needs a real display, so it's kept out of `make test` the
+# same way test-bar/test-windowclassification/test-trayiconclient are).
+build/test_notificationlayout: tests/test_notificationlayout.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
+
 # Pure logic, no live D-Bus connection or running NetworkManager
 # needed (see the file itself) - but still needs libdbus-1-dev to
 # compile at all, since it links DBusClient.cpp - hence the
@@ -457,6 +470,23 @@ test-trayiconclient: build/test_trayiconclient
 
 build/test_trayiconclient: tests/test_trayiconclient.cpp $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) | build
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ $(LIBS) $(RSVG_LIBS)
+
+# Same "needs a real X11 connection, kept out of `make test`" deal
+# again - focused tests for the new native notification mechanism
+# itself (creation, window type/properties, no focus stealing,
+# placement, expiry, multiple/stacking, cleanup - see that file's own
+# header comment). Only needs Font.o/Config.o (part of
+# DESKTOP_COMMON_OBJ already) - deliberately does NOT link
+# XConnection.o/XAtoms.o/WindowManager.o at all, since NotificationPopup/
+# NotificationCenter depend on neither (see their own header comments);
+# the complementary "WindowManager::Manage() correctly leaves a
+# NOTIFICATION-type window alone" check lives in
+# test-windowclassification instead, which already links those.
+test-notificationcenter: build/test_notificationcenter
+	./build/test_notificationcenter
+
+build/test_notificationcenter: tests/test_notificationcenter.cpp $(DESKTOP_COMMON_OBJ) | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ $(LIBS)
 
 # Installing kohiko always installs Kohiko Settings alongside it -
 # it's part of Kohiko itself, not a separate package (see

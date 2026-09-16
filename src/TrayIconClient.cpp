@@ -145,6 +145,11 @@ void TrayIconClient::SetInterval(int intervalMs, TimerCallback callback)
     });
 }
 
+void TrayIconClient::SetEventHandler(EventHandler handler)
+{
+    m_extraEventHandler = std::move(handler);
+}
+
 void TrayIconClient::Redraw()
 {
     if (m_drawCallback)
@@ -158,7 +163,7 @@ void TrayIconClient::HandleEvent(XEvent& event)
     switch (event.type)
     {
         case Expose:
-            if (event.xexpose.count == 0)
+            if (event.xexpose.count == 0 && event.xexpose.window == m_window)
                 m_dirty = true;
             break;
 
@@ -253,6 +258,9 @@ void TrayIconClient::Run()
                 XEvent event;
                 XNextEvent(m_display, &event);
                 HandleEvent(event);
+
+                if (m_extraEventHandler)
+                    m_extraEventHandler(event);
             }
         }
 

@@ -118,6 +118,7 @@ void WindowManager::Initialize()
     m_notepad.Configure(m_config, m_monitors.Primary().Geometry());
     m_powerMenu.Configure(m_config);
     m_lockScreen.Configure(m_config);
+    InitializeNotificationCenter();
     m_idleWatcher.Initialize(m_connection.GetDisplay());
     m_sleepInhibitor.Initialize();
     m_appDirWatcher.Initialize();
@@ -397,6 +398,12 @@ void WindowManager::Tick()
     CheckSleepInhibition();
     CheckPendingXEmbedWindows();
 
+    // Destroys whatever's expired and restacks whatever's left - see
+    // NotificationCenter::Tick()'s own comment, and HasActiveNotification()
+    // (checked by EventLoop.cpp) for why this runs at a tighter cadence
+    // than the idle ~1Hz baseline while anything here is still showing.
+    m_notifications.Tick();
+
     // Also what clears a Bar::ShowNotification() once it expires - see
     // Bar::Redraw()'s own expiry check.
     for (auto& [monitor, bar] : m_bars)
@@ -512,6 +519,35 @@ void WindowManager::CheckSleepInhibition()
 bool WindowManager::HasActiveAnimation() const
 {
     return m_animator.Active();
+}
+
+bool WindowManager::HasActiveNotification() const
+{
+    return m_notifications.HasActive();
+}
+
+void WindowManager::ShowPopupNotification(const std::string& text)
+{
+    m_notifications.Post(text, FocusedMonitor().Geometry());
+}
+
+void WindowManager::InitializeNotificationCenter()
+{
+    // Same palette PowerMenu::Configure() already uses (see that
+    // function's own comment) - "visually integrated with Kohiko", per
+    // the spec, means reading as the same visual family as the rest of
+    // the window manager's own UI, not introducing a second one.
+    UiTheme theme;
+    theme.surface    = static_cast<std::uint32_t>(std::strtoul(m_config.GetString("bar.background", "0x1e1e2e").c_str(), nullptr, 0));
+    theme.foreground = static_cast<std::uint32_t>(std::strtoul(m_config.GetString("bar.foreground", "0xcdd6f4").c_str(), nullptr, 0));
+    theme.border     = static_cast<std::uint32_t>(std::strtoul(m_config.GetString("general.border_color_active", "0x89b4fa").c_str(), nullptr, 0));
+
+    m_notifications.Initialize(
+        m_connection.GetDisplay(),
+        m_connection.Screen(),
+        m_connection.Root(),
+        m_config.GetString("general.font", "monospace:pixelsize=14"),
+        theme);
 }
 
 // --- X11 event handlers -----------------------------------------------------
@@ -854,6 +890,8 @@ void WindowManager::HandleExpose(const XExposeEvent& event)
         m_powerMenu.HandleExpose();
     else if (event.window == m_lockScreen.WindowId())
         m_lockScreen.HandleExpose();
+    else if (m_notifications.OwnsWindow(event.window))
+        m_notifications.HandleExpose(event.window);
 }
 
 void WindowManager::HandleClientMessage(const XClientMessageEvent& event)
@@ -1483,6 +1521,18 @@ std::string WindowManager::HandleIpcCommand(const std::string& request)
         return "ok";
     }
 
+    // See ShowPopupNotification()'s own comment - `kohikoctl notify
+    // "Headphones connected"` is the reusable native-notification
+    // mechanism's own live-verification/exercise path, the same way
+    // "dispatch" above is Command::Parse()'s.
+    if (verb == "notify")
+    {
+        std::string rest;
+        std::getline(stream, rest);
+        ShowPopupNotification(Utils::Trim(rest));
+        return "ok";
+    }
+
     if (verb == "clients")
         return DumpClientsJson();
 
@@ -1542,7 +1592,7 @@ void WindowManager::Manage(WindowID id, bool skipXEmbedCheck)
     // combination" means in practice: CloseFocused() only ever acts on
     // m_repository.Focused(), and this is what keeps that set free of
     // Kohiko's own popups by construction, not by convention.
-    if (BarWindowMatching(id) || id == m_launcher.WindowId() || id == m_notepad.WindowId() || id == m_powerMenu.WindowId() || id == m_lockScreen.WindowId())
+    if (BarWindowMatching(id) || id == m_launcher.WindowId() || id == m_notepad.WindowId() || id == m_powerMenu.WindowId() || id == m_lockScreen.WindowId() || m_notifications.OwnsWindow(id))
         return;
 
     XWindowAttributes attrs{};
@@ -3097,6 +3147,8 @@ void WindowManager::ReloadConfig()
 
     m_wallpaperManager.Configure(m_config);
     m_wallpaperManager.ApplyToRoot(m_connection, m_monitors);
+
+    InitializeNotificationCenter();
 
     m_fileManager =
         m_config.GetString(
