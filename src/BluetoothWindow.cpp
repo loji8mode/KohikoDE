@@ -1,31 +1,36 @@
 #include "BluetoothWindow.h"
 
+#include <algorithm>
+
 namespace Kohiko
 {
 
 namespace
 {
 
-constexpr int kWindowWidth = 640;
-constexpr int kWindowHeight = 540;
-constexpr int kSidebarWidth = 160;
-constexpr int kMargin = 16;
+constexpr int kWindowWidth = 780;
+constexpr int kWindowHeight = 560;
+constexpr int kSidebarWidth = 200;
+constexpr int kMargin = 24;
+constexpr int kCardGap = 16;
 
-class IconWidget : public Widget
+std::string DeviceStatusText(const BluetoothDevice& device)
 {
-public:
-    std::string name;
-    void Draw(UiWindow& window) override { window.DrawIcon(bounds, name); DrawChildren(window); }
-};
-
-std::string DeviceSubtitle(const BluetoothDevice& device)
-{
-    std::string status = device.connected ? "Connected" : device.paired ? "Paired" : "Available";
-
+    std::string status = device.connected ? "Connected" : "Paired";
     if (device.batteryPercent >= 0)
         status += "  \u2022  Battery " + std::to_string(device.batteryPercent) + "%";
-
     return status;
+}
+
+// Same reasoning as AudioWindow's ComputeColumns(): capped so each
+// tile keeps room for an icon, name, and Pair button, and never
+// exceeds the number of tiles actually being placed.
+int ComputeColumns(int width, int itemCount)
+{
+    int columns = 1;
+    if (width >= 520) columns = 2;
+    if (width >= 900) columns = 3;
+    return std::max(1, std::min(columns, std::max(1, itemCount)));
 }
 
 }
@@ -50,7 +55,8 @@ bool BluetoothWindow::Initialize()
     m_bluez.SetChangeHandler([this] { m_bluezDirty = true; });
 
     RebuildChrome();
-    RebuildPage();
+
+    m_window.SetResizeHandler([this](int, int) { RebuildChrome(); });
 
     m_window.WatchFd(m_instanceLock.Fd(), [this] { m_instanceLock.Dispatch(); });
     if (m_bluez.Available())
@@ -81,22 +87,126 @@ void BluetoothWindow::RebuildChrome()
     auto sidebar = std::make_unique<Sidebar>();
     sidebar->SetItems({ { "Devices", "bluetooth" } });
     sidebar->SetSelected(0);
-    sidebar->Layout({ kMargin, kMargin, kSidebarWidth, kWindowHeight - kMargin * 2 });
+    sidebar->Layout({ kMargin, kMargin, kSidebarWidth, m_window.Height() - kMargin * 2 });
     m_sidebar = static_cast<Sidebar*>(root->AddChild(std::move(sidebar)));
-
-    auto header = std::make_unique<Label>();
-    header->text = "Bluetooth Devices";
-    header->bounds = { kSidebarWidth + kMargin * 2, kMargin, kWindowWidth - kSidebarWidth - kMargin * 3, 28 };
-    root->AddChild(std::move(header));
 
     auto scrollView = std::make_unique<ScrollView>();
     scrollView->bounds = {
-        kSidebarWidth + kMargin * 2, kMargin + 40,
-        kWindowWidth - kSidebarWidth - kMargin * 3, kWindowHeight - kMargin * 2 - 40
+        kSidebarWidth + kMargin * 2, kMargin,
+        m_window.Width() - kSidebarWidth - kMargin * 3, m_window.Height() - kMargin * 2
     };
     m_scrollView = static_cast<ScrollView*>(root->AddChild(std::move(scrollView)));
 
     m_window.SetRoot(std::move(root));
+
+    RebuildPage();
+}
+
+std::unique_ptr<Widget> BluetoothWindow::BuildPairedDeviceCard(const BluetoothDevice& device, const std::string& adapterPath, int width)
+{
+    const int height = 92;
+    std::string devicePath = device.objectPath;
+    bool connected = device.connected;
+    bool trusted = device.trusted;
+
+    auto card = std::make_unique<ClickableContainer>();
+    card->bounds = { 0, 0, width, height };
+    card->selected = connected;
+    card->onClick = [this, devicePath, connected]
+    {
+        if (connected)
+            m_bluez.DisconnectDevice(devicePath);
+        else
+            m_bluez.ConnectDevice(devicePath);
+    };
+
+    auto icon = std::make_unique<IconView>();
+    icon->name = device.icon.empty() ? "bluetooth" : device.icon;
+    icon->bounds = { 16, (height - 32) / 2, 32, 32 };
+    card->AddChild(std::move(icon));
+
+    // Right-aligned cluster, built right-to-left: Remove button,
+    // Trust toggle + label, status badge - same "reserve space from
+    // the right, then give the text block whatever's left" approach
+    // as NetworkWindow's Wi-Fi rows.
+    int clusterX = width - 16;
+
+    int removeWidth = 84;
+    clusterX -= removeWidth;
+    auto removeButton = std::make_unique<Button>();
+    removeButton->label = "Remove";
+    removeButton->bounds = { clusterX, (height - 32) / 2, removeWidth, 32 };
+    removeButton->onClick = [this, adapterPath, devicePath] { m_bluez.RemoveDevice(adapterPath, devicePath); };
+    card->AddChild(std::move(removeButton));
+
+    clusterX -= 14;
+    int trustWidth = 42;
+    clusterX -= trustWidth;
+    auto trustToggle = std::make_unique<ToggleSwitch>();
+    trustToggle->value = trusted;
+    trustToggle->bounds = { clusterX, (height - 26) / 2, trustWidth, 26 };
+    trustToggle->onChange = [this, devicePath](bool t) { m_bluez.SetDeviceTrusted(devicePath, t); };
+    card->AddChild(std::move(trustToggle));
+
+    clusterX -= 6;
+    int trustLabelWidth = 44;
+    clusterX -= trustLabelWidth;
+    auto trustLabel = std::make_unique<Label>();
+    trustLabel->text = "Trust";
+    trustLabel->color = UiTheme::Default().muted;
+    trustLabel->bounds = { clusterX, (height - 18) / 2, trustLabelWidth, 18 };
+    card->AddChild(std::move(trustLabel));
+
+    clusterX -= 14;
+    int badgeWidth = Badge::MeasureWidth(m_window, connected ? "Connected" : "Paired");
+    clusterX -= badgeWidth;
+    auto badge = std::make_unique<Badge>();
+    badge->text = connected ? "Connected" : "Paired";
+    badge->tone = connected ? Badge::Tone::Positive : Badge::Tone::Neutral;
+    badge->bounds = { clusterX, (height - 24) / 2, badgeWidth, 24 };
+    card->AddChild(std::move(badge));
+
+    auto title = std::make_unique<Label>();
+    title->text = device.name;
+    title->bounds = { 60, 18, clusterX - 60 - 12, 22 };
+    card->AddChild(std::move(title));
+
+    auto subtitle = std::make_unique<Label>();
+    subtitle->text = DeviceStatusText(device);
+    subtitle->color = UiTheme::Default().muted;
+    subtitle->bounds = { 60, 44, clusterX - 60 - 12, 18 };
+    card->AddChild(std::move(subtitle));
+
+    return card;
+}
+
+std::unique_ptr<Widget> BluetoothWindow::BuildAvailableDeviceCard(const BluetoothDevice& device, int width)
+{
+    const int height = 88;
+    std::string devicePath = device.objectPath;
+
+    auto card = std::make_unique<ClickableContainer>();
+    card->bounds = { 0, 0, width, height };
+    card->onClick = [this, devicePath] { m_bluez.PairDevice(devicePath); };
+
+    auto icon = std::make_unique<IconView>();
+    icon->name = device.icon.empty() ? "bluetooth" : device.icon;
+    icon->bounds = { 16, 16, 28, 28 };
+    card->AddChild(std::move(icon));
+
+    auto title = std::make_unique<Label>();
+    title->text = device.name;
+    title->bounds = { 54, 16, width - 70, 22 };
+    card->AddChild(std::move(title));
+
+    auto pairButton = std::make_unique<Button>();
+    pairButton->label = "Pair";
+    pairButton->primary = true;
+    pairButton->bounds = { 16, 50, width - 32, 30 };
+    pairButton->onClick = [this, devicePath] { m_bluez.PairDevice(devicePath); };
+    card->AddChild(std::move(pairButton));
+
+    return card;
 }
 
 void BluetoothWindow::RebuildPage()
@@ -107,13 +217,9 @@ void BluetoothWindow::RebuildPage()
 
     if (!m_bluez.Available())
     {
-        auto label = std::make_unique<Label>();
-        label->text = "bluetoothd is not available.";
-        label->color = UiTheme::Default().muted;
-        label->bounds = { 0, y, contentWidth, 24 };
-        y += 24;
-        content->AddChild(std::move(label));
-
+        auto header = MakePageHeader({ 0, y, contentWidth, 52 }, "Bluetooth", "bluetoothd is not available.");
+        y += 52;
+        content->AddChild(std::move(header));
         content->bounds = { 0, 0, contentWidth, y };
         m_scrollView->SetContent(std::move(content));
         return;
@@ -121,13 +227,9 @@ void BluetoothWindow::RebuildPage()
 
     if (m_bluez.Adapters().empty())
     {
-        auto label = std::make_unique<Label>();
-        label->text = "No Bluetooth adapter found.";
-        label->color = UiTheme::Default().muted;
-        label->bounds = { 0, y, contentWidth, 24 };
-        y += 24;
-        content->AddChild(std::move(label));
-
+        auto header = MakePageHeader({ 0, y, contentWidth, 52 }, "Bluetooth", "No Bluetooth adapter found.");
+        y += 52;
+        content->AddChild(std::move(header));
         content->bounds = { 0, 0, contentWidth, y };
         m_scrollView->SetContent(std::move(content));
         return;
@@ -136,64 +238,50 @@ void BluetoothWindow::RebuildPage()
     const BluetoothAdapter& adapter = m_bluez.Adapters().front();
     std::string adapterPath = adapter.objectPath;
 
-    // --- adapter power / discoverable row ---------------------------------
-
-    auto adapterRow = std::make_unique<Widget>();
-    adapterRow->bounds = { 0, y, contentWidth, 56 };
-
-    auto poweredLabel = std::make_unique<Label>();
-    poweredLabel->text = adapter.name.empty() ? "Bluetooth" : adapter.name;
-    poweredLabel->bounds = { 16, y + 8, 220, 20 };
-    adapterRow->AddChild(std::move(poweredLabel));
-
-    auto poweredSub = std::make_unique<Label>();
-    poweredSub->text = adapter.discovering ? "Scanning\u2026" : (adapter.powered ? "On" : "Off");
-    poweredSub->color = UiTheme::Default().muted;
-    poweredSub->bounds = { 16, y + 30, 220, 18 };
-    adapterRow->AddChild(std::move(poweredSub));
+    std::string subtitle = adapter.discovering ? "Scanning\u2026" : (adapter.powered ? "On and visible" : "Off");
 
     auto poweredToggle = std::make_unique<ToggleSwitch>();
     poweredToggle->value = adapter.powered;
-    poweredToggle->bounds = { contentWidth - 66, y + 15, 46, 26 };
+    poweredToggle->bounds.height = 26;
     poweredToggle->onChange = [this, adapterPath](bool on) { m_bluez.SetAdapterPowered(adapterPath, on); };
-    adapterRow->AddChild(std::move(poweredToggle));
 
-    y += 66;
-    content->AddChild(std::move(adapterRow));
+    auto header = MakePageHeader({ 0, y, contentWidth, 52 },
+        adapter.name.empty() ? "Bluetooth" : adapter.name, subtitle, std::move(poweredToggle), 46);
+    y += 52 + kCardGap;
+    content->AddChild(std::move(header));
 
     if (!adapter.powered)
     {
         auto label = std::make_unique<Label>();
-        label->text = "Bluetooth is turned off.";
+        label->text = "Turn Bluetooth on to see nearby devices.";
         label->color = UiTheme::Default().muted;
         label->bounds = { 0, y, contentWidth, 24 };
         y += 24;
         content->AddChild(std::move(label));
-
         content->bounds = { 0, 0, contentWidth, y };
         m_scrollView->SetContent(std::move(content));
         return;
     }
 
-    // --- discoverable + scan row -------------------------------------------
+    // --- sub-header: discoverable toggle + scan action, full width ---------
 
-    auto optionsRow = std::make_unique<Widget>();
-    optionsRow->bounds = { 0, y, contentWidth, 44 };
+    auto subHeader = std::make_unique<Widget>();
+    subHeader->bounds = { 0, y, contentWidth, 36 };
 
     auto discoverableLabel = std::make_unique<Label>();
-    discoverableLabel->text = "Discoverable";
-    discoverableLabel->bounds = { 16, y + 12, 160, 20 };
-    optionsRow->AddChild(std::move(discoverableLabel));
+    discoverableLabel->text = "Discoverable to other devices";
+    discoverableLabel->bounds = { 0, 8, contentWidth - 240, 20 };
+    subHeader->AddChild(std::move(discoverableLabel));
 
     auto discoverableToggle = std::make_unique<ToggleSwitch>();
     discoverableToggle->value = adapter.discoverable;
-    discoverableToggle->bounds = { 180, y + 9, 46, 26 };
+    discoverableToggle->bounds = { contentWidth - 220, 5, 46, 26 };
     discoverableToggle->onChange = [this, adapterPath](bool on) { m_bluez.SetAdapterDiscoverable(adapterPath, on); };
-    optionsRow->AddChild(std::move(discoverableToggle));
+    subHeader->AddChild(std::move(discoverableToggle));
 
     auto scanButton = std::make_unique<Button>();
-    scanButton->label = adapter.discovering ? "Stop scanning" : "Scan for devices";
-    scanButton->bounds = { contentWidth - 170, y + 6, 170, 32 };
+    scanButton->label = adapter.discovering ? "Stop Scanning" : "Scan for Devices";
+    scanButton->bounds = { contentWidth - 160, 2, 160, 32 };
     bool discovering = adapter.discovering;
     scanButton->onClick = [this, adapterPath, discovering]
     {
@@ -202,17 +290,53 @@ void BluetoothWindow::RebuildPage()
         else
             m_bluez.StartDiscovery(adapterPath);
     };
-    optionsRow->AddChild(std::move(scanButton));
+    subHeader->AddChild(std::move(scanButton));
 
-    y += 56;
-    content->AddChild(std::move(optionsRow));
+    y += 36 + kCardGap;
+    content->AddChild(std::move(subHeader));
 
-    auto separator = std::make_unique<Separator>();
-    separator->bounds = { 0, y, contentWidth, 1 };
-    y += 13;
-    content->AddChild(std::move(separator));
+    // --- paired/connected devices: one full-width card each -----------------
 
-    if (m_bluez.Devices().empty())
+    std::vector<const BluetoothDevice*> paired;
+    std::vector<const BluetoothDevice*> available;
+    for (auto& device : m_bluez.Devices())
+        (device.paired ? paired : available).push_back(&device);
+
+    auto sectionHeader = std::make_unique<SectionHeader>();
+    sectionHeader->text = paired.empty() ? "PAIRED DEVICES" : "PAIRED DEVICES (" + std::to_string(paired.size()) + ")";
+    sectionHeader->bounds = { 0, y, contentWidth, 20 };
+    y += 28;
+    content->AddChild(std::move(sectionHeader));
+
+    if (paired.empty())
+    {
+        auto label = std::make_unique<Label>();
+        label->text = "No paired devices yet.";
+        label->color = UiTheme::Default().muted;
+        label->bounds = { 0, y, contentWidth, 24 };
+        y += 24 + kCardGap;
+        content->AddChild(std::move(label));
+    }
+    else
+    {
+        for (auto* device : paired)
+        {
+            auto card = BuildPairedDeviceCard(*device, adapterPath, contentWidth);
+            card->bounds.y = y;
+            y += card->bounds.height + kCardGap;
+            content->AddChild(std::move(card));
+        }
+    }
+
+    // --- available devices: a responsive tile grid --------------------------
+
+    auto availableHeader = std::make_unique<SectionHeader>();
+    availableHeader->text = "AVAILABLE DEVICES";
+    availableHeader->bounds = { 0, y, contentWidth, 20 };
+    y += 28;
+    content->AddChild(std::move(availableHeader));
+
+    if (available.empty())
     {
         auto label = std::make_unique<Label>();
         label->text = "No devices found. Try scanning.";
@@ -221,68 +345,26 @@ void BluetoothWindow::RebuildPage()
         y += 24;
         content->AddChild(std::move(label));
     }
-
-    for (const BluetoothDevice& device : m_bluez.Devices())
+    else
     {
-        const int rowHeight = 66;
+        int columns = ComputeColumns(contentWidth, static_cast<int>(available.size()));
+        int cardWidth = columns > 1 ? (contentWidth - (columns - 1) * kCardGap) / columns : contentWidth;
+        int cardHeight = 88;
+        int gridTop = y;
 
-        std::string devicePath = device.objectPath;
-        bool paired = device.paired;
-        bool connected = device.connected;
-        bool trusted = device.trusted;
-
-        auto row = std::make_unique<ClickableContainer>();
-        row->bounds = { 0, y, contentWidth, rowHeight };
-        row->selected = connected;
-        row->onClick = [this, devicePath, paired, connected]
+        for (std::size_t i = 0; i < available.size(); ++i)
         {
-            if (connected)
-                m_bluez.DisconnectDevice(devicePath);
-            else if (paired)
-                m_bluez.ConnectDevice(devicePath);
-            else
-                m_bluez.PairDevice(devicePath); // BlueZ auto-connects most profiles right after a successful pairing
-        };
+            int col = static_cast<int>(i) % columns;
+            int row = static_cast<int>(i) / columns;
 
-        auto icon = std::make_unique<IconWidget>();
-        icon->name = device.icon.empty() ? "bluetooth" : device.icon;
-        icon->bounds = { 14, y + (rowHeight - 28) / 2, 28, 28 };
-        row->AddChild(std::move(icon));
-
-        auto title = std::make_unique<Label>();
-        title->text = device.name;
-        title->bounds = { 54, y + 10, contentWidth - 260, 20 };
-        row->AddChild(std::move(title));
-
-        auto subtitle = std::make_unique<Label>();
-        subtitle->text = DeviceSubtitle(device);
-        subtitle->color = UiTheme::Default().muted;
-        subtitle->bounds = { 54, y + 32, contentWidth - 260, 18 };
-        row->AddChild(std::move(subtitle));
-
-        if (paired)
-        {
-            auto trustToggle = std::make_unique<ToggleSwitch>();
-            trustToggle->value = trusted;
-            trustToggle->bounds = { contentWidth - 190, y + (rowHeight - 26) / 2, 40, 26 };
-            trustToggle->onChange = [this, devicePath](bool t) { m_bluez.SetDeviceTrusted(devicePath, t); };
-            row->AddChild(std::move(trustToggle));
-
-            auto trustLabel = std::make_unique<Label>();
-            trustLabel->text = "Trust";
-            trustLabel->color = UiTheme::Default().muted;
-            trustLabel->bounds = { contentWidth - 150, y + (rowHeight - 18) / 2, 50, 18 };
-            row->AddChild(std::move(trustLabel));
-
-            auto removeButton = std::make_unique<Button>();
-            removeButton->label = "Remove";
-            removeButton->bounds = { contentWidth - 90, y + (rowHeight - 30) / 2, 76, 30 };
-            removeButton->onClick = [this, adapterPath, devicePath] { m_bluez.RemoveDevice(adapterPath, devicePath); };
-            row->AddChild(std::move(removeButton));
+            auto card = BuildAvailableDeviceCard(*available[i], cardWidth);
+            card->bounds.x = col * (cardWidth + kCardGap);
+            card->bounds.y = gridTop + row * (cardHeight + kCardGap);
+            content->AddChild(std::move(card));
         }
 
-        y += rowHeight + 8;
-        content->AddChild(std::move(row));
+        int rows = (static_cast<int>(available.size()) + columns - 1) / columns;
+        y = gridTop + rows * (cardHeight + kCardGap);
     }
 
     content->bounds = { 0, 0, contentWidth, y };

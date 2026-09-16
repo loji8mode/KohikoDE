@@ -190,4 +190,82 @@ void Slider::OnRelease(Point p)
         onCommit(value);
 }
 
+// --- IconView ------------------------------------------------------------------
+
+void IconView::Draw(UiWindow& window)
+{
+    window.DrawIcon(bounds, name);
+    DrawChildren(window);
+}
+
+// --- Badge -----------------------------------------------------------------------
+
+int Badge::MeasureWidth(UiWindow& window, const std::string& text)
+{
+    return window.TextWidth(text) + 20;
+}
+
+void Badge::Draw(UiWindow& window)
+{
+    const UiTheme& theme = window.Theme();
+
+    std::uint32_t background = theme.surfaceActive;
+    std::uint32_t foreground = theme.foreground;
+
+    switch (tone)
+    {
+        case Tone::Accent:  background = theme.accent;  foreground = theme.accentForeground; break;
+        case Tone::Positive: background = theme.success;  foreground = theme.accentForeground; break;
+        case Tone::Danger:  background = theme.danger;   foreground = theme.accentForeground; break;
+        case Tone::Neutral: default: break;
+    }
+
+    window.FillRoundedRect(bounds, background, bounds.height / 2);
+    window.DrawTextClipped(bounds, text, foreground, Label::Align::Center);
+
+    DrawChildren(window);
+}
+
+// --- MakePageHeader ------------------------------------------------------------
+
+std::unique_ptr<Widget> MakePageHeader(
+    const Rect& bounds,
+    const std::string& title,
+    const std::string& subtitle,
+    std::unique_ptr<Widget> trailing,
+    int trailingWidth)
+{
+    auto header = std::make_unique<Widget>();
+    header->bounds = bounds;
+
+    int textRight = subtitle.empty() && !trailing ? bounds.width : bounds.width - (trailing ? trailingWidth + 20 : 0);
+
+    auto titleLabel = std::make_unique<Label>();
+    titleLabel->text = title;
+    titleLabel->bounds = { bounds.x, bounds.y, textRight, subtitle.empty() ? bounds.height : bounds.height / 2 + 4 };
+    header->AddChild(std::move(titleLabel));
+
+    if (!subtitle.empty())
+    {
+        auto subtitleLabel = std::make_unique<Label>();
+        subtitleLabel->text = subtitle;
+        subtitleLabel->color = UiTheme::Default().muted;
+        subtitleLabel->bounds = { bounds.x, bounds.y + bounds.height / 2 + 2, textRight, bounds.height / 2 };
+        header->AddChild(std::move(subtitleLabel));
+    }
+
+    if (trailing)
+    {
+        trailing->bounds = {
+            bounds.Right() - trailingWidth,
+            bounds.y + (bounds.height - trailing->bounds.height) / 2,
+            trailingWidth,
+            trailing->bounds.height > 0 ? trailing->bounds.height : bounds.height
+        };
+        header->AddChild(std::move(trailing));
+    }
+
+    return header;
+}
+
 }

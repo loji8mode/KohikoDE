@@ -55,6 +55,19 @@ public:
 
     using TimerCallback = std::function<void()>;
 
+    // Called after the window's actual pixel size changes (not on
+    // every ConfigureNotify - only when width/height genuinely
+    // differ from before). This is what makes a tiled half-screen
+    // window, a maximized window, and an ultra-wide monitor all
+    // usable with the *same* app: every one of kohiko-audio/network/
+    // bluetooth's RebuildChrome()/RebuildPage() methods recomputes
+    // column counts, card widths, and how much inline detail to show
+    // per row from the window's current size, and this is the hook
+    // that tells them to do it again after a resize rather than
+    // leaving whatever was laid out at startup stretched or clipped.
+    using ResizeHandler = std::function<void(int width, int height)>;
+    void SetResizeHandler(ResizeHandler handler) { m_resizeHandler = std::move(handler); }
+
     // Calls `callback` roughly every `intervalMs`, for as long as
     // this window runs - what level meters and the Bluetooth/Wi-Fi
     // "scanning..." spinner animation use, since neither has an fd of
@@ -131,6 +144,7 @@ private:
 
     std::vector<FdWatch> m_fdWatches;
     std::vector<Timer> m_timers;
+    ResizeHandler m_resizeHandler;
 
     Atom m_wmDeleteAtom = 0;
     Atom m_wmProtocolsAtom = 0;

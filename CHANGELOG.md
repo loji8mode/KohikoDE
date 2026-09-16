@@ -1,5 +1,38 @@
 # Changelog
 
+## Version 0.19.1
+
+Release date: 2026-08-03
+
+### Changed
+- Redesigned `kohiko-audio`/`kohiko-network`/`kohiko-bluetooth`'s
+  content layout from a single narrow column of stacked rows into a
+  desktop-first, card-based layout that actually uses a wide window's
+  width: responsive device/tile grids (1-3 columns depending on
+  available width and item count), full-width page headers
+  (title/subtitle/primary control), and - for Ethernet - a labeled
+  Address/Gateway/DNS/MAC info grid that grows in from a single
+  summary line as width allows, instead of a cramped one-line
+  subtitle regardless of window size.
+- Windows now genuinely reflow on resize: `UiWindow` gained a
+  `SetResizeHandler()` hook that fires on real size changes, which
+  every one of the three apps uses to recompute its whole layout
+  (column counts, card widths, how much inline detail to show) from
+  scratch - previously only the backing pixmap resized, so a tiled
+  half-screen or maximized window kept whatever layout it opened
+  with. The minimum window size dropped from "locked to the initial
+  size" to a real usable floor (420x360), now that resizing to it
+  actually looks intentional rather than just clipping.
+- New shared toolkit widgets backing the above: `Badge` (a small
+  rounded status pill - "Connected", "Default Device", "Good
+  signal"), `IconView` (deduplicated from two apps' own copies), and
+  a `MakePageHeader()` composer for the title/subtitle/trailing-
+  control header every page now opens with.
+- Hardened `UiWindow`'s drawing primitives (`FillRect`,
+  `FillRoundedRect`, `DrawBorder`, `SetClip`, `DrawIcon`) against
+  non-positive rectangle dimensions, reachable now that windows can
+  be resized much narrower than before.
+
 ## Version 0.19.0
 
 Release date: 2026-08-02

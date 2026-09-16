@@ -617,7 +617,15 @@ need to for these three in particular.
 Three standalone native applications, installed and built alongside
 `kohiko`/`kohiko-settings` (see [Building](#building)) but not part of
 the window manager process itself - each is an ordinary X11 client
-you can also launch, alt-tab to, or window-rule like any other:
+you can also launch, alt-tab to, or window-rule like any other. All
+three are laid out for a tiling window manager first: a page header,
+then cards that use the full window width rather than a single column
+of controls stacked in one corner, and every page genuinely reflows on
+resize - a wider window shows a 2- or 3-column device grid instead of
+the same narrow list stretched out, and (on `kohiko-network`'s
+Ethernet page) a labeled Address/Gateway/DNS/MAC grid instead of a
+cramped one-line summary. A tiled half-screen window, a maximized one,
+and an ultra-wide monitor each get a layout suited to their own size.
 
 - **`kohiko-audio`** - the permanent audio control center: output/input
   device lists, per-device volume and mute, switching the default

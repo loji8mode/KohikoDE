@@ -9,10 +9,11 @@ namespace Kohiko
 namespace
 {
 
-constexpr int kWindowWidth = 640;
-constexpr int kWindowHeight = 520;
-constexpr int kSidebarWidth = 160;
-constexpr int kMargin = 16;
+constexpr int kWindowWidth = 760;
+constexpr int kWindowHeight = 560;
+constexpr int kSidebarWidth = 200;
+constexpr int kMargin = 24;
+constexpr int kCardGap = 16;
 
 // A thin animated bar reflecting a live 0.0-1.0 level - what backs
 // both the "output level meter" and "microphone level meter" the spec
@@ -43,18 +44,48 @@ public:
     }
 };
 
-// Drawn via a tiny widget so device rows can place one icon without a
-// whole IconView type this toolkit doesn't otherwise need elsewhere.
-class IconWidget : public Widget
+// A text label whose content is computed fresh every Draw() rather
+// than fixed at construction - the live "42%" peak readout next to
+// each meter needs to track PipeWireClient's current value on the
+// same schedule LevelMeterWidget does, without forcing a full page
+// rebuild (and the dragged-slider hazard that would come with one -
+// see UiWindow::IsInteracting()) on every single meter tick.
+class LiveValueLabel : public Widget
 {
 public:
-    std::string name;
-    void Draw(UiWindow& window) override { window.DrawIcon(bounds, name); DrawChildren(window); }
+
+    std::function<std::string()> getText;
+    Label::Align align = Label::Align::Left;
+    std::uint32_t color = 0;
+
+    void Draw(UiWindow& window) override
+    {
+        std::string text = getText ? getText() : std::string();
+        window.DrawTextClipped(bounds, text, color != 0 ? color : window.Theme().foreground, align);
+        DrawChildren(window);
+    }
 };
 
 std::string FormatPercent(float linear)
 {
     return std::to_string(static_cast<int>(std::lround(linear * 100.0f))) + "%";
+}
+
+// How many columns a device grid should use for `width` px of
+// available content width and `itemCount` cards to place in it.
+// Capped at 3: each card is control-dense (icon, name, badge,
+// percentage, slider, mute switch), so beyond three columns a card
+// stops having room for any of that comfortably - a very wide
+// monitor is better served by *wider, more generous* cards than by
+// ever-narrower ones. Never uses more columns than there are cards to
+// fill them with, so a single device never ends up as a lone
+// half-width card floating next to empty space.
+int ComputeColumns(int width, int itemCount)
+{
+    int columns = 1;
+    if (width >= 620) columns = 2;
+    if (width >= 1000) columns = 3;
+    return std::max(1, std::min(columns, std::max(1, itemCount)));
 }
 
 }
@@ -81,7 +112,8 @@ bool AudioWindow::Initialize()
     m_currentPage = m_settings.GetString("last_page", "output") == "input" ? Page::Input : Page::Output;
 
     RebuildChrome();
-    RebuildPage();
+
+    m_window.SetResizeHandler([this](int, int) { RebuildChrome(); });
 
     m_window.WatchFd(m_instanceLock.Fd(), [this] { m_instanceLock.Dispatch(); });
 
@@ -126,53 +158,162 @@ void AudioWindow::RebuildChrome()
         { "Input", "audio-input-microphone" },
     });
     sidebar->SetSelected(m_currentPage == Page::Output ? 0 : 1);
-    sidebar->Layout({ kMargin, kMargin, kSidebarWidth, kWindowHeight - kMargin * 2 });
+    sidebar->Layout({ kMargin, kMargin, kSidebarWidth, m_window.Height() - kMargin * 2 });
     sidebar->onSelect = [this](int index)
     {
         m_currentPage = index == 0 ? Page::Output : Page::Input;
         m_settings.SetString("last_page", m_currentPage == Page::Output ? "output" : "input");
         m_settings.Save();
-        m_headerLabel->text = m_currentPage == Page::Output ? "Output Devices" : "Input Devices";
         RebuildPage();
         m_window.RequestRedraw();
     };
     m_sidebar = static_cast<Sidebar*>(root->AddChild(std::move(sidebar)));
 
-    auto header = std::make_unique<Label>();
-    header->text = m_currentPage == Page::Output ? "Output Devices" : "Input Devices";
-    header->bounds = { kSidebarWidth + kMargin * 2, kMargin, kWindowWidth - kSidebarWidth - kMargin * 3, 28 };
-    m_headerLabel = static_cast<Label*>(root->AddChild(std::move(header)));
-
     auto scrollView = std::make_unique<ScrollView>();
     scrollView->bounds = {
-        kSidebarWidth + kMargin * 2, kMargin + 40,
-        kWindowWidth - kSidebarWidth - kMargin * 3, kWindowHeight - kMargin * 2 - 40
+        kSidebarWidth + kMargin * 2, kMargin,
+        m_window.Width() - kSidebarWidth - kMargin * 3, m_window.Height() - kMargin * 2
     };
     m_scrollView = static_cast<ScrollView*>(root->AddChild(std::move(scrollView)));
 
     m_window.SetRoot(std::move(root));
+
+    RebuildPage();
 }
 
-std::unique_ptr<Widget> AudioWindow::BuildMeterWidget(bool isSource)
+std::unique_ptr<Widget> AudioWindow::BuildMeterCard(bool isSource, int width)
 {
-    auto container = std::make_unique<Widget>();
+    auto card = std::make_unique<ClickableContainer>();
+    card->bounds = { 0, 0, width, 76 };
 
-    auto label = std::make_unique<Label>();
-    label->text = isSource ? "Microphone level" : "Output level";
-    label->color = UiTheme::Default().muted;
-    label->bounds = { 0, 0, 200, 18 };
-    container->AddChild(std::move(label));
+    auto title = std::make_unique<Label>();
+    title->text = isSource ? "Microphone Level" : "Output Level";
+    title->bounds = { 20, 14, width - 100, 20 };
+    card->AddChild(std::move(title));
+
+    PipeWireClient* pw = &m_pipewire;
+
+    auto readout = std::make_unique<LiveValueLabel>();
+    readout->align = Label::Align::Right;
+    readout->color = UiTheme::Default().muted;
+    readout->bounds = { width - 80, 14, 60, 20 };
+    readout->getText = isSource
+        ? std::function<std::string()>([pw] { return FormatPercent(pw->InputPeakLevel()); })
+        : std::function<std::string()>([pw] { return FormatPercent(pw->OutputPeakLevel()); });
+    card->AddChild(std::move(readout));
 
     auto meter = std::make_unique<LevelMeterWidget>();
-    meter->bounds = { 0, 22, m_scrollView->bounds.width, 8 };
-    PipeWireClient* pw = &m_pipewire;
+    meter->bounds = { 20, 44, width - 40, 12 };
     meter->getLevel = isSource
         ? std::function<float()>([pw] { return pw->InputPeakLevel(); })
         : std::function<float()>([pw] { return pw->OutputPeakLevel(); });
-    container->AddChild(std::move(meter));
+    card->AddChild(std::move(meter));
 
-    container->bounds = { 0, 0, m_scrollView->bounds.width, 38 };
-    return container;
+    return card;
+}
+
+std::unique_ptr<Widget> AudioWindow::BuildDeviceCard(const AudioNode& node, int width)
+{
+    const int height = 112;
+    std::uint32_t nodeId = node.id;
+
+    auto card = std::make_unique<ClickableContainer>();
+    card->bounds = { 0, 0, width, height };
+    card->selected = node.isDefault;
+    card->onClick = [this, nodeId] { m_pipewire.SetDefaultNode(nodeId); };
+
+    auto icon = std::make_unique<IconView>();
+    icon->name = node.isSource ? "audio-input-microphone" : "audio-card";
+    icon->bounds = { 16, 16, 30, 30 };
+    card->AddChild(std::move(icon));
+
+    int badgeWidth = node.isDefault ? Badge::MeasureWidth(m_window, "Default") : 0;
+
+    auto title = std::make_unique<Label>();
+    title->text = node.description.empty() ? node.name : node.description;
+    title->bounds = { 58, 16, width - 58 - badgeWidth - 28, 24 };
+    card->AddChild(std::move(title));
+
+    if (node.isDefault)
+    {
+        auto badge = std::make_unique<Badge>();
+        badge->text = "Default";
+        badge->tone = Badge::Tone::Accent;
+        badge->bounds = { width - 16 - badgeWidth, 18, badgeWidth, 22 };
+        card->AddChild(std::move(badge));
+    }
+
+    PipeWireClient* pw = &m_pipewire;
+
+    auto percent = std::make_unique<LiveValueLabel>();
+    percent->color = UiTheme::Default().muted;
+    percent->bounds = { 16, 58, 46, 34 };
+    percent->getText = [pw, nodeId]
+    {
+        for (auto& n : pw->Nodes())
+            if (n.id == nodeId)
+                return FormatPercent(n.volume);
+        return std::string();
+    };
+    card->AddChild(std::move(percent));
+
+    auto slider = std::make_unique<Slider>();
+    slider->value = node.volume;
+    slider->maxValue = 1.5f;
+    slider->bounds = { 66, 66, width - 66 - 74, 18 };
+    slider->onChange = [this, nodeId](float v) { m_pipewire.SetVolume(nodeId, v); };
+    card->AddChild(std::move(slider));
+
+    auto muteToggle = std::make_unique<ToggleSwitch>();
+    muteToggle->value = node.muted;
+    muteToggle->bounds = { width - 62, 60, 46, 26 };
+    muteToggle->onChange = [this, nodeId](bool muted) { m_pipewire.SetMute(nodeId, muted); };
+    card->AddChild(std::move(muteToggle));
+
+    return card;
+}
+
+std::unique_ptr<Widget> AudioWindow::BuildOptionsCard(int width)
+{
+    auto card = std::make_unique<ClickableContainer>();
+    card->bounds = { 0, 0, width, 64 };
+
+    auto label = std::make_unique<Label>();
+    label->text = "Notify when the default device changes";
+    label->bounds = { 20, 21, width - 90, 22 };
+    card->AddChild(std::move(label));
+
+    auto toggle = std::make_unique<ToggleSwitch>();
+    toggle->value = m_settings.GetBool("notify_default_change", false);
+    toggle->bounds = { width - 66, 19, 46, 26 };
+    toggle->onChange = [this](bool enabled)
+    {
+        m_settings.SetBool("notify_default_change", enabled);
+        m_settings.Save();
+    };
+    card->AddChild(std::move(toggle));
+
+    return card;
+}
+
+void AudioWindow::MaybeNotifyDefaultChanged()
+{
+    if (!m_settings.GetBool("notify_default_change", false) || !m_notifications.Available())
+        return;
+
+    const AudioNode* defaultOutput = nullptr;
+    for (auto& node : m_pipewire.Nodes())
+        if (!node.isSource && node.isDefault) { defaultOutput = &node; break; }
+
+    std::string currentName = defaultOutput ? defaultOutput->description : std::string();
+
+    if (m_haveSeenDefaultOutput && currentName != m_lastDefaultOutputName && !currentName.empty())
+    {
+        m_notifications.Notify("Kohiko Audio", "audio-card", "Default output changed", currentName);
+    }
+
+    m_lastDefaultOutputName = currentName;
+    m_haveSeenDefaultOutput = true;
 }
 
 void AudioWindow::RebuildPage()
@@ -183,83 +324,76 @@ void AudioWindow::RebuildPage()
     auto content = std::make_unique<Widget>();
     int y = 0;
 
-    auto meter = BuildMeterWidget(wantSource);
-    meter->bounds.y = y;
-    y += meter->bounds.height + 12;
-    content->AddChild(std::move(meter));
-
-    auto separator = std::make_unique<Separator>();
-    separator->bounds = { 0, y, contentWidth, 1 };
-    y += 13;
-    content->AddChild(std::move(separator));
-
+    std::vector<const AudioNode*> devices;
     for (const AudioNode& node : m_pipewire.Nodes())
-    {
-        if (node.isSource != wantSource)
-            continue;
+        if (node.isSource == wantSource)
+            devices.push_back(&node);
 
-        const int rowHeight = 78;
-        std::uint32_t nodeId = node.id;
+    const AudioNode* defaultDevice = nullptr;
+    for (auto* d : devices)
+        if (d->isDefault) { defaultDevice = d; break; }
 
-        auto row = std::make_unique<ClickableContainer>();
-        row->bounds = { 0, y, contentWidth, rowHeight };
-        row->selected = node.isDefault;
-        row->onClick = [this, nodeId] { m_pipewire.SetDefaultNode(nodeId); };
+    std::string headerTitle = wantSource ? "Input Devices" : "Output Devices";
+    std::string headerSubtitle;
+    if (!m_pipewire.Available())
+        headerSubtitle = "PipeWire is not available.";
+    else if (defaultDevice)
+        headerSubtitle = "Default: " + (defaultDevice->description.empty() ? defaultDevice->name : defaultDevice->description)
+            + "  \u2022  " + FormatPercent(defaultDevice->volume) + (defaultDevice->muted ? " (muted)" : "");
+    else
+        headerSubtitle = devices.empty() ? "No devices found." : "No default device selected.";
 
-        auto iconWidget = std::make_unique<IconWidget>();
-        iconWidget->name = wantSource ? "audio-input-microphone" : "audio-card";
-        iconWidget->bounds = { 14, y + (rowHeight - 32) / 2, 32, 32 };
-        row->AddChild(std::move(iconWidget));
+    auto header = MakePageHeader({ 0, y, contentWidth, 52 }, headerTitle, headerSubtitle);
+    y += 52 + kCardGap;
+    content->AddChild(std::move(header));
 
-        auto title = std::make_unique<Label>();
-        title->text = node.description.empty() ? node.name : node.description;
-        title->bounds = { 60, y + 10, contentWidth - 260, 20 };
-        row->AddChild(std::move(title));
+    auto meterCard = BuildMeterCard(wantSource, contentWidth);
+    y += meterCard->bounds.height + kCardGap;
+    meterCard->bounds.y = y - meterCard->bounds.height - kCardGap;
+    content->AddChild(std::move(meterCard));
 
-        auto subtitle = std::make_unique<Label>();
-        subtitle->text = (node.isDefault ? std::string("Default device \u2022 ") : std::string()) + FormatPercent(node.volume);
-        subtitle->color = UiTheme::Default().muted;
-        subtitle->bounds = { 60, y + 32, contentWidth - 260, 18 };
-        row->AddChild(std::move(subtitle));
-
-        auto slider = std::make_unique<Slider>();
-        slider->value = node.volume;
-        slider->maxValue = 1.5f;
-        slider->bounds = { 60, y + 54, contentWidth - 260, 18 };
-        slider->onChange = [this, nodeId](float v) { m_pipewire.SetVolume(nodeId, v); };
-        row->AddChild(std::move(slider));
-
-        auto muteToggle = std::make_unique<ToggleSwitch>();
-        muteToggle->value = node.muted;
-        muteToggle->bounds = { contentWidth - 180, y + (rowHeight - 26) / 2, 46, 26 };
-        muteToggle->onChange = [this, nodeId](bool muted) { m_pipewire.SetMute(nodeId, muted); };
-        row->AddChild(std::move(muteToggle));
-
-        auto muteLabel = std::make_unique<Label>();
-        muteLabel->text = "Mute";
-        muteLabel->color = UiTheme::Default().muted;
-        muteLabel->align = Label::Align::Right;
-        muteLabel->bounds = { contentWidth - 130, y + (rowHeight - 18) / 2, 60, 18 };
-        row->AddChild(std::move(muteLabel));
-
-        y += rowHeight + 10;
-        content->AddChild(std::move(row));
-    }
-
-    if (m_pipewire.Nodes().empty())
+    if (devices.empty())
     {
         auto empty = std::make_unique<Label>();
         empty->text = m_pipewire.Available()
             ? (wantSource ? "No microphones found." : "No output devices found.")
-            : "PipeWire is not available.";
+            : "Connect to PipeWire to manage devices.";
         empty->color = UiTheme::Default().muted;
         empty->bounds = { 0, y, contentWidth, 24 };
-        y += 24;
+        y += 24 + kCardGap;
         content->AddChild(std::move(empty));
     }
+    else
+    {
+        int columns = ComputeColumns(contentWidth, static_cast<int>(devices.size()));
+        int cardWidth = columns > 1 ? (contentWidth - (columns - 1) * kCardGap) / columns : contentWidth;
+        int cardHeight = 112;
+        int gridTop = y;
+
+        for (std::size_t i = 0; i < devices.size(); ++i)
+        {
+            int col = static_cast<int>(i) % columns;
+            int row = static_cast<int>(i) / columns;
+
+            auto card = BuildDeviceCard(*devices[i], cardWidth);
+            card->bounds.x = col * (cardWidth + kCardGap);
+            card->bounds.y = gridTop + row * (cardHeight + kCardGap);
+            content->AddChild(std::move(card));
+        }
+
+        int rows = (static_cast<int>(devices.size()) + columns - 1) / columns;
+        y = gridTop + rows * (cardHeight + kCardGap);
+    }
+
+    auto optionsCard = BuildOptionsCard(contentWidth);
+    y += optionsCard->bounds.height;
+    optionsCard->bounds.y = y - optionsCard->bounds.height;
+    content->AddChild(std::move(optionsCard));
 
     content->bounds = { 0, 0, contentWidth, y };
     m_scrollView->SetContent(std::move(content));
+
+    MaybeNotifyDefaultChanged();
 }
 
 }

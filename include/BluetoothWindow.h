@@ -19,6 +19,13 @@ namespace Kohiko
 // reshaping the window itself, the same reasoning AudioWindow's and
 // NetworkWindow's Sidebars already follow.
 //
+// Paired/connected devices get a full-width card each (richer -
+// battery, trust, remove); devices still available to pair are more
+// homogeneous "tap to pair" tiles, so those go in a responsive grid
+// (1-3 columns depending on width and count) instead, the same
+// "list vs. grid depending on how much a row needs to show" split
+// AudioWindow's device cards and NetworkWindow's Wi-Fi rows both make.
+//
 // Pairing/connecting to a Bluetooth device is a genuinely slow,
 // blocking D-Bus call (BluezClient::PairDevice()/ConnectDevice() use
 // generous timeouts precisely because real hardware pairing can take
@@ -41,6 +48,9 @@ private:
 
     void RebuildChrome();
     void RebuildPage();
+
+    std::unique_ptr<Widget> BuildPairedDeviceCard(const BluetoothDevice& device, const std::string& adapterPath, int width);
+    std::unique_ptr<Widget> BuildAvailableDeviceCard(const BluetoothDevice& device, int width);
 
     UiWindow m_window;
     BluezClient m_bluez;

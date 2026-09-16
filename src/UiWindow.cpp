@@ -4,6 +4,7 @@
 #include <X11/Xatom.h>
 #include <X11/Xutil.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <poll.h>
 #include <unistd.h>
@@ -65,8 +66,13 @@ bool UiWindow::Create(const std::string& title, const std::string& wmClass, int 
 
     XSizeHints sizeHints{};
     sizeHints.flags = PMinSize | PSize;
-    sizeHints.min_width = width;
-    sizeHints.min_height = height;
+    // A real floor for usable tiled/half-screen layouts, not the
+    // initial preferred size - now that RebuildChrome()/RebuildPage()
+    // actually respond to SetResizeHandler(), there's no reason to
+    // prevent shrinking below whatever size an app happened to open
+    // at.
+    sizeHints.min_width = std::min(width, 420);
+    sizeHints.min_height = std::min(height, 360);
     sizeHints.width = width;
     sizeHints.height = height;
     XSetWMNormalHints(m_display, m_window, &sizeHints);
@@ -133,18 +139,24 @@ void UiWindow::RaiseAndFocus()
 
 void UiWindow::FillRect(const Rect& rect, std::uint32_t colorHex)
 {
+    if (rect.width <= 0 || rect.height <= 0)
+        return;
+
     XSetForeground(m_display, m_gc, colorHex);
     XFillRectangle(m_display, m_backing, m_gc, rect.x, rect.y, rect.width, rect.height);
 }
 
 void UiWindow::FillRoundedRect(const Rect& rect, std::uint32_t colorHex, int radius)
 {
+    if (rect.width <= 0 || rect.height <= 0)
+        return;
+
     // A cheap "rounded" rect - a plain rect with its four corners
     // covered by small filled arcs - rather than a real path-based
     // fill: perfectly fine at the corner radii these controls use
     // (4-10px) and keeps this toolkit off any Xrender/cairo
     // dependency the rest of Kohiko doesn't otherwise need either.
-    radius = std::min({ radius, rect.width / 2, rect.height / 2 });
+    radius = std::max(0, std::min({ radius, rect.width / 2, rect.height / 2 }));
 
     XSetForeground(m_display, m_gc, colorHex);
 
@@ -167,6 +179,9 @@ void UiWindow::FillRoundedRect(const Rect& rect, std::uint32_t colorHex, int rad
 
 void UiWindow::DrawBorder(const Rect& rect, std::uint32_t colorHex, int thickness)
 {
+    if (rect.width <= 0 || rect.height <= 0)
+        return;
+
     XSetForeground(m_display, m_gc, colorHex);
     XSetLineAttributes(m_display, m_gc, thickness, LineSolid, CapButt, JoinMiter);
     XDrawRectangle(m_display, m_backing, m_gc, rect.x, rect.y, rect.width - 1, rect.height - 1);
@@ -197,11 +212,14 @@ void UiWindow::DrawTextClipped(const Rect& rect, const std::string& utf8Text, st
 
 void UiWindow::DrawIcon(const Rect& rect, const std::string& iconName)
 {
-    Pixmap pixmap = None, mask = None;
-    if (!m_iconCache->Get(iconName, std::min(rect.width, rect.height), pixmap, mask))
+    int size = std::min(rect.width, rect.height);
+    if (size <= 0)
         return;
 
-    int size = std::min(rect.width, rect.height);
+    Pixmap pixmap = None, mask = None;
+    if (!m_iconCache->Get(iconName, size, pixmap, mask))
+        return;
+
     int x = rect.x + (rect.width - size) / 2;
     int y = rect.y + (rect.height - size) / 2;
 
@@ -220,7 +238,8 @@ void UiWindow::DrawIcon(const Rect& rect, const std::string& iconName)
 void UiWindow::SetClip(const Rect& rect)
 {
     XRectangle xr{ static_cast<short>(rect.x), static_cast<short>(rect.y),
-                   static_cast<unsigned short>(rect.width), static_cast<unsigned short>(rect.height) };
+                   static_cast<unsigned short>(std::max(0, rect.width)),
+                   static_cast<unsigned short>(std::max(0, rect.height)) };
     XSetClipRectangles(m_display, m_gc, 0, 0, &xr, 1, Unsorted);
     XftDrawSetClipRectangles(m_xftDraw, 0, 0, &xr, 1);
 }
@@ -279,6 +298,8 @@ void UiWindow::HandleEvent(XEvent& event)
             if (event.xconfigure.width != m_width || event.xconfigure.height != m_height)
             {
                 ResizeBacking(event.xconfigure.width, event.xconfigure.height);
+                if (m_resizeHandler)
+                    m_resizeHandler(m_width, m_height);
                 m_dirty = true;
             }
             break;

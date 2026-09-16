@@ -13,10 +13,11 @@ namespace Kohiko
 namespace
 {
 
-constexpr int kWindowWidth = 640;
-constexpr int kWindowHeight = 540;
-constexpr int kSidebarWidth = 160;
-constexpr int kMargin = 16;
+constexpr int kWindowWidth = 820;
+constexpr int kWindowHeight = 580;
+constexpr int kSidebarWidth = 200;
+constexpr int kMargin = 24;
+constexpr int kCardGap = 16;
 
 std::string SignalQuality(std::uint8_t strength)
 {
@@ -26,18 +27,36 @@ std::string SignalQuality(std::uint8_t strength)
     return "Weak signal";
 }
 
-std::string IpSummary(const IpAddressInfo& ip)
+std::string WiFiIconFor(std::uint8_t strength, bool secured)
 {
-    if (ip.address.empty())
-        return "No address";
+    const char* level = strength >= 80 ? "excellent" : strength >= 55 ? "good" : strength >= 30 ? "ok" : "weak";
+    std::string name = std::string("network-wireless-signal-") + level;
+    (void)secured; // the lock is drawn as its own small badge/icon rather than folded into the icon name
+    return name;
+}
 
-    std::ostringstream out;
-    out << ip.address << "/" << ip.prefixLength;
-    if (!ip.gateway.empty())
-        out << "  \u2022  gw " << ip.gateway;
-    if (!ip.dnsServers.empty())
-        out << "  \u2022  dns " << ip.dnsServers.front();
-    return out.str();
+// A small caption-over-value field, e.g. "GATEWAY" / "192.168.1.1" -
+// what BuildEthernetCard() arranges into a 1-, 2-, or 4-column grid
+// depending on how much width is available, so a wide window shows
+// Address/Gateway/DNS/MAC as a proper labeled grid instead of the
+// single cramped summary line a narrow one falls back to.
+std::unique_ptr<Widget> BuildInfoField(const Rect& rect, const std::string& caption, const std::string& value)
+{
+    auto field = std::make_unique<Widget>();
+    field->bounds = rect;
+
+    auto captionLabel = std::make_unique<Label>();
+    captionLabel->text = caption;
+    captionLabel->color = UiTheme::Default().muted;
+    captionLabel->bounds = { rect.x, rect.y, rect.width, 16 };
+    field->AddChild(std::move(captionLabel));
+
+    auto valueLabel = std::make_unique<Label>();
+    valueLabel->text = value.empty() ? "\u2014" : value;
+    valueLabel->bounds = { rect.x, rect.y + 18, rect.width, 20 };
+    field->AddChild(std::move(valueLabel));
+
+    return field;
 }
 
 // A small self-contained modal password prompt - not part of the
@@ -197,7 +216,8 @@ bool NetworkWindow::Initialize()
     m_currentPage = lastPage == "ethernet" ? Page::Ethernet : lastPage == "vpn" ? Page::Vpn : Page::WiFi;
 
     RebuildChrome();
-    RebuildPage();
+
+    m_window.SetResizeHandler([this](int, int) { RebuildChrome(); });
 
     m_window.WatchFd(m_instanceLock.Fd(), [this] { m_instanceLock.Dispatch(); });
     if (m_networkManager.Available())
@@ -232,15 +252,12 @@ void NetworkWindow::RebuildChrome()
         { "VPN", "network-vpn" },
     });
     sidebar->SetSelected(static_cast<int>(m_currentPage));
-    sidebar->Layout({ kMargin, kMargin, kSidebarWidth, kWindowHeight - kMargin * 2 });
+    sidebar->Layout({ kMargin, kMargin, kSidebarWidth, m_window.Height() - kMargin * 2 });
     sidebar->onSelect = [this](int index)
     {
         m_currentPage = static_cast<Page>(index);
         m_settings.SetString("last_page", m_currentPage == Page::WiFi ? "wifi" : m_currentPage == Page::Ethernet ? "ethernet" : "vpn");
         m_settings.Save();
-
-        static const char* titles[] = { "Wi-Fi", "Ethernet", "VPN" };
-        m_headerLabel->text = titles[index];
 
         if (m_currentPage == Page::WiFi)
             m_networkManager.RequestWiFiScan();
@@ -250,16 +267,10 @@ void NetworkWindow::RebuildChrome()
     };
     m_sidebar = static_cast<Sidebar*>(root->AddChild(std::move(sidebar)));
 
-    auto header = std::make_unique<Label>();
-    static const char* titles[] = { "Wi-Fi", "Ethernet", "VPN" };
-    header->text = titles[static_cast<int>(m_currentPage)];
-    header->bounds = { kSidebarWidth + kMargin * 2, kMargin, kWindowWidth - kSidebarWidth - kMargin * 3, 28 };
-    m_headerLabel = static_cast<Label*>(root->AddChild(std::move(header)));
-
     auto scrollView = std::make_unique<ScrollView>();
     scrollView->bounds = {
-        kSidebarWidth + kMargin * 2, kMargin + 40,
-        kWindowWidth - kSidebarWidth - kMargin * 3, kWindowHeight - kMargin * 2 - 40
+        kSidebarWidth + kMargin * 2, kMargin,
+        m_window.Width() - kSidebarWidth - kMargin * 3, m_window.Height() - kMargin * 2
     };
     m_scrollView = static_cast<ScrollView*>(root->AddChild(std::move(scrollView)));
 
@@ -267,52 +278,58 @@ void NetworkWindow::RebuildChrome()
 
     if (m_currentPage == Page::WiFi)
         m_networkManager.RequestWiFiScan();
+
+    RebuildPage();
 }
 
 void NetworkWindow::RebuildWiFiPage(Widget* content, int& y, int contentWidth)
 {
-    if (!m_networkManager.Available())
-    {
-        auto label = std::make_unique<Label>();
-        label->text = "NetworkManager is not available.";
-        label->color = UiTheme::Default().muted;
-        label->bounds = { 0, y, contentWidth, 24 };
-        y += 24;
-        content->AddChild(std::move(label));
-        return;
-    }
-
-    auto toggleRow = std::make_unique<ClickableContainer>();
-    toggleRow->bounds = { 0, y, contentWidth, 56 };
-
-    auto toggleLabel = std::make_unique<Label>();
-    toggleLabel->text = "Wi-Fi";
-    toggleLabel->bounds = { 16, y + 18, 200, 20 };
-    toggleRow->AddChild(std::move(toggleLabel));
-
-    auto toggle = std::make_unique<ToggleSwitch>();
-    toggle->value = m_networkManager.WirelessEnabled();
-    toggle->bounds = { contentWidth - 66, y + 15, 46, 26 };
-    toggle->onChange = [this](bool enabled) { m_networkManager.SetWirelessEnabled(enabled); };
-    toggleRow->AddChild(std::move(toggle));
-
-    y += 66;
-    content->AddChild(std::move(toggleRow));
-
-    if (!m_networkManager.WirelessEnabled())
-    {
-        auto label = std::make_unique<Label>();
-        label->text = "Wi-Fi is turned off.";
-        label->color = UiTheme::Default().muted;
-        label->bounds = { 0, y, contentWidth, 24 };
-        y += 24;
-        content->AddChild(std::move(label));
-        return;
-    }
+    bool available = m_networkManager.Available();
+    bool wirelessEnabled = available && m_networkManager.WirelessEnabled();
 
     const NetworkDevice* wifiDevice = nullptr;
-    for (auto& device : m_networkManager.Devices())
-        if (device.kind == NetworkDeviceKind::WiFi) { wifiDevice = &device; break; }
+    if (available)
+        for (auto& device : m_networkManager.Devices())
+            if (device.kind == NetworkDeviceKind::WiFi) { wifiDevice = &device; break; }
+
+    const WiFiAccessPoint* activeAp = nullptr;
+    if (wifiDevice)
+        for (auto& ap : wifiDevice->accessPoints)
+            if (ap.isActiveConnection) { activeAp = &ap; break; }
+
+    std::string subtitle;
+    if (!available) subtitle = "NetworkManager is not available.";
+    else if (!wirelessEnabled) subtitle = "Turned off";
+    else if (activeAp) subtitle = "Connected to \"" + activeAp->ssid + "\"  \u2022  " + SignalQuality(activeAp->strength);
+    else subtitle = "Not connected";
+
+    std::unique_ptr<Widget> toggle;
+    if (available)
+    {
+        auto t = std::make_unique<ToggleSwitch>();
+        t->value = wirelessEnabled;
+        t->bounds.height = 26;
+        t->onChange = [this](bool enabled) { m_networkManager.SetWirelessEnabled(enabled); };
+        toggle = std::move(t);
+    }
+
+    auto header = MakePageHeader({ 0, y, contentWidth, 52 }, "Wi-Fi", subtitle, std::move(toggle), 46);
+    y += 52 + kCardGap;
+    content->AddChild(std::move(header));
+
+    if (!available)
+        return;
+
+    if (!wirelessEnabled)
+    {
+        auto label = std::make_unique<Label>();
+        label->text = "Turn Wi-Fi on to see nearby networks.";
+        label->color = UiTheme::Default().muted;
+        label->bounds = { 0, y, contentWidth, 24 };
+        y += 24;
+        content->AddChild(std::move(label));
+        return;
+    }
 
     if (!wifiDevice)
     {
@@ -325,101 +342,239 @@ void NetworkWindow::RebuildWiFiPage(Widget* content, int& y, int contentWidth)
         return;
     }
 
+    // --- sub-header: count + scan action, spanning the full width ----------
+
+    auto subHeader = std::make_unique<Widget>();
+    subHeader->bounds = { 0, y, contentWidth, 36 };
+
+    auto countLabel = std::make_unique<Label>();
+    countLabel->text = wifiDevice->accessPoints.empty()
+        ? "No networks found yet"
+        : std::to_string(wifiDevice->accessPoints.size()) + " network"
+            + (wifiDevice->accessPoints.size() == 1 ? "" : "s") + " found";
+    countLabel->color = UiTheme::Default().muted;
+    countLabel->bounds = { 0, 8, contentWidth - 110, 20 };
+    subHeader->AddChild(std::move(countLabel));
+
     auto scanButton = std::make_unique<Button>();
-    scanButton->label = "Scan for networks";
-    scanButton->bounds = { 0, y, 180, 32 };
+    scanButton->label = "Scan";
+    scanButton->bounds = { contentWidth - 100, 2, 100, 32 };
     scanButton->onClick = [this] { m_networkManager.RequestWiFiScan(); };
-    y += 44;
-    content->AddChild(std::move(scanButton));
+    subHeader->AddChild(std::move(scanButton));
+
+    y += 36 + kCardGap;
+    content->AddChild(std::move(subHeader));
 
     if (wifiDevice->accessPoints.empty())
-    {
-        auto label = std::make_unique<Label>();
-        label->text = "No Wi-Fi networks found yet.";
-        label->color = UiTheme::Default().muted;
-        label->bounds = { 0, y, contentWidth, 24 };
-        y += 24;
-        content->AddChild(std::move(label));
         return;
-    }
 
+    // --- network rows: full-width, revealing a signal percentage once
+    //     there's room for it (see the width check below) rather than
+    //     just stretching the same three pieces of information across
+    //     however wide the window happens to be. -------------------------
+
+    bool showPercent = contentWidth >= 640;
     std::string devicePath = wifiDevice->objectPath;
 
     for (auto& ap : wifiDevice->accessPoints)
     {
-        auto row = std::make_unique<ListRow>();
-        row->iconName = ap.secured ? "network-wireless-encrypted" : "network-wireless";
-        row->title = ap.ssid;
-        row->subtitle = ap.isActiveConnection ? ("Connected \u2022 " + SignalQuality(ap.strength)) : SignalQuality(ap.strength);
-        row->selected = ap.isActiveConnection;
+        const int rowHeight = 68;
 
         std::string apPath = ap.objectPath;
         std::string ssid = ap.ssid;
         bool secured = ap.secured;
         bool isActive = ap.isActiveConnection;
+        std::uint8_t strength = ap.strength;
 
+        auto row = std::make_unique<ClickableContainer>();
+        row->bounds = { 0, y, contentWidth, rowHeight };
+        row->selected = isActive;
         row->onClick = [this, devicePath, apPath, ssid, secured, isActive]
         {
             if (isActive)
                 return;
-
             if (!secured)
                 m_networkManager.ConnectToAccessPoint(devicePath, apPath, ssid, "");
             else
                 PromptAndConnect(devicePath, apPath, ssid, secured);
         };
 
-        row->Layout({ 0, y, contentWidth, 60 });
-        y += 66;
+        auto icon = std::make_unique<IconView>();
+        icon->name = WiFiIconFor(strength, secured);
+        icon->bounds = { 16, y + (rowHeight - 28) / 2, 28, 28 };
+        row->AddChild(std::move(icon));
+
+        // Right-aligned cluster (built right-to-left so its total
+        // width is known before the text block's width is): action
+        // control, optional percentage, security lock.
+        int clusterX = contentWidth - 16;
+
+        std::unique_ptr<Widget> actionWidget;
+        int actionWidth = 0;
+        if (isActive)
+        {
+            actionWidth = Badge::MeasureWidth(m_window, "Connected");
+            auto badge = std::make_unique<Badge>();
+            badge->text = "Connected";
+            badge->tone = Badge::Tone::Positive;
+            badge->bounds = { 0, 0, actionWidth, 26 };
+            actionWidget = std::move(badge);
+        }
+        else
+        {
+            actionWidth = 100;
+            auto button = std::make_unique<Button>();
+            button->label = "Connect";
+            button->primary = true;
+            button->bounds = { 0, 0, actionWidth, 32 };
+            std::string ssidCopy = ssid, apPathCopy = apPath, devicePathCopy = devicePath;
+            bool securedCopy = secured;
+            button->onClick = [this, devicePathCopy, apPathCopy, ssidCopy, securedCopy]
+            {
+                if (!securedCopy)
+                    m_networkManager.ConnectToAccessPoint(devicePathCopy, apPathCopy, ssidCopy, "");
+                else
+                    PromptAndConnect(devicePathCopy, apPathCopy, ssidCopy, securedCopy);
+            };
+            actionWidget = std::move(button);
+        }
+
+        clusterX -= actionWidth;
+        actionWidget->bounds = { clusterX, y + (rowHeight - actionWidget->bounds.height) / 2, actionWidth, actionWidget->bounds.height };
+        row->AddChild(std::move(actionWidget));
+
+        if (showPercent)
+        {
+            int percentWidth = 46;
+            clusterX -= percentWidth + 12;
+
+            auto percentLabel = std::make_unique<Label>();
+            percentLabel->text = std::to_string(strength) + "%";
+            percentLabel->color = UiTheme::Default().muted;
+            percentLabel->align = Label::Align::Right;
+            percentLabel->bounds = { clusterX, y + (rowHeight - 18) / 2, percentWidth, 18 };
+            row->AddChild(std::move(percentLabel));
+        }
+
+        if (secured)
+        {
+            int lockWidth = 20;
+            clusterX -= lockWidth + 10;
+
+            auto lockIcon = std::make_unique<IconView>();
+            lockIcon->name = "network-wireless-encrypted";
+            lockIcon->bounds = { clusterX, y + (rowHeight - lockWidth) / 2, lockWidth, lockWidth };
+            row->AddChild(std::move(lockIcon));
+        }
+
+        auto title = std::make_unique<Label>();
+        title->text = ssid;
+        title->bounds = { 58, y + 12, clusterX - 58 - 12, 22 };
+        row->AddChild(std::move(title));
+
+        auto subtitleLabel = std::make_unique<Label>();
+        subtitleLabel->text = SignalQuality(strength);
+        subtitleLabel->color = UiTheme::Default().muted;
+        subtitleLabel->bounds = { 58, y + 36, clusterX - 58 - 12, 18 };
+        row->AddChild(std::move(subtitleLabel));
+
+        y += rowHeight + 10;
         content->AddChild(std::move(row));
     }
 }
 
-void NetworkWindow::RebuildEthernetPage(Widget* content, int& y, int contentWidth)
+std::unique_ptr<Widget> NetworkWindow::BuildEthernetCard(const NetworkDevice& device, int width)
 {
-    if (!m_networkManager.Available())
+    // At narrow widths, a single summary line; once there's genuine
+    // room, a proper labeled grid - the concrete "show more
+    // information as the window widens" behavior for this page,
+    // matched by the card's own height growing to match.
+    int columns = width >= 760 ? 4 : width >= 520 ? 2 : 1;
+    int rows = columns == 1 ? 1 : (4 + columns - 1) / columns;
+    int gridHeight = columns == 1 ? 20 : rows * 44;
+    int height = 64 + gridHeight;
+
+    auto card = std::make_unique<ClickableContainer>();
+    card->bounds = { 0, 0, width, height };
+    card->selected = device.connected;
+
+    auto icon = std::make_unique<IconView>();
+    icon->name = "network-wired";
+    icon->bounds = { 16, 16, 30, 30 };
+    card->AddChild(std::move(icon));
+
+    int badgeWidth = Badge::MeasureWidth(m_window, device.connected ? "Connected" : "Not connected");
+
+    auto title = std::make_unique<Label>();
+    title->text = device.interfaceName.empty() ? "Ethernet" : device.interfaceName;
+    title->bounds = { 58, 16, width - 58 - badgeWidth - 28, 22 };
+    card->AddChild(std::move(title));
+
+    auto badge = std::make_unique<Badge>();
+    badge->text = device.connected ? "Connected" : "Not connected";
+    badge->tone = device.connected ? Badge::Tone::Positive : Badge::Tone::Neutral;
+    badge->bounds = { width - 16 - badgeWidth, 18, badgeWidth, 22 };
+    card->AddChild(std::move(badge));
+
+    if (columns == 1)
     {
-        auto label = std::make_unique<Label>();
-        label->text = "NetworkManager is not available.";
-        label->color = UiTheme::Default().muted;
-        label->bounds = { 0, y, contentWidth, 24 };
-        y += 24;
-        content->AddChild(std::move(label));
-        return;
+        std::ostringstream summary;
+        summary << (device.ipv4.address.empty() ? "No address" : device.ipv4.address + "/" + std::to_string(device.ipv4.prefixLength));
+        if (!device.macAddress.empty())
+            summary << "  \u2022  " << device.macAddress;
+
+        auto summaryLabel = std::make_unique<Label>();
+        summaryLabel->text = summary.str();
+        summaryLabel->color = UiTheme::Default().muted;
+        summaryLabel->bounds = { 58, 40, width - 74, 18 };
+        card->AddChild(std::move(summaryLabel));
+    }
+    else
+    {
+        struct Field { std::string caption, value; };
+        std::vector<Field> fields = {
+            { "ADDRESS", device.ipv4.address.empty() ? "" : device.ipv4.address + "/" + std::to_string(device.ipv4.prefixLength) },
+            { "GATEWAY", device.ipv4.gateway },
+            { "DNS", device.ipv4.dnsServers.empty() ? "" : device.ipv4.dnsServers.front() },
+            { "MAC ADDRESS", device.macAddress },
+        };
+
+        int fieldWidth = (width - 32 - (columns - 1) * kCardGap) / columns;
+        int gridTop = 58;
+
+        for (std::size_t i = 0; i < fields.size(); ++i)
+        {
+            int col = static_cast<int>(i) % columns;
+            int row = static_cast<int>(i) / columns;
+            Rect fieldRect{ 16 + col * (fieldWidth + kCardGap), gridTop + row * 44, fieldWidth, 40 };
+            card->AddChild(BuildInfoField(fieldRect, fields[i].caption, fields[i].value));
+        }
     }
 
-    bool any = false;
+    return card;
+}
 
+void NetworkWindow::RebuildEthernetPage(Widget* content, int& y, int contentWidth)
+{
+    auto header = MakePageHeader({ 0, y, contentWidth, 52 }, "Ethernet",
+        m_networkManager.Available() ? "Wired connections" : "NetworkManager is not available.");
+    y += 52 + kCardGap;
+    content->AddChild(std::move(header));
+
+    if (!m_networkManager.Available())
+        return;
+
+    bool any = false;
     for (auto& device : m_networkManager.Devices())
     {
         if (device.kind != NetworkDeviceKind::Ethernet)
             continue;
 
         any = true;
-
-        auto row = std::make_unique<ListRow>();
-        row->iconName = "network-wired";
-        row->title = device.interfaceName + (device.connected ? " \u2022 Connected" : " \u2022 Not connected");
-
-        std::ostringstream subtitle;
-        subtitle << (device.macAddress.empty() ? "" : device.macAddress + "  \u2022  ") << IpSummary(device.ipv4);
-        row->subtitle = subtitle.str();
-        row->selected = device.connected;
-
-        std::string devicePath = device.objectPath;
-        bool connected = device.connected;
-
-        auto toggle = std::make_unique<ToggleSwitch>();
-        toggle->value = connected;
-        toggle->onChange = [this, devicePath](bool enable)
-        {
-            if (!enable)
-                m_networkManager.DisconnectDevice(devicePath);
-        };
-
-        row->Layout({ 0, y, contentWidth, 60 }, std::move(toggle), 46);
-        y += 66;
-        content->AddChild(std::move(row));
+        auto card = BuildEthernetCard(device, contentWidth);
+        card->bounds.y = y;
+        y += card->bounds.height + kCardGap;
+        content->AddChild(std::move(card));
     }
 
     if (!any)
@@ -435,16 +590,13 @@ void NetworkWindow::RebuildEthernetPage(Widget* content, int& y, int contentWidt
 
 void NetworkWindow::RebuildVpnPage(Widget* content, int& y, int contentWidth)
 {
+    auto header = MakePageHeader({ 0, y, contentWidth, 52 }, "VPN",
+        m_networkManager.Available() ? "Existing VPN connection profiles" : "NetworkManager is not available.");
+    y += 52 + kCardGap;
+    content->AddChild(std::move(header));
+
     if (!m_networkManager.Available())
-    {
-        auto label = std::make_unique<Label>();
-        label->text = "NetworkManager is not available.";
-        label->color = UiTheme::Default().muted;
-        label->bounds = { 0, y, contentWidth, 24 };
-        y += 24;
-        content->AddChild(std::move(label));
         return;
-    }
 
     bool any = false;
 
@@ -454,6 +606,7 @@ void NetworkWindow::RebuildVpnPage(Widget* content, int& y, int contentWidth)
             continue;
 
         any = true;
+        const int height = 72;
 
         auto row = std::make_unique<ListRow>();
         row->iconName = "network-vpn";
@@ -474,8 +627,8 @@ void NetworkWindow::RebuildVpnPage(Widget* content, int& y, int contentWidth)
                 m_networkManager.DeactivateConnection(connPath);
         };
 
-        row->Layout({ 0, y, contentWidth, 60 }, std::move(toggle), 46);
-        y += 66;
+        row->Layout({ 0, y, contentWidth, height }, std::move(toggle), 46);
+        y += height + kCardGap;
         content->AddChild(std::move(row));
     }
 

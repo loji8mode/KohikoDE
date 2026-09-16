@@ -173,4 +173,56 @@ private:
     void SetFromX(int x);
 };
 
+// A single centered icon, resolved/rendered via UiWindow::DrawIcon()
+// (backed by UiIconCache) - the one-line "give a row an icon" widget
+// every device/network/connection row needs, pulled into the shared
+// toolkit rather than the same five-line class redefined in each
+// app's own .cpp.
+class IconView : public Widget
+{
+public:
+    std::string name;
+    void Draw(UiWindow& window) override;
+};
+
+// A small rounded status pill - "Connected", "Default Device",
+// "Good signal", "Off" - used throughout kohiko-audio/network/
+// bluetooth's card-based layouts to surface state at a glance without
+// it competing with a row's primary title/subtitle text. `tone`
+// picks the background/text colors from the theme (Neutral is the
+// default muted-gray pill; the others read as a clear "this matters"
+// signal without introducing new colors of their own).
+class Badge : public Widget
+{
+public:
+
+    enum class Tone { Neutral, Accent, Positive, Danger };
+
+    std::string text;
+    Tone tone = Tone::Neutral;
+
+    void Draw(UiWindow& window) override;
+
+    // The width this badge needs to fit `text` comfortably - callers
+    // size `bounds.width` from this (there's no auto-sizing pass in
+    // this toolkit; see e.g. ListRow::Layout() for the same
+    // caller-computes-the-rect convention).
+    static int MeasureWidth(UiWindow& window, const std::string& text);
+};
+
+// Composes the title/subtitle/optional-trailing-control header every
+// page across all three apps opens with (see e.g. kohiko-network's
+// "Wi-Fi / Connected to X" header with its on/off switch, or
+// kohiko-audio's "Output Devices" header with its "Test Sound"
+// button) - pulled out once rather than hand-built per page, since
+// it's the same shape everywhere: a bold title, a muted subtitle
+// below it, and one optional right-aligned control.
+std::unique_ptr<Widget> MakePageHeader(
+    const Rect& bounds,
+    const std::string& title,
+    const std::string& subtitle,
+    std::unique_ptr<Widget> trailing = nullptr,
+    int trailingWidth = 0
+);
+
 }
