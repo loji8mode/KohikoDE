@@ -149,7 +149,9 @@ scripts/install-arch.sh
 ```
 
 Installs every pacman dependency Kohiko needs (`base-devel`, `libx11`,
-`libxrandr`, `imlib2`, `xorg-fonts-misc`, `xorg-server`), builds
+`libxrandr`, `imlib2`, `libxft`, `ttf-dejavu`, `xorg-server`, `libxss`,
+`dbus`, `pipewire`, `librsvg`, `flameshot`, `bluez`, `bluez-tools` - see
+the script's own comments for exactly what each one is for), builds
 with `make -j$(nproc)`, runs `sudo make install` (which registers Kohiko
 as a session - see [Running it](#running-it) below - the same as on any
 other distro; nothing here is Arch-specific about that part anymore),
@@ -157,6 +159,28 @@ drops a default config in `~/.config/kohiko` if you don't have one yet,
 and sets up a `~/.xinitrc` that starts it - but only if you don't
 already have one, so it never overwrites an existing setup. Run it as
 your normal user; it calls `sudo` itself for the steps that need it.
+
+It also finishes the Bluetooth setup automatically (see
+[Audio, network, and Bluetooth](#audio-network-and-bluetooth) for why
+any of this is necessary at all): a `~/.config/autostart/blueman.desktop`
+override that suppresses `blueman-applet`'s own tray icon/notifications
+without touching the system copy Blueman's own package owns (so a
+`pacman -Syu` upgrade of `blueman` can't undo it), and
+`systemctl --user enable --now kohiko-bt-agent.service` to start the
+headless pairing agent `kohiko-bluetooth` needs. Both are idempotent -
+running the installer again (an upgrade, say) won't duplicate or
+clobber either, and neither step ever touches a file it didn't create
+itself (a customized `~/.config/autostart/blueman.desktop` of your own
+is left alone, with a message telling you so).
+
+`scripts/uninstall-arch.sh` is the reverse: disables
+`kohiko-bt-agent.service`, removes the `blueman.desktop` override
+(restoring `blueman-applet`'s normal autostart) *only* if it's still
+exactly what `install-arch.sh` itself created, and runs
+`sudo make uninstall` to remove every system-wide file `sudo make install`
+put in place. It never removes `bluez`/`bluez-tools` themselves (general
+system Bluetooth infrastructure, not something Kohiko owns) or your own
+`~/.config/kohiko/kohiko.conf`/`~/.xinitrc`.
 
 ## Running it
 
@@ -1020,6 +1044,28 @@ own "Advanced Settings" link, rather than being dropped.
   state). Backed entirely by BlueZ over D-Bus. The actual trust
   on/off toggle (the details panel only ever *shows* trusted status)
   is one level down, on Advanced Settings.
+
+  Pairing needs one more piece `kohiko-bluetooth` doesn't provide
+  itself: BlueZ's `Device1.Pair()` (what the Pair button calls) needs
+  something registered as the system's `org.bluez.Agent1` to actually
+  handle the PIN/passkey/confirmation exchange, or it has nothing to
+  ask. That's `bt-agent` (from `bluez-tools`) - a genuine, minimal,
+  headless agent with no GUI, no tray icon, and no notifications of
+  its own, installed and enabled automatically by
+  [`scripts/install-arch.sh`](#arch-linux-one-command-install) as
+  `kohiko-bt-agent.service`, a `systemd --user` unit. This
+  deliberately isn't `blueman-applet`'s own pairing-agent plugin: that
+  plugin is hard-coupled, in Blueman's own source, to Blueman's own
+  tray icon plugin, so there's no supported way to get one without the
+  other - `install-arch.sh` suppresses `blueman-applet`'s autostart
+  entirely (a `~/.config/autostart/blueman.desktop` override, not a
+  change to the system copy Blueman's own package owns) so
+  `kohiko-bluetooth` is the only Bluetooth UI, while `bt-agent` takes
+  over the one piece of backend functionality Blueman was otherwise
+  providing. `blueman-manager` and Blueman's other GUI tools are left
+  installed and still work fine if you launch them yourself - only
+  the auto-started applet is suppressed. The resulting chain is:
+  `bluetoothd` (BlueZ) ← `bt-agent` ← `kohiko-bluetooth` ← Kohiko's UI.
 
 Each has a matching tray widget (`kohiko-audio-tray`,
 `kohiko-network-tray`, `kohiko-bluetooth-tray`) that docks into the

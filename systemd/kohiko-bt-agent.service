@@ -1,0 +1,46 @@
+# A per-user systemd unit (installed system-wide to
+# /usr/lib/systemd/user/ by `make install`/`cmake --install`, exactly
+# where third-party packages like blueman ship their own user units -
+# see docs/ARCHITECTURE.md's "Audio, network, and Bluetooth" section)
+# providing bt-agent (from bluez-tools) as kohiko-bluetooth's BlueZ
+# pairing agent.
+#
+# Why this exists at all: BluezClient::PairDevice() (src/BluezClient.cpp)
+# calls BlueZ's own Device1.Pair() directly and registers no
+# org.bluez.Agent1 of its own - something has to be registered as the
+# system's BlueZ agent for the PIN/passkey/confirmation exchange pairing
+# needs, or Pair() has nothing to ask and pairing simply doesn't work.
+# bt-agent is a genuine, minimal, headless agent with no GUI, no tray
+# icon, and no notifications of its own - unlike blueman-applet's own
+# agent plugin, which is hard-architecturally-coupled to blueman's tray
+# icon (see CHANGELOG.md's "Blueman" entries for the full investigation
+# that found this and why blueman-applet's autostart is suppressed via
+# a user-level XDG override instead of just being left running).
+#
+# `--capability=DisplayYesNo` is bt-agent's own default (spelled out
+# here for clarity) - handles modern SSP "just works"/numeric-
+# comparison pairing, which covers the overwhelming majority of real
+# devices; see `bt-agent --help` for the other capability values if a
+# particular device needs one of those instead.
+#
+# Enablement (systemctl --user enable --now kohiko-bt-agent.service) is
+# deliberately NOT done here or by any root-context package hook - see
+# scripts/install-arch.sh's own comment on why that has to run as the
+# actual logged-in user, in their own systemd --user session, not from
+# a privileged package-install process that may have no real user
+# session to target at all.
+
+[Unit]
+Description=Kohiko Bluetooth pairing agent (bt-agent, headless - see kohiko-bluetooth)
+Documentation=man:bt-agent(1)
+After=bluetooth.target
+Wants=bluetooth.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/bt-agent --capability=DisplayYesNo
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

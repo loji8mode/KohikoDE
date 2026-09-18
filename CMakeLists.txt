@@ -767,4 +767,14 @@ if(KOHIKO_DESKTOP_APPS_AVAILABLE)
         desktop/kohiko-bluetooth-tray.desktop
         DESTINATION /etc/xdg/autostart
     )
+
+    # The headless BlueZ pairing agent kohiko-bluetooth itself needs
+    # but doesn't register (see BluezClient::PairDevice()'s own
+    # comment and systemd/kohiko-bt-agent.service's own header) -
+    # same absolute-path reasoning as the xsessions/pixmaps installs
+    # above: /usr/lib/systemd/user is the fixed, well-known location
+    # systemd --user itself scans, same as blueman's own user units
+    # live. Does NOT enable it - see scripts/install-arch.sh's own
+    # comment for why that has to run as the actual logged-in user.
+    install(FILES systemd/kohiko-bt-agent.service DESTINATION /usr/lib/systemd/user)
 endif()

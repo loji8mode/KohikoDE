@@ -1,5 +1,84 @@
 # Changelog
 
+## Version 0.20.12
+
+Release date: 2026-09-17
+
+### Added
+- **The 0.20.11 Blueman fix is now fully automatic** - a normal install
+  no longer requires anyone to manually install `bluez-tools`, write a
+  `~/.config/autostart/blueman.desktop` override, create or enable a
+  `systemd --user` service, or configure Bluetooth by hand just to get
+  working `kohiko-bluetooth` pairing with no competing Blueman UI.
+  Investigated Kohiko's existing packaging/session-startup mechanisms
+  first, per the request's own instruction, rather than inventing a
+  new one: `scripts/install-arch.sh` (there is no PKGBUILD - this
+  one-shot, user-run script *is* Kohiko's install mechanism on Arch)
+  already does system-wide steps via `sudo` and per-user steps
+  (config, `~/.xinitrc`) directly, as the actual logged-in user, in
+  the same run - exactly the "system-wide package installation vs.
+  per-user session activation" split this feature needed, already
+  established, not something to add a second version of. Extended
+  rather than replaced:
+  - `bluez` and `bluez-tools` added to `install-arch.sh`'s existing
+    `pacman -S --needed` dependency list.
+  - New `systemd/kohiko-bt-agent.service` (a `systemd --user` unit
+    wrapping `bt-agent --capability=DisplayYesNo`) installed system-
+    wide to `/usr/lib/systemd/user/` by `make install`/`cmake --install`
+    - the exact same location third-party packages like `blueman` ship
+    their own user units, so any user on the machine can have it
+    enabled for their own session. Installing the *unit file* is a
+    root-context, system-wide step; *enabling* it is not, and isn't
+    done here.
+  - `install-arch.sh` itself now also creates the
+    `~/.config/autostart/blueman.desktop` override (idempotent - marker-
+    based, so a reinstall/upgrade re-run neither duplicates it nor
+    clobbers a user's own customization of that file, verified by
+    directly exercising all three cases: first install, idempotent
+    reinstall, and a customized file left untouched) and runs
+    `systemctl --user enable --now kohiko-bt-agent.service` - both as
+    the actual logged-in user this script already requires (it refuses
+    to run as root), never from a root-context package hook. That
+    distinction matters mechanically, not just stylistically:
+    `systemctl --user` only means anything inside a real user's own
+    systemd session, which a privileged installer process may have no
+    connection to at all - confirmed by testing that a failed
+    `systemctl --user enable` (simulating exactly that "no session"
+    case) is reported clearly and doesn't abort the rest of the
+    install under `set -e`.
+  - New `scripts/uninstall-arch.sh`, the mirror image: disables
+    `kohiko-bt-agent.service` and removes the autostart override
+    (restoring `blueman-applet`'s normal behavior) - only if it's
+    still exactly the file `install-arch.sh` itself wrote - then
+    `sudo make uninstall` (new: the `Makefile` had an `install`/
+    `install-desktop-apps` pair and no uninstall counterpart at all
+    before this) removes every system-wide file those two targets
+    create. Verified file-for-file symmetric with `install`/
+    `install-desktop-apps` via `make install DESTDIR=... && make
+    uninstall DESTDIR=...` leaving zero files behind. Never removes
+    `bluez`/`bluez-tools` themselves or a user's own
+    `~/.config/kohiko/kohiko.conf`/`~/.xinitrc` - this cleans up what
+    Kohiko's own installer put in place, not general system Bluetooth
+    infrastructure or personal configuration.
+  - `CMakeLists.txt` gained the matching `install(FILES
+    systemd/kohiko-bt-agent.service DESTINATION /usr/lib/systemd/user)`
+    rule, kept in sync with the `Makefile` the same way every other
+    install rule in this project already is (CMake has no built-in
+    `uninstall` target of its own, and none was added here - the
+    actual, user-facing install/uninstall flow on Arch goes through
+    `install-arch.sh` and plain `make`, not CMake).
+  Every new piece was tested as directly as this environment allows:
+  `systemd-analyze verify` on the shipped unit, both new shell scripts
+  syntax-checked and their root-refusal behavior confirmed, the
+  idempotency/non-clobbering logic exercised directly against a fake
+  `$HOME` for all three cases above, and the `install`/`uninstall`
+  Makefile symmetry verified via `DESTDIR`. Real package installation
+  (`pacman`), a real `systemd --user` session, and real BlueZ pairing
+  still need a real Arch machine to verify end to end - this sandbox
+  has neither `pacman` nor `systemd` as PID 1, the same category of
+  limitation as the real-Bluetooth-hardware testing in the 0.20.10/
+  0.20.11 investigations.
+
 ## Version 0.20.11
 
 Release date: 2026-09-15

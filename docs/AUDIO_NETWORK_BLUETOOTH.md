@@ -675,6 +675,14 @@ layer underneath them are exactly as they were.
   WWAN radios together) isn't wired into the UI - it wasn't in the
   previous UI either, so this predates the 0.20.0 redesign and isn't a
   regression from it, just an existing gap worth knowing about.
+- `BluezClient::PairDevice()` calls BlueZ's `Pair()` directly and
+  registers no `org.bluez.Agent1` of its own - pairing needs *something*
+  to be registered as the system's BlueZ agent, or `Pair()` has nothing
+  to ask. Not this section's own gap to fix (it's a system-setup
+  concern, not a `BluetoothWindow` one) - see [Bluetooth pairing
+  agent](ARCHITECTURE.md#bluetooth-pairing-agent) in `ARCHITECTURE.md`
+  for what provides it (`bt-agent`) and how it's installed/enabled
+  automatically.
 
 ## Recommendations for the next development session
 

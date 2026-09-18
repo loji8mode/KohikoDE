@@ -23,6 +23,7 @@ current limitations, recommendations), see
 - [Core window manager](#core-window-manager)
 - [UI toolkit (`UiWidget` & friends)](#ui-toolkit-uiwidget--friends)
 - [Companion applications](#companion-applications)
+- [Bluetooth pairing agent](#bluetooth-pairing-agent)
 - [Native notifications](#native-notifications)
 - [Configuration system](#configuration-system)
 - [IPC](#ipc)
@@ -318,6 +319,85 @@ been tested on a real display, only via Xvfb screenshots.
 **Why `kohiko-settings` doesn't use any of this**: it predates the
 toolkit and already works; see Phase 10 in `PROJECT_HISTORY.md` and
 the note in [UI toolkit](#ui-toolkit-uiwidget--friends) above.
+
+## Bluetooth pairing agent
+
+`BluezClient::PairDevice()` (`src/BluezClient.cpp`) calls BlueZ's own
+`Device1.Pair()` directly and registers no `org.bluez.Agent1` of its
+own - by design, matching every other companion app's "talk to the
+real backend over D-Bus, no extra layer" shape (see [Companion
+applications](#companion-applications)). That leaves one real gap:
+`Pair()` needs *something* registered as the system's BlueZ agent to
+actually handle the PIN/passkey/confirmation exchange pairing requires,
+or it has nothing to ask.
+
+**What provides it, and why not Blueman's own**: `bt-agent` (from the
+`bluez-tools` package) - a genuine, minimal, headless agent with no
+GUI, no tray icon, and no notifications of its own. This is deliberate,
+not an oversight: `blueman-applet`'s own pairing-agent plugin
+(`AuthAgent`) declares `__depends__ = ["StatusIcon"]` in Blueman's own
+source, and `StatusIcon` (Blueman's tray-icon coordinator) is hard-
+coded `__unloadable__ = False` there - Blueman's own developers made it
+explicitly impossible to run its agent without its tray icon, via any
+supported configuration. A real user correctly identified
+`blueman-applet` itself (not just its notifications) as a competing,
+un-Kohiko-classified UI running in parallel with `kohiko-bluetooth` -
+see `CHANGELOG.md`'s "Blueman" entries for the full investigation,
+including live confirmation via a real third-party notification daemon
+and `dbus-monitor` that Kohiko's own notification path was already
+clean and blueman-applet was the actual remaining source.
+
+**What's installed and enabled, and by what**: three pieces, in the
+two contexts each one actually belongs to (see `scripts/install-arch.sh`'s
+own comments for the full reasoning) -
+
+- *System-wide, needs root* (`sudo pacman -S bluez bluez-tools`, then
+  `sudo make install`/`cmake --install`): the two packages, and
+  `systemd/kohiko-bt-agent.service` installed to
+  `/usr/lib/systemd/user/kohiko-bt-agent.service` - the same
+  well-known location third-party packages like Blueman ship their
+  own user units in. Installing the unit *definition* here does not
+  enable it for anyone - that's the next step, and it deliberately
+  isn't done here.
+- *Per-user, no root* (`scripts/install-arch.sh`, run as the actual
+  logged-in user - never from a root-context package hook, which
+  `systemctl --user` cannot reliably target since it belongs to a
+  specific user's own systemd session): `systemctl --user enable --now
+  kohiko-bt-agent.service`, and a `~/.config/autostart/blueman.desktop`
+  override (`Hidden=true`) that suppresses `blueman-applet`'s own
+  autostart. This is the standard XDG Desktop Application Autostart
+  override mechanism - a same-filename entry in a user's own
+  `~/.config/autostart` takes precedence over the system copy in
+  `/etc/xdg/autostart` (see `Xdg::AutostartDirs()`'s own ordering and
+  `DesktopEntry.cpp`'s `ShouldAutostart()`, which already respects
+  `Hidden` - this is exactly what makes the override work, unmodified,
+  through Kohiko's own existing `WindowManager::RunXdgAutostartEntries()`)
+  - so it never touches the file Blueman's own package owns, and a
+    `pacman -Syu` upgrade of `blueman` can't restore anything. Both
+    steps are idempotent: re-running `install-arch.sh` (a reinstall or
+    upgrade) neither duplicates nor corrupts either one, and the
+    autostart override is only ever regenerated if it's still exactly
+    what `install-arch.sh` itself last wrote (checked via a marker
+    comment) - a user's own customization of that file is left alone.
+  `blueman-manager` and Blueman's other GUI tools are untouched and
+  still work fine if launched manually; only the auto-started applet
+  is suppressed.
+- *Removal* (`scripts/uninstall-arch.sh`, the mirror image, also user-run):
+  disables the service, removes the autostart override (restoring
+  Blueman's normal behavior) only if it's still `install-arch.sh`'s own
+  file, then `sudo make uninstall` removes every system-wide file
+  `install`/`install-desktop-apps` created - see the `Makefile`'s own
+  `uninstall`/`uninstall-desktop-apps` targets, kept as a literal
+  mirror of `install`/`install-desktop-apps`'s file list so a new
+  `install -D` line without a matching `rm -f` is easy to spot on
+  review. Never removes `bluez`/`bluez-tools` themselves (general
+  system Bluetooth infrastructure, not something Kohiko owns) or a
+  user's own `~/.config/kohiko/kohiko.conf`/`~/.xinitrc`.
+
+The resulting chain: `bluetoothd` (BlueZ) ← `bt-agent` ←
+`kohiko-bluetooth` ← Kohiko's UI - one pairing agent, no competing
+tray icon or notifications, and nothing here that isn't cleanly
+reversible per the split above.
 
 ## Native notifications
 

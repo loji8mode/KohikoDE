@@ -2025,3 +2025,48 @@ discovering - is never quite strong enough evidence on its own.
 
 --------------------------------------------------------------------------
 
+0.20.11's fix was correct and still asked something unreasonable of
+every single person who'd ever install Kohiko: read the changelog,
+notice a Bluetooth fix happened, and manually reproduce four shell
+commands correctly, forever, on every machine. A fix that only exists
+in a changelog entry isn't finished - this release is the difference
+between "the maintainer knows how to fix this" and "the user's machine
+is actually fixed" that this project's own philosophy elsewhere (the
+config migration system, `AppInstanceLock`, the autostart deduplication
+this exact feature turned out to depend on) already treats as the same
+concern.
+
+The instruction to inspect Kohiko's existing packaging before writing
+anything mattered more than it might have looked like it should. There
+is no PKGBUILD - `scripts/install-arch.sh` *is* the install mechanism,
+a plain script a user runs themselves, and it already did the thing
+this feature needed: system-wide steps under `sudo`, per-user steps as
+the real logged-in user, in the same run, no privileged process ever
+touching `$HOME` and no per-user step ever needing to guess whose home
+directory that is. That split wasn't invented for this feature - it
+already existed, for `~/.config/kohiko/kohiko.conf` and `~/.xinitrc` -
+this release just extended it to cover a `systemd --user` service and
+an autostart override too, rather than reasoning from first principles
+about "how should a root installer talk to a user session" and
+arriving somewhere new and untested. The one new piece of
+infrastructure this genuinely needed - an `uninstall` target - existed
+nowhere in the `Makefile` at all before this, which is a real gap this
+project had been carrying since `install` was first written; adding it
+as a literal, file-for-file mirror of `install`/`install-desktop-apps`
+was the smallest way to close it, and a `DESTDIR`-based install-then-
+uninstall test leaving zero files behind is about as directly
+verifiable as a build-system change gets.
+
+The idempotency requirement - reinstalling must not duplicate or
+corrupt anything - is where "it works once" and "it works" actually
+diverge, and it's the part that would have been easiest to leave
+untested since it only shows up on a *second* run. Exercising all
+three cases directly (nothing there yet, our own file already there,
+someone else's customization already there) against a fake `$HOME`
+rather than trusting the logic by inspection is the same discipline
+the two-connection notification tests earlier in this document were
+built on: a plausible-looking check and a check that's actually been
+made to fail once, on purpose, before it was trusted to pass.
+
+--------------------------------------------------------------------------
+

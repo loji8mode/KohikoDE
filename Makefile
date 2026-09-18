@@ -119,7 +119,7 @@ DESKTOP_SHARED_OBJ := $(patsubst src/%.cpp,build/%.o,$(DESKTOP_SHARED_SRC))
 DESKTOP_COMMON_OBJ := build/Font.o build/Config.o build/IconResolver.o build/Xdg.o build/Utils.o build/IniFile.o \
     build/NotificationPopup.o build/NotificationCenter.o
 
-.PHONY: all clean test install
+.PHONY: all clean test install uninstall
 
 all: kohiko kohikoctl kohiko-settings
 
@@ -569,6 +569,61 @@ install-desktop-apps: kohiko-audio kohiko-network kohiko-bluetooth kohiko-audio-
 	install -Dm644 desktop/kohiko-audio-tray.desktop $(DESTDIR)/etc/xdg/autostart/kohiko-audio-tray.desktop
 	install -Dm644 desktop/kohiko-network-tray.desktop $(DESTDIR)/etc/xdg/autostart/kohiko-network-tray.desktop
 	install -Dm644 desktop/kohiko-bluetooth-tray.desktop $(DESTDIR)/etc/xdg/autostart/kohiko-bluetooth-tray.desktop
+	# The headless BlueZ pairing agent kohiko-bluetooth itself needs
+	# but doesn't register (see BluezClient::PairDevice()'s own
+	# comment and systemd/kohiko-bt-agent.service's own header) -
+	# ships the unit system-wide, same location third-party packages
+	# like blueman use for their own user units, but does NOT enable
+	# it here: that's scripts/install-arch.sh's job, run as the actual
+	# logged-in user in their own systemd --user session - see that
+	# script's own comment for why a root-context package-install step
+	# can't safely do this instead.
+	install -Dm644 systemd/kohiko-bt-agent.service $(DESTDIR)/usr/lib/systemd/user/kohiko-bt-agent.service
+endif
+
+# Removes exactly what install/install-desktop-apps put on the system -
+# nothing this project doesn't itself own (never bluez/bluez-tools
+# themselves, never anything under a user's own $HOME - see
+# scripts/uninstall-arch.sh for that half, run by the actual user for
+# the same reason install-arch.sh's own per-user steps are). Kept as a
+# literal mirror of install/install-desktop-apps's own file list
+# on purpose - a new install -D line without a matching rm -f here is
+# a bug, and the symmetry makes that easy to spot on review.
+uninstall: uninstall-desktop-apps
+	rm -f $(DESTDIR)/usr/local/bin/kohiko
+	rm -f $(DESTDIR)/usr/local/bin/kohikoctl
+	rm -f $(DESTDIR)/usr/local/bin/kohiko-settings
+	rm -f $(DESTDIR)/usr/local/share/kohiko/default.conf
+	rm -f $(DESTDIR)/usr/local/share/kohiko/wallpapers/*.png
+	-rmdir $(DESTDIR)/usr/local/share/kohiko/wallpapers $(DESTDIR)/usr/local/share/kohiko 2>/dev/null
+	rm -f $(DESTDIR)/usr/local/share/applications/kohiko-settings.desktop
+	rm -f $(DESTDIR)/usr/local/share/icons/hicolor/scalable/apps/kohiko-settings.svg
+	rm -f $(DESTDIR)/usr/share/pixmaps/kohiko-settings.svg
+	rm -f $(DESTDIR)/usr/local/bin/kohiko-session
+	rm -f $(DESTDIR)/usr/share/xsessions/kohiko.desktop
+
+.PHONY: uninstall-desktop-apps
+ifeq ($(KOHIKO_HAVE_PIPEWIRE)-$(KOHIKO_HAVE_DBUS_PKG)-$(KOHIKO_HAVE_LIBRSVG),yes-yes-yes)
+uninstall-desktop-apps:
+	rm -f $(DESTDIR)/usr/local/bin/kohiko-audio
+	rm -f $(DESTDIR)/usr/local/bin/kohiko-network
+	rm -f $(DESTDIR)/usr/local/bin/kohiko-bluetooth
+	rm -f $(DESTDIR)/usr/local/bin/kohiko-audio-tray
+	rm -f $(DESTDIR)/usr/local/bin/kohiko-network-tray
+	rm -f $(DESTDIR)/usr/local/bin/kohiko-bluetooth-tray
+	rm -f $(DESTDIR)/usr/local/share/applications/kohiko-audio.desktop
+	rm -f $(DESTDIR)/usr/local/share/applications/kohiko-network.desktop
+	rm -f $(DESTDIR)/usr/local/share/applications/kohiko-bluetooth.desktop
+	rm -f $(DESTDIR)/usr/local/share/icons/hicolor/scalable/apps/kohiko-audio.svg
+	rm -f $(DESTDIR)/usr/local/share/icons/hicolor/scalable/apps/kohiko-network.svg
+	rm -f $(DESTDIR)/usr/local/share/icons/hicolor/scalable/apps/kohiko-bluetooth.svg
+	rm -f $(DESTDIR)/usr/share/pixmaps/kohiko-audio.svg
+	rm -f $(DESTDIR)/usr/share/pixmaps/kohiko-network.svg
+	rm -f $(DESTDIR)/usr/share/pixmaps/kohiko-bluetooth.svg
+	rm -f $(DESTDIR)/etc/xdg/autostart/kohiko-audio-tray.desktop
+	rm -f $(DESTDIR)/etc/xdg/autostart/kohiko-network-tray.desktop
+	rm -f $(DESTDIR)/etc/xdg/autostart/kohiko-bluetooth-tray.desktop
+	rm -f $(DESTDIR)/usr/lib/systemd/user/kohiko-bt-agent.service
 endif
 
 clean:
