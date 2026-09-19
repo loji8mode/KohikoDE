@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Documentation
+- **Kohiko is now consistently documented as a lightweight Linux desktop
+  environment built around its own X11 tiling window manager**, rather
+  than described as just a window manager. This is a documentation-wide
+  terminology/description migration, not a code, architecture, or
+  behavior change: no source files, binaries, package names, commands,
+  configuration keys, or APIs were touched, and `WindowManager` remains
+  the name of the internal window-manager subsystem (see
+  `PROJECT_HISTORY.md`'s new "Naming: window manager vs desktop
+  environment" section for the full explanation). README.md's opening
+  description, `desktop/kohiko.desktop`'s session `Comment=`,
+  `docs/ARCHITECTURE.md`'s intro and a new component-hierarchy diagram,
+  and `docs/AUDIO_NETWORK_BLUETOOTH.md`'s two references to an informal
+  "KohikoWM desktop" phrase (not an actual identifier anywhere in the
+  codebase) were updated accordingly. Historical documentation -
+  `CHANGELOG.md` entries below this one and the phase-by-phase history
+  in `PROJECT_HISTORY.md` - is deliberately left describing Kohiko as a
+  window manager wherever that was accurate for the release or phase in
+  question, rather than being rewritten to current terminology
+  retroactively.
+
 ## Version 0.20.12
 
 Release date: 2026-09-17

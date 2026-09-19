@@ -637,7 +637,7 @@ layer underneath them are exactly as they were.
   and `xdotool`, cross-checked against the mockups, plus temporary
   fake-data builds (removed before finalizing) to exercise the device-
   list/details-panel code paths without real hardware. **Real-hardware
-  smoke testing on an actual KohikoWM desktop is recommended before
+  smoke testing on an actual Kohiko desktop is recommended before
   relying on this.** (Still true for this section's own scope - the
   three apps' own page navigation, search, and selection interactions.
   A later session *did* add real-display/real-D-Bus/real-PipeWire
@@ -686,7 +686,7 @@ layer underneath them are exactly as they were.
 
 ## Recommendations for the next development session
 
-1. **Smoke-test on a real KohikoWM desktop first**, before making
+1. **Smoke-test on a real Kohiko desktop first**, before making
    further changes to these three apps' own pages - later sessions did
    this for the tray widgets specifically (autostart, docking, icon
    loading, scroll-volume, window classification, SVG rendering

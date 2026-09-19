@@ -1,12 +1,18 @@
 # Kohiko
 
-A small, fast tiling window manager for X11, built around a Hyprland-style
-BSP (binary space partitioning) layout: every new window splits the space
-next to whatever's focused, `Super+LMB` drags pick a window up and swap it
-with wherever you drop it, and `Super+RMB` drags resize a window and
-everything next to it adjusts automatically. A native launcher (`Super+D`)
-and a small scratch notepad (`Super+N`) round it out - both drawn the same
-plain-Xlib way as the bar, with no extra process or toolkit dependency.
+Kohiko is a lightweight Linux desktop environment for X11, built around
+its own X11 tiling window manager. That window manager follows a
+Hyprland-style BSP (binary space partitioning) layout: every new window
+splits the space next to whatever's focused, `Super+LMB` drags pick a
+window up and swap it with wherever you drop it, and `Super+RMB` drags
+resize a window and everything next to it adjusts automatically. Around
+it, Kohiko integrates the rest of a small, native desktop session: a bar,
+a launcher (`Super+D`), a scratch notepad (`Super+N`), a lock screen, and
+session/power handling, all part of the same `kohiko` process, plus
+standalone native audio/network/Bluetooth apps (see
+[Audio, network, and Bluetooth](#audio-network-and-bluetooth)). Every
+piece is drawn the same plain-Xlib way, with no Qt, GTK, or compositor
+dependency anywhere in the stack.
 
 Kohiko is **not** a Hyprland replacement and it isn't Wayland - Hyprland is
 a Wayland compositor, which means competing with it feature-for-feature
@@ -185,15 +191,15 @@ system Bluetooth infrastructure, not something Kohiko owns) or your own
 ## Running it
 
 Kohiko installs as a normal, selectable X11 session, the same way any
-other window manager does: `sudo make install` (or the CMake
-equivalent) registers an `xsessions` entry, so "Kohiko" just shows up
-in your display manager's session list (SDDM/GDM/LightDM/...) - pick it
-at login like any other session, no extra setup needed. That entry
-launches `kohiko-session`, a small wrapper that's the actual session
-entry point (`Display Manager -> kohiko-session -> kohiko`) - see
-[kohiko-session](#kohiko-session) below for exactly what it adds on top
-of running `kohiko` directly: mainly, restarting it with backoff if it
-ever crashes, rather than the whole session just ending.
+other window manager or desktop environment does: `sudo make install`
+(or the CMake equivalent) registers an `xsessions` entry, so "Kohiko"
+just shows up in your display manager's session list (SDDM/GDM/LightDM/
+...) - pick it at login like any other session, no extra setup needed.
+That entry launches `kohiko-session`, a small wrapper that's the actual
+session entry point (`Display Manager -> kohiko-session -> kohiko`) -
+see [kohiko-session](#kohiko-session) below for exactly what it adds on
+top of running `kohiko` directly: mainly, restarting it with backoff if
+it ever crashes, rather than the whole session just ending.
 
 Without a display manager, add the same thing to `~/.xinitrc` yourself
 (`scripts/install-arch.sh` already does this for you, if you don't have

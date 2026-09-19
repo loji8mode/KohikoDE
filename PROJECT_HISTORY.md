@@ -1,9 +1,16 @@
 # Kohiko Project History
 
-This document traces the evolution of Kohiko, a C++20 / X11 tiling window
-manager, across its released versions from 0.1.0 through 0.20.4. It is
-derived from a direct comparison of the source, configuration, and
-documentation of each released version against the one before it.
+This document traces the evolution of Kohiko - today documented as a
+lightweight Linux desktop environment built around its own C++20 / X11
+tiling window manager - across its released versions from 0.1.0 through
+0.20.4. It is derived from a direct comparison of the source,
+configuration, and documentation of each released version against the
+one before it. Kohiko was not always described this way: as the phases
+below show, the project began as a window manager specifically, and
+only later grew the surrounding session/desktop components that justify
+calling it a desktop environment today - see
+[Naming: window manager vs desktop environment](#naming-window-manager-vs-desktop-environment)
+at the end of this document for exactly when and how that happened.
 
 --------------------------------------------------------------------------
 
@@ -2069,4 +2076,51 @@ built on: a plausible-looking check and a check that's actually been
 made to fail once, on purpose, before it was trusted to pass.
 
 --------------------------------------------------------------------------
+
+## Naming: window manager vs desktop environment
+
+Kohiko began, in Phase 1, as a window manager specifically: a BSP tiling
+engine plus the X11 plumbing (`WindowManager`, event loop, workspace/
+monitor bookkeeping) needed to run one. Phase 2 already describes the
+project's own next step in exactly these terms - "extend Kohiko from a
+window manager into a more complete minimal desktop session" - and every
+phase after that kept adding session/desktop-level functionality on top
+of the tiling core rather than replacing it: a native lock screen and
+power menu (Phase 7); a configuration GUI (Phase 8); native tray-docked
+audio, network, and Bluetooth applications with their own shared UI
+toolkit (Phase 10, refined in Phase 11); and session persistence,
+recovery, wallpaper, and `systemd-logind` integration, including a real
+installable, autologin-capable session (Phase 12 onward).
+
+By the time of the "Current Direction" section above, Kohiko is no
+longer accurately described as *just* a window manager - it's a small
+family of cooperating processes (see `docs/ARCHITECTURE.md`'s process
+map) built around one. Current project documentation (the README,
+`docs/ARCHITECTURE.md`) accordingly describes Kohiko as **a lightweight
+Linux desktop environment built around its own X11 tiling window
+manager**, and distinguishes two things that earlier documentation
+sometimes ran together:
+
+- **Kohiko** - the project as a whole: the complete desktop
+  environment/session and its integrated components (the window
+  manager, bar, launcher, notepad, lock screen, settings, network,
+  audio, Bluetooth, session management, notifications, wallpaper, power
+  handling, and the rest).
+- **`WindowManager`** - the specific internal C++ class/subsystem, in
+  the `kohiko` process, that owns the BSP tree and the X11 event
+  handling that makes Kohiko a *window manager* among other things. It
+  remains the name of that subsystem and is **intentionally not being
+  renamed** - the identifiers `WindowManager`, its member functions, the
+  `kohiko`/`kohikoctl`/`kohiko-settings`/`kohiko-audio`/`kohiko-network`/
+  `kohiko-bluetooth` binary and package names, and every configuration
+  key are all implementation details, unaffected by what the project as
+  a whole is called.
+
+This is a description change, not an architecture change: nothing
+above corresponds to a rename, a rewrite, or new functionality. Phase-
+by-phase history elsewhere in this document is left exactly as
+written, including places that call an earlier release, or Kohiko's
+own then-current userbase, a "window manager" or "WM" - that language
+was accurate at the time it was written and is preserved here as a
+historical record, not updated to current terminology retroactively.
 

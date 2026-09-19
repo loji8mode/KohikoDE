@@ -1,11 +1,43 @@
 # Kohiko: Architecture
 
-This is the project-wide architecture reference: how the window
-manager core, the shared UI toolkit, the companion applications, IPC,
-configuration, and rendering all fit together. It's meant to be kept
-up to date as the project evolves, not to describe one point in time -
-if you change something this document describes, update the relevant
-section in the same change.
+Kohiko is a lightweight Linux desktop environment built around its own
+X11 tiling window manager. This is the project-wide architecture
+reference: how that window manager core, the shared UI toolkit, the
+companion applications, IPC, configuration, and rendering all fit
+together. It's meant to be kept up to date as the project evolves, not
+to describe one point in time - if you change something this document
+describes, update the relevant section in the same change.
+
+Roughly, the pieces break down like this - `WindowManager` names
+Kohiko's internal window-manager subsystem specifically, not the
+project as a whole; see
+[PROJECT_HISTORY.md](../PROJECT_HISTORY.md#naming-window-manager-vs-desktop-environment)
+for how that distinction came about:
+
+```
+Kohiko (desktop environment)
+├── kohiko                            - core process
+│   ├── WindowManager                 - BSP tiling engine, X11 event handling
+│   ├── Bar                           - per-monitor status bar / taskbar
+│   ├── Launcher                      - Super+D application launcher
+│   ├── Notepad                       - Super+N scratch notepad
+│   ├── LockScreen                    - native, PAM-authenticated lock screen
+│   ├── PowerMenu                     - Shutdown/Restart/Suspend
+│   ├── WallpaperManager              - per-monitor/per-workspace wallpaper
+│   ├── SystemTray                    - freedesktop System Tray Protocol host
+│   ├── NotificationCenter            - native toast notifications
+│   └── SessionStore/SessionLockBridge - session persistence, logind integration
+├── kohiko-session                    - crash-restart session wrapper (the xsessions entry point)
+├── kohiko-settings                   - standalone native configuration GUI
+├── kohiko-audio / kohiko-network / kohiko-bluetooth - standalone native apps
+│   └── matching *-tray widgets for the system tray above
+└── kohikoctl                         - CLI / IPC client
+```
+
+See [Process map](#process-map) below for exactly which of these are
+separate operating-system processes versus pieces of the `kohiko`
+binary itself, and [Core window manager](#core-window-manager) for the
+`WindowManager` subsystem's own internals.
 
 For the WM core's own internals in more depth (the BSP tree, layout
 algorithm, placement/misbehavior fallback logic), see the
@@ -553,10 +585,12 @@ call site.
 Two entirely separate configuration mechanisms, for two different
 kinds of settings:
 
-- **`kohiko.conf`** (the window manager's own config) - `Config` loads
-  a repeatable `key=value` file preserving duplicates (needed for
-  `bind=`/`exec.*=`/`windowrule=`/`monitor=` which each appear many
-  times); `ConfigParser` does the line-level parsing; `ConfigSchema`
+- **`kohiko.conf`** (the `kohiko` process's own config, covering the
+  window manager subsystem along with the bar, launcher, notepad, lock
+  screen, wallpaper, and the rest of what runs inside that process) -
+  `Config` loads a repeatable `key=value` file preserving duplicates
+  (needed for `bind=`/`exec.*=`/`windowrule=`/`monitor=` which each
+  appear many times); `ConfigParser` does the line-level parsing; `ConfigSchema`
   is metadata (category/group/type/default/description/allowed
   values) describing `Config`'s keys for `kohiko-settings` to render
   editors from - `Config` itself never references `ConfigSchema`, the
