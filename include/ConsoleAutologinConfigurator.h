@@ -123,6 +123,22 @@ public:
         const std::string& profilePath
     );
 
+    // True if `profilePath` already contains something that looks like
+    // a hand-written (or otherwise not-Kohiko-marked) guarded `exec
+    // startx` line - specifically the literal substring "exec startx"
+    // anywhere in the file. Checked separately from ProfileHasBlock()
+    // (which only ever matches this class's own marker comments),
+    // because a real report showed exactly this: a profile that already
+    // auto-starts X by hand, predating this feature entirely. When this
+    // is true, Configure() still writes the getty drop-in (still
+    // genuinely new and worth doing) but skips appending its own
+    // block - whichever guard is reached first in the file always runs
+    // first anyway, via exec, so a second one would only ever be dead
+    // code.
+    static bool ProfileAlreadyAutostartsX(
+        const std::string& profilePath
+    );
+
     // The getty drop-in path for `tty` under `root` -
     // ".../etc/systemd/system/getty@<tty>.service.d/60-kohiko-autologin.conf",
     // a dedicated file this class creates itself rather than editing
@@ -132,6 +148,24 @@ public:
     static std::string GettyDropInPath(
         const std::string& tty,
         const std::string& root = "/"
+    );
+
+    // True only for something that could plausibly be a real virtual
+    // console instance name - "tty" followed by one or more ASCII
+    // digits and nothing else ("tty1", "tty2", "tty63", ...). Every
+    // other method above interpolates `tty` both into a systemd unit
+    // instance name (part of a directory path under
+    // /etc/systemd/system/) and, verbatim, into the profile block's own
+    // content and comments - so this is deliberately strict rather than
+    // permissive. Configure() refuses outright for anything that fails
+    // this, and tools/kohikoctl.cpp checks it immediately after
+    // prompting, before ever computing or displaying a preview built
+    // from it: a mistyped console name (or, as happened once in
+    // practice, a password typed into the wrong prompt by accident)
+    // should be rejected on the spot, not silently accepted and baked
+    // into a filename and a dotfile.
+    static bool LooksLikeConsoleTty(
+        const std::string& tty
     );
 
     // The exact content Configure() writes to that path for `username` -
@@ -184,6 +218,7 @@ public:
     // if any of:
     //
     //   - DetectSupport() reports unsupported
+    //   - `tty` fails LooksLikeConsoleTty()
     //   - LookupUser() finds no such user
     //   - ClassifyShell() is Unknown for that user's shell
     //   - CheckExistingGettyAutologin() finds anything already active
@@ -191,11 +226,16 @@ public:
     //   - ProfileHasBlock() is already true for that user's profile
     //
     // Writes the getty drop-in first, validating it the same
-    // write-then-read-back way AutologinConfigurator::Configure() does,
-    // then appends the profile block. If the profile half fails for any
-    // reason (unwritable file, disk full, ...), the getty drop-in just
-    // written is removed again before returning failure - Configure()
-    // never leaves only one of the two halves in place.
+    // write-then-read-back way AutologinConfigurator::Configure() does.
+    // Then, unless ProfileAlreadyAutostartsX() is already true for that
+    // profile - in which case the profile is left completely alone and
+    // this still reports overall success, since the getty half just
+    // written is real, new, working autologin either way - appends the
+    // profile block too. If that profile-append attempt is itself made
+    // and fails for any reason (unwritable file, disk full, ...), the
+    // getty drop-in just written is removed again before returning
+    // failure - Configure() never leaves only one of the two halves in
+    // place when it actually attempted both.
     static ConfigureResult Configure(
         const std::string& username,
         const std::string& tty,

@@ -328,6 +328,17 @@ int ConfigureConsoleAutologin(
     if (tty.empty())
         tty = "tty1";
 
+    if (!Result::LooksLikeConsoleTty(tty))
+    {
+        std::printf(
+            "\n'%s' doesn't look like a real virtual console (expected something "
+            "like 'tty1', 'tty2', ...) - aborting before writing anything. If you\n"
+            "meant to type something else at that prompt (or typed a password by\n"
+            "mistake), run this again.\n",
+            tty.c_str());
+        return 1;
+    }
+
     if (undo)
     {
         bool removed = Result::Undo(username, tty);
@@ -395,23 +406,41 @@ int ConfigureConsoleAutologin(
         return 1;
     }
 
+    bool skipProfileStep = Result::ProfileAlreadyAutostartsX(profilePath);
+
     std::string dropInPath = Result::GettyDropInPath(tty);
     std::string gettyContent = Result::GettyPreviewContent(username);
-    std::string profileBlock = Result::ProfileBlock(tty);
 
     std::printf(
         "\nThis will create:\n"
         "  %s\n"
         "containing:\n"
-        "\n%s\n"
-        "and append this block to %s:\n"
-        "\n%s\n"
+        "\n%s\n",
+        dropInPath.c_str(), gettyContent.c_str());
+
+    if (skipProfileStep)
+    {
+        std::printf(
+            "%s already appears to run `exec startx` automatically on its own, so no\n"
+            "block will be added there - that existing setup will be left completely\n"
+            "untouched. Only the getty autologin above will be added.\n\n",
+            profilePath.c_str());
+    }
+    else
+    {
+        std::string profileBlock = Result::ProfileBlock(tty);
+        std::printf(
+            "and append this block to %s:\n"
+            "\n%s\n",
+            profilePath.c_str(), profileBlock.c_str());
+    }
+
+    std::printf(
         "This does NOT change %s's password or disable normal login - anyone with\n"
         "physical access to this machine's console reaches an X session with no\n"
         "password prompt at all (Kohiko's own lock screen, if `lockscreen.after` is\n"
         "configured to engage at startup, is still there - see the README's \"Native\n"
         "lock screen\" section). Only do this on a machine you trust physically.\n\n",
-        dropInPath.c_str(), gettyContent.c_str(), profilePath.c_str(), profileBlock.c_str(),
         username.c_str());
 
     if (Result::XinitrcBypassesSessionWrapper(pw.home))

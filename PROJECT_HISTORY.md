@@ -2160,6 +2160,62 @@ else depends on, so it can't drift silently again the same way.
 
 --------------------------------------------------------------------------
 
+0.21.1 exists because 0.21.0 got exactly the real-machine verification
+it needed, and that verification found a real problem within minutes of
+actual use: a person typed their account password into
+`configure-console-autologin`'s "Console tty" prompt by mistake, and the
+tool took it completely at face value - no format check of any kind had
+been written for that input, because every scenario tested up to that
+point had, naturally, typed an actual tty name there. The result wasn't
+cosmetic: that string ended up interpolated into a systemd unit instance
+name, which is to say into a directory path under `/etc/systemd/system/`
+- world-readable by default - and into the appended profile block's own
+text besides. `--undo` immediately afterward didn't fully clean it up
+either, for a related reason: it acts on whatever tty value it's given,
+and the person (correctly) gave it the real one on the retry, not the
+mistaken one from the first attempt, so the mis-named directory was left
+behind. None of this is unique to a password specifically - it's the
+general shape of accepting free-form input and writing it straight into
+a filesystem path and file content with no validation at all - but a
+password is the specific, worst-case thing that happened to land there
+in practice, which is exactly why this is being written up plainly
+rather than folded quietly into some other paragraph: the fix is a
+strict "`tty` plus digits, nothing else" validator, checked as early as
+possible (right after the prompt, before a preview is even built from
+the value, let alone written anywhere), and the honest lesson underneath
+it is that "this field is normally typed correctly" was never a
+substitute for actually constraining what it accepts.
+
+The same real-machine run turned up a second, smaller, unrelated thing
+purely because a real person's real home directory was involved: their
+`~/.bash_profile` already had its own hand-written `exec startx` guard,
+predating this feature by however long they'd been running Kohiko this
+way already - and `Configure()` had only ever checked for *its own*
+marker, so it appended a second, differently-phrased copy right below a
+first one that already unconditionally reaches `exec startx` on its own,
+making the new one pure dead code. Harmless in this instance, purely by
+luck of which guard happened to come first, but not something to leave
+as "usually fine" when detecting it costs one more substring check. The
+first instinct was to have `Configure()` refuse outright whenever it
+found one - consistent with how every other "something's already there"
+case in this class behaves - but the person reporting it pushed back on
+that, correctly: the getty half of the autologin is still genuinely new
+and worth doing on its own, and refusing the *whole* operation over a
+redundant few lines in a dotfile throws away the part that actually
+works to protect against a part that was already harmless. `Configure()`
+now writes the getty drop-in regardless and skips only the profile
+append, which is the actual shape of "detected, not duplicated" rather
+than "detected, so nothing happens." Both of these share the same root note as the tty one above: a
+fake-filesystem test suite, however thorough, only ever tests the
+scenarios someone thought to write down in advance. A real home
+directory, with a real person's real history in it, tried an input
+combination the test suite hadn't - twice, in one sitting - and this is
+what actually finding two genuine bugs from that first real run looks
+like, rather than a testing process producing them by having imagined
+every case up front.
+
+--------------------------------------------------------------------------
+
 ## Naming: window manager vs desktop environment
 
 Kohiko began, in Phase 1, as a window manager specifically: a BSP tiling

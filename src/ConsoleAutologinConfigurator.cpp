@@ -3,6 +3,7 @@
 #include "Utils.h"
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -203,12 +204,38 @@ bool ConsoleAutologinConfigurator::ProfileHasBlock(
     return ReadWholeFile(profilePath).find(kBeginMarker) != std::string::npos;
 }
 
+bool ConsoleAutologinConfigurator::ProfileAlreadyAutostartsX(
+    const std::string& profilePath)
+{
+    return ReadWholeFile(profilePath).find("exec startx") != std::string::npos;
+}
+
 std::string ConsoleAutologinConfigurator::GettyDropInPath(
     const std::string& tty,
     const std::string& root)
 {
     std::string base = NormalizeRoot(root);
     return base + "/etc/systemd/system/getty@" + tty + ".service.d/60-kohiko-autologin.conf";
+}
+
+bool ConsoleAutologinConfigurator::LooksLikeConsoleTty(
+    const std::string& tty)
+{
+    static const std::string kPrefix = "tty";
+
+    if (tty.size() <= kPrefix.size())
+        return false;
+
+    if (tty.compare(0, kPrefix.size(), kPrefix) != 0)
+        return false;
+
+    for (std::size_t i = kPrefix.size(); i < tty.size(); ++i)
+    {
+        if (!std::isdigit(static_cast<unsigned char>(tty[i])))
+            return false;
+    }
+
+    return true;
 }
 
 std::string ConsoleAutologinConfigurator::GettyPreviewContent(
@@ -310,6 +337,17 @@ ConsoleAutologinConfigurator::ConfigureResult ConsoleAutologinConfigurator::Conf
     if (tty.empty())
         return { false, "no tty given" };
 
+    if (!LooksLikeConsoleTty(tty))
+    {
+        return {
+            false,
+            "'" + tty + "' doesn't look like a real virtual console (expected "
+            "something like 'tty1', 'tty2', ...) - refusing, since this value is "
+            "written directly into a systemd unit name and into file content. No "
+            "changes were made."
+        };
+    }
+
     PasswdEntry pw = LookupUser(username, root);
 
     if (!pw.found)
@@ -368,6 +406,14 @@ ConsoleAutologinConfigurator::ConfigureResult ConsoleAutologinConfigurator::Conf
         };
     }
 
+    // An equivalent, hand-written (unmarked) guard already there isn't
+    // a reason to refuse the whole operation - it's a reason to skip
+    // *only* the redundant half of it. The getty autologin below is
+    // still genuinely new and worth doing; appending a second
+    // differently-worded copy of a guard that already does the same
+    // thing on its own wouldn't be.
+    bool skipProfileStep = ProfileAlreadyAutostartsX(profilePath);
+
     // --- Write the getty drop-in, validating it the same write-then-
     // read-back way AutologinConfigurator::Configure() does. ---
 
@@ -401,6 +447,30 @@ ConsoleAutologinConfigurator::ConfigureResult ConsoleAutologinConfigurator::Conf
             "wrote " + dropInPath + " but its content didn't verify correctly "
             "afterward - removed it again; no changes were made."
         };
+    }
+
+    if (skipProfileStep)
+    {
+        std::string message =
+            "created " + dropInPath + " - " + username + " will be logged into a "
+            "shell on " + tty + " automatically on next boot with no password "
+            "prompt at the console.\n\n" +
+            profilePath + " already appears to run `exec startx` automatically on "
+            "its own, so no block was added there - that existing setup was left "
+            "completely untouched. Run `kohikoctl configure-console-autologin "
+            "--undo` to remove the getty drop-in again.";
+
+        if (XinitrcBypassesSessionWrapper(pw.home, root))
+        {
+            message +=
+                "\n\nNote: " + pw.home + "/.xinitrc currently execs `kohiko` directly "
+                "rather than `kohiko-session`, which bypasses kohiko-session's "
+                "crash-restart supervision entirely. Change its `exec kohiko` (or "
+                "`exec /usr/local/bin/kohiko`) line to `exec kohiko-session` to get "
+                "that back.";
+        }
+
+        return { true, message };
     }
 
     // --- Append the profile block. Roll back the getty drop-in above

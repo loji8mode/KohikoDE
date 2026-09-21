@@ -391,7 +391,14 @@ Same opt-in behaviour as the display-manager version: asks which
 account and which console (`tty1` by default) to log into
 automatically, shows *exactly* what it's about to create, and only
 proceeds after an explicit `y` at a confirmation prompt that
-**defaults to No**. It writes two things:
+**defaults to No**. The console name must be a plain `tty` followed by
+digits (`tty1`, `tty2`, ...) - anything else is rejected immediately,
+before any preview is even computed, since that value is written
+directly into a filesystem path and file content. (This exists because
+someone once typed their password into that prompt by mistake, and
+earlier versions accepted it without complaint - see the CHANGELOG's
+0.21.1 entry if you're on an older build than that.) It writes two
+things:
 
 - A systemd drop-in at `/etc/systemd/system/getty@<tty>.service.d/
   60-kohiko-autologin.conf` (the standard override pattern for adding
@@ -445,6 +452,12 @@ startup):
   `configure-console-autologin` checks for this and prints a warning if
   it finds the direct-`kohiko` form, but won't rewrite that file for
   you, since it might have other customization around that line.
+- **If your profile already auto-starts X some other way** (a
+  hand-written guard predating this feature, for instance), Kohiko
+  still sets up the getty autologin - that part is genuinely new either
+  way - but skips appending its own block on top, leaving your existing
+  setup completely untouched rather than adding a redundant, dead-code
+  copy.
 
 ## Configuration
 

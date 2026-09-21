@@ -1,5 +1,74 @@
 # Changelog
 
+## Version 0.21.1
+
+Release date: 2026-09-21
+
+### Fixed
+- **`configure-console-autologin` accepted anything at all for the
+  console name, with no validation.** Found from real-machine testing
+  of 0.21.0: a user typed their account password into the "Console
+  tty" prompt by mistake, and the tool accepted it without complaint -
+  interpolating it verbatim into a systemd unit instance name (part of
+  a directory path under `/etc/systemd/system/`, world-readable by
+  default) and into the appended profile block's own content. `--undo`
+  afterward only cleans up the exact tty value it's given, so running
+  it with the correct `tty1` (having caught the mistake and re-run
+  correctly) left the mis-named directory from the first attempt
+  behind on disk. This is a real credential-exposure defect, not a
+  cosmetic one, and is being disclosed as such: **anyone who ran
+  0.21.0's `configure-console-autologin` and typed anything other than
+  a plain `ttyN` value into that prompt should check
+  `/etc/systemd/system/` for a leftover `getty@<unexpected-name>
+  .service.d` directory and remove it, and should treat whatever they
+  typed there as compromised.**
+  - New `ConsoleAutologinConfigurator::LooksLikeConsoleTty()`: strict
+    "`tty` followed by one or more digits and nothing else" validation,
+    since that's genuinely the only thing a systemd virtual console is
+    ever named. `Configure()` now refuses anything else outright, and
+    `tools/kohikoctl.cpp` checks it immediately after the prompt too -
+    before ever computing or printing a preview built from the value,
+    so a bad entry is rejected on the spot rather than surviving all
+    the way to a confirmation screen someone might click past.
+  - 9 new checks covering the validator itself (accepts `tty1`/`tty12`/
+    `tty0`; rejects empty, `tty` with no digits, trailing non-digit
+    junk, uppercase, an embedded space, and an arbitrary non-tty string
+    standing in for "something mistyped into this prompt") plus
+    `Configure()` refusing outright for a bad value and creating
+    nothing at all - not even the drop-in directory named after it.
+  - Reproduced the actual real-world sequence directly against the
+    compiled `kohikoctl` binary (an arbitrary non-tty string at the
+    prompt) and confirmed it now stops immediately, before touching the
+    filesystem at all, rather than only asserting this from the unit
+    tests.
+- **The same real-machine run also surfaced a second, unrelated gap**:
+  the reporting user's `~/.bash_profile` already had its own
+  hand-written, unmarked `exec startx` guard from before this feature
+  existed, so `configure-console-autologin` (only ever having checked
+  for its *own* marker) appended a second, differently-worded one on
+  top - harmless in practice (the first one already unconditionally
+  reaches `exec startx` first, making the second dead code), but a
+  needless, confusing duplicate. New
+  `ConsoleAutologinConfigurator::ProfileAlreadyAutostartsX()` checks
+  for the plain substring `exec startx` anywhere in the profile,
+  separately from the marker-based check. When it's true, `Configure()`
+  now skips appending its own block - leaving that existing setup
+  completely untouched - while still writing the getty drop-in, since
+  the autologin half is genuinely new and worth doing either way; it
+  only refuses outright (as before) when its *own* marker is already
+  present (`ProfileHasBlock()`), meaning there's nothing left to do at
+  all. `--undo` correspondingly only ever removes a block bounded by
+  Kohiko's own markers - a pre-existing, unmarked block was never
+  something it could find in the first place, so it was never at risk
+  of being removed by this. 4 new checks cover, by name: an existing
+  equivalent block present (getty added, profile left byte-for-byte
+  untouched, no marker added), no existing block at all (the marker
+  block *is* added, per the existing 0.21.0 coverage), and `--undo`
+  after the skip case (removes only the getty drop-in, the pre-existing
+  user block still completely untouched afterward).
+  - Total: 86 checks in `test_consoleautologinconfigurator.cpp`, up
+    from 64 at 0.21.0.
+
 ## Version 0.21.0
 
 Release date: 2026-09-20

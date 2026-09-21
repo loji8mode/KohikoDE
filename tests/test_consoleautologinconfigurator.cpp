@@ -152,6 +152,27 @@ int main()
               "Unknown -> no profile path at all");
     }
 
+    // --- LooksLikeConsoleTty() --------------------------------------------------
+
+    std::printf("\n-- LooksLikeConsoleTty() --\n");
+    {
+        Check(ConsoleAutologinConfigurator::LooksLikeConsoleTty("tty1"), "'tty1' is accepted");
+        Check(ConsoleAutologinConfigurator::LooksLikeConsoleTty("tty12"), "'tty12' is accepted");
+        Check(ConsoleAutologinConfigurator::LooksLikeConsoleTty("tty0"), "'tty0' is accepted");
+        Check(!ConsoleAutologinConfigurator::LooksLikeConsoleTty(""), "an empty string is rejected");
+        Check(!ConsoleAutologinConfigurator::LooksLikeConsoleTty("tty"), "'tty' with no digits at all is rejected");
+        Check(!ConsoleAutologinConfigurator::LooksLikeConsoleTty("ttyabc"), "'ttyabc' is rejected");
+        Check(!ConsoleAutologinConfigurator::LooksLikeConsoleTty("tty1a"), "'tty1a' (trailing junk) is rejected");
+        Check(!ConsoleAutologinConfigurator::LooksLikeConsoleTty("TTY1"), "uppercase 'TTY1' is rejected");
+        Check(!ConsoleAutologinConfigurator::LooksLikeConsoleTty("tty 1"), "'tty 1' (embedded space) is rejected");
+        // The real incident this exists for: something typed into the
+        // tty prompt by mistake (a password, in the actual report) that
+        // happens to contain no spaces, still correctly rejected for
+        // not being all-digits-after-"tty".
+        Check(!ConsoleAutologinConfigurator::LooksLikeConsoleTty("NotAConsole123!"),
+              "an arbitrary mistyped string (e.g. a password typed into the wrong prompt) is rejected");
+    }
+
     // --- ProfileBlock() / ProfileHasBlock() -------------------------------------
 
     std::printf("\n-- ProfileBlock() / ProfileHasBlock() --\n");
@@ -169,6 +190,21 @@ int main()
         WriteFile(root / "profile-with-block", "export PATH=$PATH:/opt/bin\n" + block);
         Check(ConsoleAutologinConfigurator::ProfileHasBlock((root / "profile-with-block").string()),
               "a profile containing the block reports true");
+    }
+
+    // --- ProfileAlreadyAutostartsX() --------------------------------------------
+
+    std::printf("\n-- ProfileAlreadyAutostartsX() --\n");
+    {
+        reset();
+        WriteFile(root / "profile-plain", "# nothing special here\nexport PATH=$PATH:/opt/bin\n");
+        Check(!ConsoleAutologinConfigurator::ProfileAlreadyAutostartsX((root / "profile-plain").string()),
+              "a profile with no startx line at all reports false");
+
+        WriteFile(root / "profile-handwritten",
+            "if [ -z \"$DISPLAY\" ] && [ \"$(tty)\" = \"/dev/tty1\" ]; then\n    exec startx\nfi\n");
+        Check(ConsoleAutologinConfigurator::ProfileAlreadyAutostartsX((root / "profile-handwritten").string()),
+              "a pre-existing, hand-written (unmarked) startx guard is detected too");
     }
 
     // --- GettyDropInPath() / GettyPreviewContent() ------------------------------
@@ -358,6 +394,48 @@ int main()
               "...and the existing file's content is completely untouched");
     }
 
+    std::printf("\n-- Configure() skips the profile step (but still adds getty autologin) when the profile already auto-starts X another way --\n");
+    {
+        reset();
+        WriteGettyTemplate(root);
+        WriteBasicPasswd(root);
+        const std::string existingContent =
+            "if [ -z \"$DISPLAY\" ] && [ \"$(tty)\" = \"/dev/tty1\" ]; then\n    exec startx\nfi\n";
+        WriteFile(root / "home/alice/.bash_profile", existingContent);
+
+        auto result = ConsoleAutologinConfigurator::Configure("alice", "tty1", root.string());
+        Check(result.success, "Configure() still succeeds overall - the getty half is genuinely new");
+        Check(fs::exists(root / "etc/systemd/system/getty@tty1.service.d/60-kohiko-autologin.conf"),
+              "...and the getty drop-in really was created");
+
+        std::string content = ReadFile(root / "home/alice/.bash_profile");
+        Check(content == existingContent,
+              "...but the user's existing profile is completely unmodified, byte for byte - no duplicate added");
+        Check(!ConsoleAutologinConfigurator::ProfileHasBlock((root / "home/alice/.bash_profile").string()),
+              "...specifically, no Kohiko marker block was added at all");
+    }
+
+    std::printf("\n-- Undo() only ever removes a block Kohiko itself added, never a pre-existing user block --\n");
+    {
+        reset();
+        WriteGettyTemplate(root);
+        WriteBasicPasswd(root);
+        const std::string existingContent =
+            "if [ -z \"$DISPLAY\" ] && [ \"$(tty)\" = \"/dev/tty1\" ]; then\n    exec startx\nfi\n";
+        WriteFile(root / "home/alice/.bash_profile", existingContent);
+
+        ConsoleAutologinConfigurator::Configure("alice", "tty1", root.string()); // skips the profile step, per above
+
+        bool removed = ConsoleAutologinConfigurator::Undo("alice", "tty1", root.string());
+        Check(removed, "Undo() reports it removed something (the getty drop-in)");
+        Check(!fs::exists(root / "etc/systemd/system/getty@tty1.service.d/60-kohiko-autologin.conf"),
+              "...and the getty drop-in really is gone");
+
+        std::string content = ReadFile(root / "home/alice/.bash_profile");
+        Check(content == existingContent,
+              "...while the user's own pre-existing block - never marked, never Kohiko's - is completely untouched");
+    }
+
     std::printf("\n-- Configure() refuses when the profile already has a block --\n");
     {
         reset();
@@ -369,6 +447,25 @@ int main()
         Check(!result.success, "Configure() refuses outright");
         Check(!fs::exists(root / "etc/systemd/system/getty@tty1.service.d/60-kohiko-autologin.conf"),
               "...and creates no getty drop-in either, since it fails before writing anything");
+    }
+
+    std::printf("\n-- Configure() refuses a mistyped/non-tty value before writing anything --\n");
+    {
+        reset();
+        WriteGettyTemplate(root);
+        WriteBasicPasswd(root);
+
+        // The actual real-world case this guards against: something
+        // that isn't a console name at all (a password typed into the
+        // wrong prompt, in the real report this came from) - deliberately
+        // not reusing any real credential, just an arbitrary string
+        // shaped like one.
+        auto result = ConsoleAutologinConfigurator::Configure("alice", "NotAConsole123!", root.string());
+        Check(!result.success, "Configure() refuses outright");
+        Check(!fs::exists(root / "etc/systemd/system/getty@NotAConsole123!.service.d"),
+              "...and never creates a getty drop-in directory named after the bad value");
+        Check(!ConsoleAutologinConfigurator::ProfileHasBlock((root / "home/alice/.bash_profile").string()),
+              "...and alice's profile is never touched at all");
     }
 
     std::printf("\n-- Configure() rolls back the getty drop-in if the profile half fails --\n");
