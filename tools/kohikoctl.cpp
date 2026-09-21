@@ -19,8 +19,10 @@
 //
 //   kohikoctl restore-config [path]
 //   kohikoctl configure-autologin [--undo]
+//   kohikoctl configure-console-autologin [--undo]
 
 #include "AutologinConfigurator.h"
+#include "ConsoleAutologinConfigurator.h"
 #include "IpcPath.h"
 
 #include <sys/socket.h>
@@ -59,6 +61,10 @@ void PrintUsage()
         "                                 offer to set up display-manager autologin for a\n"
         "                                 Kohiko session (needs root; always asks first,\n"
         "                                 default answer is No). --undo removes it again.\n"
+        "  kohikoctl configure-console-autologin [--undo]\n"
+        "                                 the same, but for a plain-console/`startx` setup\n"
+        "                                 with no display manager at all - see the README's\n"
+        "                                 \"Automatic login\" section. --undo removes it again.\n"
     );
 }
 
@@ -257,6 +263,185 @@ int ConfigureAutologin(
     return result.success ? 0 : 1;
 }
 
+// Trims surrounding whitespace, same as the inline logic in
+// ConfigureAutologin() above and for the same reason (see its own
+// comment) - factored out here only because this flow needs it twice
+// (username and tty) rather than once.
+std::string TrimCliInput(const std::string& value)
+{
+    std::size_t start = value.find_first_not_of(" \t\r\n");
+    std::size_t end = value.find_last_not_of(" \t\r\n");
+    return (start == std::string::npos) ? "" : value.substr(start, end - start + 1);
+}
+
+int ConfigureConsoleAutologin(
+    bool undo)
+{
+    if (geteuid() != 0)
+    {
+        std::fprintf(stderr,
+            "kohikoctl: configure-console-autologin needs root - re-run with sudo\n");
+        return 1;
+    }
+
+    using Result = Kohiko::ConsoleAutologinConfigurator;
+
+    Result::DetectionResult detection = Result::DetectSupport();
+
+    std::printf("Detected: %s\n", detection.detail.c_str());
+
+    if (!detection.supported)
+    {
+        std::printf(
+            "\nAutomatic console autologin isn't available on this machine.\n"
+            "See the README's \"Automatic login\" section for how to set this up\n"
+            "by hand instead - nothing has been changed.\n");
+        return 1;
+    }
+
+    const char* sudoUser = std::getenv("SUDO_USER");
+    std::string defaultUser = sudoUser ? sudoUser : "";
+
+    if (defaultUser.empty())
+        std::printf("\nUsername: ");
+    else
+        std::printf("\nUsername [%s]: ", defaultUser.c_str());
+
+    std::string username;
+    std::getline(std::cin, username);
+    username = TrimCliInput(username);
+
+    if (username.empty())
+        username = defaultUser;
+
+    if (username.empty())
+    {
+        std::printf("\nNo username given - aborting. Nothing has been changed.\n");
+        return 1;
+    }
+
+    std::printf("Console tty [tty1]: ");
+    std::string tty;
+    std::getline(std::cin, tty);
+    tty = TrimCliInput(tty);
+
+    if (tty.empty())
+        tty = "tty1";
+
+    if (undo)
+    {
+        bool removed = Result::Undo(username, tty);
+
+        if (removed)
+        {
+            std::printf(
+                "kohikoctl: removed the console autologin configured for %s on %s.\n",
+                username.c_str(), tty.c_str());
+        }
+        else
+        {
+            std::printf(
+                "kohikoctl: no Kohiko-created console autologin was found for %s on %s.\n",
+                username.c_str(), tty.c_str());
+        }
+
+        return 0;
+    }
+
+    Result::ExistingCheck existing = Result::CheckExistingGettyAutologin(tty);
+
+    if (existing.found)
+    {
+        std::printf(
+            "\nAn existing getty autologin was already found at:\n"
+            "  %s\n"
+            "Kohiko will not modify or overwrite it. Remove or edit it by hand first\n"
+            "if you want to reconfigure it - nothing has been changed.\n",
+            existing.location.c_str());
+        return 1;
+    }
+
+    Result::PasswdEntry pw = Result::LookupUser(username);
+
+    if (!pw.found)
+    {
+        std::printf("\nNo such user '%s' - aborting. Nothing has been changed.\n", username.c_str());
+        return 1;
+    }
+
+    Result::LoginShell shell = Result::ClassifyShell(pw.shell);
+
+    if (shell == Result::LoginShell::Unknown)
+    {
+        std::printf(
+            "\n%s's login shell (%s) isn't one this can automate a startx line for.\n"
+            "Add this line to its login profile by hand instead - nothing has been\n"
+            "changed:\n"
+            "    [ -z \"$DISPLAY\" ] && [ \"$(tty)\" = \"/dev/%s\" ] && exec startx\n",
+            username.c_str(), pw.shell.c_str(), tty.c_str());
+        return 1;
+    }
+
+    std::string profilePath = Result::ProfilePath(shell, pw.home);
+
+    if (Result::ProfileHasBlock(profilePath))
+    {
+        std::printf(
+            "\nA console-autologin block already exists in:\n"
+            "  %s\n"
+            "Kohiko will not add a second one. Remove it by hand first if you want to\n"
+            "reconfigure it - nothing has been changed.\n",
+            profilePath.c_str());
+        return 1;
+    }
+
+    std::string dropInPath = Result::GettyDropInPath(tty);
+    std::string gettyContent = Result::GettyPreviewContent(username);
+    std::string profileBlock = Result::ProfileBlock(tty);
+
+    std::printf(
+        "\nThis will create:\n"
+        "  %s\n"
+        "containing:\n"
+        "\n%s\n"
+        "and append this block to %s:\n"
+        "\n%s\n"
+        "This does NOT change %s's password or disable normal login - anyone with\n"
+        "physical access to this machine's console reaches an X session with no\n"
+        "password prompt at all (Kohiko's own lock screen, if `lockscreen.after` is\n"
+        "configured to engage at startup, is still there - see the README's \"Native\n"
+        "lock screen\" section). Only do this on a machine you trust physically.\n\n",
+        dropInPath.c_str(), gettyContent.c_str(), profilePath.c_str(), profileBlock.c_str(),
+        username.c_str());
+
+    if (Result::XinitrcBypassesSessionWrapper(pw.home))
+    {
+        std::printf(
+            "Note: %s/.xinitrc currently execs `kohiko` directly rather than\n"
+            "`kohiko-session`, which bypasses its crash-restart supervision. Update its\n"
+            "`exec kohiko` (or `exec /usr/local/bin/kohiko`) line to `exec kohiko-session`\n"
+            "to get that back - this tool won't edit that file for you.\n\n",
+            pw.home.c_str());
+    }
+
+    std::printf("Proceed? [y/N]: ");
+
+    std::string confirm;
+    std::getline(std::cin, confirm);
+
+    if (confirm != "y" && confirm != "Y" && confirm != "yes" && confirm != "YES")
+    {
+        std::printf("Aborted - nothing has been changed.\n");
+        return 1;
+    }
+
+    Result::ConfigureResult result = Result::Configure(username, tty);
+
+    std::printf("%s\n", result.message.c_str());
+
+    return result.success ? 0 : 1;
+}
+
 }
 
 int main(int argc, char** argv)
@@ -272,6 +457,9 @@ int main(int argc, char** argv)
 
     if (std::string(argv[1]) == "configure-autologin")
         return ConfigureAutologin(argc > 2 && std::string(argv[2]) == "--undo");
+
+    if (std::string(argv[1]) == "configure-console-autologin")
+        return ConfigureConsoleAutologin(argc > 2 && std::string(argv[2]) == "--undo");
 
     std::string request;
 

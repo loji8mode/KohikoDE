@@ -126,7 +126,7 @@ endif()
 
 # --- kohikoctl: the IPC command-line client --------------------------------------
 
-add_executable(kohikoctl tools/kohikoctl.cpp src/IpcPath.cpp src/AutologinConfigurator.cpp src/Utils.cpp)
+add_executable(kohikoctl tools/kohikoctl.cpp src/IpcPath.cpp src/AutologinConfigurator.cpp src/ConsoleAutologinConfigurator.cpp src/Utils.cpp)
 target_include_directories(kohikoctl PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_compile_options(kohikoctl PRIVATE -Wall -Wextra)
 
@@ -475,6 +475,17 @@ add_executable(test_autologinconfigurator
 )
 target_include_directories(test_autologinconfigurator PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME AutologinConfigurator COMMAND test_autologinconfigurator)
+
+# The console/no-display-manager counterpart above - see
+# ConsoleAutologinConfigurator.h's own `root` parameter and the test
+# file itself; same fake-filesystem-tree approach, no X11 needed.
+add_executable(test_consoleautologinconfigurator
+    tests/test_consoleautologinconfigurator.cpp
+    src/ConsoleAutologinConfigurator.cpp
+    src/Utils.cpp
+)
+target_include_directories(test_consoleautologinconfigurator PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME ConsoleAutologinConfigurator COMMAND test_consoleautologinconfigurator)
 
 # Only exercises Configure()/ResolveFor() (pure parsing/priority
 # logic) - never ApplyToRoot() itself, which needs a live X

@@ -138,7 +138,7 @@ build/%.o: src/%.cpp | build
 build:
 	mkdir -p build
 
-kohikoctl: tools/kohikoctl.cpp src/IpcPath.cpp src/AutologinConfigurator.cpp src/Utils.cpp
+kohikoctl: tools/kohikoctl.cpp src/IpcPath.cpp src/AutologinConfigurator.cpp src/ConsoleAutologinConfigurator.cpp src/Utils.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
 
 # A completely ordinary X11 client application (not part of the WM
@@ -226,7 +226,7 @@ ifeq ($(KOHIKO_HAVE_PIPEWIRE)-$(KOHIKO_HAVE_DBUS_PKG)-$(KOHIKO_HAVE_LIBRSVG),yes
     TEST_AUDIO_LIVE_DEPS := kohiko-audio kohiko-audio-tray
 endif
 
-test: kohiko build/x11_test_client build/test_bsptree build/test_launcherscoring build/test_placementhabits build/test_dbusvalue build/test_sessionstore build/test_configmigration build/test_recoverymode build/test_lockrecovery build/test_appdirwatcher build/test_autologinconfigurator build/test_wallpapermanager build/test_desktopentry build/test_iconresolver build/test_eventloop build/test_windowplacementnotice build/test_rect_clamping build/test_notificationlayout build/test_devicenotificationdiff $(TEST_NETWORKMANAGERCLIENT) $(TEST_SCROLLHITTEST) $(TEST_NETWORKWINDOW) $(TEST_NETWORKMANAGER_LIVE_HARNESS) $(TEST_BLUETOOTHWINDOW) $(TEST_AUDIO_LIVE_DEPS)
+test: kohiko build/x11_test_client build/test_bsptree build/test_launcherscoring build/test_placementhabits build/test_dbusvalue build/test_sessionstore build/test_configmigration build/test_recoverymode build/test_lockrecovery build/test_appdirwatcher build/test_autologinconfigurator build/test_consoleautologinconfigurator build/test_wallpapermanager build/test_desktopentry build/test_iconresolver build/test_eventloop build/test_windowplacementnotice build/test_rect_clamping build/test_notificationlayout build/test_devicenotificationdiff $(TEST_NETWORKMANAGERCLIENT) $(TEST_SCROLLHITTEST) $(TEST_NETWORKWINDOW) $(TEST_NETWORKMANAGER_LIVE_HARNESS) $(TEST_BLUETOOTHWINDOW) $(TEST_AUDIO_LIVE_DEPS)
 	./build/test_bsptree
 	./build/test_launcherscoring
 	./build/test_placementhabits
@@ -237,6 +237,7 @@ test: kohiko build/x11_test_client build/test_bsptree build/test_launcherscoring
 	./build/test_lockrecovery
 	./build/test_appdirwatcher
 	./build/test_autologinconfigurator
+	./build/test_consoleautologinconfigurator
 	./build/test_wallpapermanager
 	./build/test_desktopentry
 	./build/test_iconresolver
@@ -321,6 +322,13 @@ build/test_appdirwatcher: tests/test_appdirwatcher.cpp src/AppDirWatcher.cpp src
 # against a real throwaway fake filesystem tree (see the file itself
 # and AutologinConfigurator.h's own `root` parameter).
 build/test_autologinconfigurator: tests/test_autologinconfigurator.cpp src/AutologinConfigurator.cpp src/Utils.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
+
+# The console/no-display-manager counterpart above - same pure logic +
+# plain file I/O, no X11 needed, same fake-filesystem-tree approach
+# (see ConsoleAutologinConfigurator.h's own `root` parameter and the
+# test file itself).
+build/test_consoleautologinconfigurator: tests/test_consoleautologinconfigurator.cpp src/ConsoleAutologinConfigurator.cpp src/Utils.cpp | build
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
 
 # Only exercises Configure()/ResolveFor() (pure parsing/priority

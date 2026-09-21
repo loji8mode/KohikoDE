@@ -365,6 +365,87 @@ A few things worth being explicit about:
   Authentication itself is unaffected: still your normal system
   password, still checked by PAM, exactly as without autologin.
 
+### No display manager? (console + `startx`)
+
+Everything above assumes a display manager (SDDM/GDM/LightDM/...) is
+already showing a graphical login screen. If instead you boot to a
+plain text console, log in at a `login:` prompt, and type `startx`
+yourself, the flow above doesn't apply - there's no display manager
+for it to configure. `kohikoctl configure-console-autologin` is the
+counterpart for exactly that setup:
+
+```sh
+sudo kohikoctl configure-console-autologin
+```
+
+The full flow this enables: **boot → a getty automatically logs one
+specific user into a shell on one specific virtual console, with no
+username or password prompt → that login shell's own profile
+automatically runs `startx` → `~/.xinitrc` → `kohiko-session` starts
+`kohiko` → Kohiko's own [native lock screen](#native-lock-screen) is
+shown immediately → enter that user's password once → unlock →
+desktop.** Exactly one password prompt either way - the console login
+step is what this removes, not Kohiko's own lock screen.
+
+Same opt-in behaviour as the display-manager version: asks which
+account and which console (`tty1` by default) to log into
+automatically, shows *exactly* what it's about to create, and only
+proceeds after an explicit `y` at a confirmation prompt that
+**defaults to No**. It writes two things:
+
+- A systemd drop-in at `/etc/systemd/system/getty@<tty>.service.d/
+  60-kohiko-autologin.conf` (the standard override pattern for adding
+  a flag to a template unit - never edits the vendor `getty@.service`
+  file itself), passing `agetty --autologin <user>`.
+- A small guarded block appended to that user's own login-shell
+  profile (`~/.bash_profile`, `~/.zprofile`, or `~/.profile`,
+  whichever their actual shell reads - detected from `/etc/passwd`,
+  never assumed) that runs `exec startx`, but only when nothing
+  already put an X session on that shell (`$DISPLAY` is unset) *and*
+  it's genuinely the specific console this was configured for - so
+  opening a terminal, SSHing in, or switching to a different virtual
+  console never triggers it. `exec` (rather than a plain `startx`)
+  means logging out of Kohiko ends that shell too, so the next
+  boot-time getty on that console simply repeats the same automatic
+  cycle - the console equivalent of a display manager re-showing its
+  autologin session after logout.
+
+```sh
+sudo kohikoctl configure-console-autologin --undo
+```
+
+removes exactly those two things: the getty drop-in file, and exactly
+the marked block it added to the profile file (identified by
+`# >>> kohiko console-autologin >>>`/`# <<< ... <<<` comment markers) -
+every other line already in that profile, before or after it, is left
+completely untouched.
+
+A few things worth being explicit about, on top of everything the
+display-manager version's own notes above already say (all still
+true here: no password is ever read/stored, only a username; normal
+login and the account's password are both unaffected; physical/console
+access reaches a Kohiko desktop with no password prompt, only mitigated
+by the lock screen if `lockscreen.after` is configured to engage at
+startup):
+
+- **Only systemd-managed consoles are supported.** A non-systemd init
+  falls back to manual documentation, the same graceful "detected but
+  not automated" pattern GDM gets in the display-manager version above.
+- **Only bash/zsh/a POSIX-ish shell (dash, plain `sh`) are supported**
+  for the profile half, detected from the target account's actual login
+  shell in `/etc/passwd`. Anything else (fish, csh/tcsh, a custom login
+  shell) is refused outright with the one line to add by hand instead
+  of guessing at unfamiliar syntax:
+  ```sh
+  [ -z "$DISPLAY" ] && [ "$(tty)" = "/dev/tty1" ] && exec startx
+  ```
+- **This assumes `~/.xinitrc` already `exec`s `kohiko-session`, not
+  `kohiko` directly** (see [kohiko-session](#kohiko-session) above for
+  why that distinction matters - mainly, crash-restart behaviour).
+  `configure-console-autologin` checks for this and prints a warning if
+  it finds the direct-`kohiko` form, but won't rewrite that file for
+  you, since it might have other customization around that line.
+
 ## Configuration
 
 The format is deliberately simple: `key=value`, one per line, `#` for

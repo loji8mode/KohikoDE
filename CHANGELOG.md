@@ -1,6 +1,126 @@
 # Changelog
 
-## Unreleased
+## Version 0.21.0
+
+Release date: 2026-09-20
+
+### Added
+- **Console autologin: `kohikoctl configure-console-autologin`** - the
+  counterpart to 0.20.0's `configure-autologin` for a machine with no
+  display manager at all, running Kohiko via a plain console `login:`
+  prompt plus `startx` by hand. `AutologinConfigurator`'s own
+  `DisplayManager::None` case has documented this as "a real
+  alternative [it] doesn't attempt to automate" since it was written;
+  this closes that specific, previously-acknowledged gap rather than
+  reworking anything already in place. Prompted by a real report from
+  exactly that setup: entering a password twice on every boot - once
+  at the console `login:` prompt, once again at Kohiko's own lock
+  screen a moment later - with no display manager anywhere in the
+  picture for the existing autologin feature to attach to.
+  - New `ConsoleAutologinConfigurator` (`include/`+`src/`), matching
+    `AutologinConfigurator`'s own conventions throughout: every method
+    takes the same testable `root` parameter, detection/existing-check/
+    configure/undo/preview are cleanly separated, and `Configure()`
+    itself has no notion of "confirmed" - `tools/kohikoctl.cpp` remains
+    the only place that ever asks a question or writes anything.
+  - Automates exactly two things, and nothing past them: a
+    `getty@<tty>.service.d/60-kohiko-autologin.conf` drop-in (the
+    standard systemd "clear then redefine `ExecStart=`" override,
+    passing `agetty --autologin <user>` - never edits the vendor
+    `getty@.service` unit itself, so `--undo` is always exactly
+    "delete the one file this created", the same guarantee
+    `AutologinConfigurator`'s own drop-ins already give), and a
+    guarded block appended to that user's own login-shell profile
+    (`~/.bash_profile`, `~/.zprofile`, or `~/.profile` - detected from
+    `/etc/passwd`, not assumed) that runs `exec startx` only when
+    `$DISPLAY` is unset *and* the shell is genuinely on the specific
+    console `tty` this was configured for - never over SSH, a nested
+    `su`, or a different virtual console. Kohiko's own lock screen
+    remains the one real authentication step either way, exactly as
+    with the display-manager version: this skips a redundant console
+    password, never the actual one.
+  - Same safety posture as 0.20.0's feature, applied consistently: only
+    ever runs after an explicit `y` at a confirmation prompt that
+    **defaults to No**, refuses outright (no changes at all) if a getty
+    autologin already exists for that `tty` (from this tool or anyone
+    else's), if its own drop-in file already exists, or if the target
+    profile already has a Kohiko-added block, and never touches a
+    password. A login shell this has no specific profile-file
+    knowledge for (fish, csh/tcsh, ...) is refused with the one manual
+    line to add by hand instead of guessing at unfamiliar syntax.
+  - `Configure()` writes both halves or neither: if the profile append
+    fails for any reason after the getty drop-in already succeeded
+    (disk full, a permissions problem, `/home` itself not being a
+    directory), the getty drop-in just written is removed again before
+    reporting failure - verified directly by forcing exactly that
+    failure in a test rather than only asserting it from reading the
+    code. `Undo()` removes precisely the marked block it can find
+    (bounded by `# >>> kohiko console-autologin >>>`/`# <<< ... <<<`
+    comment markers) from the profile file, leaving every line the
+    user had before and after it completely untouched - verified with
+    a profile containing the user's own content on both sides of the
+    block.
+  - Also flags (advisory only, never edited automatically - the same
+    "never touch a file that might be hand-customized" restraint
+    `install-arch.sh` already applies to `~/.xinitrc`) when the target
+    user's own `~/.xinitrc` execs `kohiko` directly rather than
+    `kohiko-session`, since that silently loses `kohiko-session`'s
+    crash-restart supervision (see [Fixed] below for how that specific
+    gap was actually found) with nothing else to indicate it.
+  - `tests/test_consoleautologinconfigurator.cpp` - 64 checks, the same
+    real-throwaway-fake-filesystem-tree approach as
+    `test_autologinconfigurator.cpp` (no mocking, no X11 needed):
+    detection with/without a `getty@.service` template present,
+    `/etc/passwd` lookup (found, not found, and a malformed too-short
+    line handled without crashing), shell classification and its
+    per-shell profile path, the block/marker round-trip, the getty
+    drop-in path/content and its existing-autologin check (an active
+    line, a commented-out one correctly ignored, a flag-less
+    `ExecStart=` correctly not counted), the `.xinitrc`-bypass
+    detection, and `Configure()`/`Undo()` across every success and
+    refusal path above, including the rollback-on-partial-failure and
+    undo-preserves-surrounding-content cases. Wired into both
+    `Makefile`'s and `CMakeLists.txt`'s `test`/`ctest` targets
+    alongside the existing autologin test.
+  - Beyond the fake-filesystem test suite: also exercised the actual
+    compiled `kohikoctl` binary directly against this sandbox's real
+    (if unused-as-PID-1) systemd `getty@.service` template and a real
+    account, end to end - configure, a repeat run correctly refusing
+    against the now-existing drop-in, and `--undo` cleanly restoring
+    the exact prior state - then removed everything created by hand
+    immediately afterward so the sandbox itself was left as found. A
+    real boot through a real getty prompt on real hardware still can't
+    be verified from here (no `systemd` as PID 1 in this sandbox,
+    the same category of limitation this project already discloses for
+    Bluetooth/display-manager testing elsewhere) - see the README's own
+    new section for exactly what that step looks like on a real
+    machine.
+  - Documented in a new "No display manager? (console + `startx`)"
+    part of README.md's existing "Automatic login" section, right
+    alongside the display-manager version it complements, with the
+    same full boot-to-desktop flow spelled out and the same explicit
+    physical-security caveat.
+
+### Fixed
+- **`install-arch.sh`'s `~/.xinitrc` detection was matching on the
+  substring `"kohiko"` alone**, which also matches `exec kohiko` and
+  `exec /usr/local/bin/kohiko` - both of which start Kohiko, but bypass
+  `kohiko-session`'s crash-restart supervision entirely - and reported
+  "already starts kohiko, leaving it alone" with no further comment
+  either way. Found while investigating the real report above: the
+  user's own `~/.xinitrc` predated `kohiko-session`'s introduction in
+  0.20.0, and every `install-arch.sh` run since had silently treated it
+  as already correctly configured. Now checks for `kohiko-session`
+  specifically, and prints a clear, specific warning (not a silent
+  rewrite of a file that might have other hand-made customization
+  around that one line - the same restraint this script's `.xinitrc`
+  handling already applied to the "doesn't mention kohiko at all"
+  case) when it finds the direct-`kohiko` form instead.
+- **`include/Version.h` had drifted to 0.20.8** while five further
+  releases (0.20.9 through 0.20.12) shipped without it being updated
+  alongside them - only ever printed once, in `Application.cpp`'s own
+  startup log line, which is presumably why this went unnoticed for so
+  long. Corrected to 0.21.0.
 
 ### Documentation
 - **Kohiko is now consistently documented as a lightweight Linux desktop

@@ -131,8 +131,20 @@ XINITRC="$HOME/.xinitrc"
 if [ ! -f "$XINITRC" ]; then
     echo "==> No ~/.xinitrc - creating one that starts Kohiko (for plain startx, no display manager)"
     echo "exec /usr/local/bin/kohiko-session" > "$XINITRC"
+elif grep -q "kohiko-session" "$XINITRC"; then
+    echo "==> ~/.xinitrc already starts kohiko-session - leaving it alone"
 elif grep -q "kohiko" "$XINITRC"; then
-    echo "==> ~/.xinitrc already starts kohiko - leaving it alone"
+    # Specifically "exec kohiko" or "exec /usr/local/bin/kohiko" with no
+    # -session - a real, easy-to-miss gap: it still starts Kohiko, but
+    # silently loses kohiko-session's crash-restart supervision. Worth
+    # a loud warning rather than the old blanket "already mentions
+    # kohiko, leave it alone", which used to match this case too and
+    # say nothing further.
+    echo "==> ~/.xinitrc starts kohiko directly, not through kohiko-session - leaving it alone,"
+    echo "    but this means a crash ends your whole X session instead of being restarted."
+    echo "    Change its 'exec kohiko' (or 'exec /usr/local/bin/kohiko') line to:"
+    echo "        exec kohiko-session"
+    echo "    to get that back."
 else
     echo "==> ~/.xinitrc already exists and doesn't mention kohiko - leaving it alone."
     echo "    If you use 'startx' (no display manager), add this line to it yourself:"
@@ -212,3 +224,7 @@ echo "==> Done. Pick \"Kohiko\" from your display manager's session list at logi
 echo "    or run 'startx' if you're using ~/.xinitrc directly."
 echo "    Once you're in: Super+D opens the launcher, and \"Kohiko Settings\" is"
 echo "    in there too - or run 'kohiko-settings' directly."
+echo
+echo "    No display manager at all, just a console login + 'startx' by hand?"
+echo "    'sudo kohikoctl configure-console-autologin' can remove that manual step -"
+echo "    see the README's \"Automatic login\" section."

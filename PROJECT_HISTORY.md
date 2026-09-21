@@ -2077,6 +2077,89 @@ made to fail once, on purpose, before it was trusted to pass.
 
 --------------------------------------------------------------------------
 
+0.21.0 started from a real, specific complaint rather than a general
+audit: someone running Kohiko with no display manager at all - a plain
+console `login:` prompt, `startx` typed by hand - was entering their
+password twice on every boot, once at that console prompt and again a
+moment later at Kohiko's own lock screen. `AutologinConfigurator`
+itself had already named this exact situation, in its own header
+comment, since the day it was written: `DisplayManager::None` exists
+specifically for "no supported display manager found", and its comment
+already said a getty-autologin-plus-`startx` setup "is a real
+alternative but a genuinely different mechanism this class doesn't
+attempt to automate." Nothing needed to be discovered here so much as
+finally acted on.
+
+The two mechanisms really are different enough to deserve their own
+class rather than a case bolted onto `AutologinConfigurator`'s existing
+`DisplayManager` enum: a display manager's autologin is one config
+file; a console's is a systemd unit override *and* a shell profile
+file living inside a specific user's home directory, which is its own
+small wrinkle `AutologinConfigurator` never had to deal with at all -
+every path that class touches lives under `/etc`, root-owned either
+way, while this one has to get a real, individual user's actual home
+directory and login shell right, from `/etc/passwd`, not assumed. The
+getty half follows the same "never edit the vendor file" discipline
+`AutologinConfigurator`'s own LightDM/SDDM drop-ins already established
+- a dedicated `getty@<tty>.service.d/60-kohiko-autologin.conf`, so
+`--undo` stays exactly "delete the one file this created." The
+profile half couldn't reuse that same trick, since there's no
+drop-in mechanism for a personal dotfile - so it earns its own
+marker-comment convention instead, and the meaningful test there
+wasn't "does the block get added" but "does *undoing* it leave a
+profile file some real person has been customizing for years exactly
+as it was otherwise" - proven by actually putting content on both
+sides of the block in a test and checking both sides survive, not by
+reasoning about the substring-removal logic in the abstract.
+
+The same investigation surfaced a second, independent bug along the
+way, in code this feature didn't touch at all until it went looking:
+`install-arch.sh`'s own `~/.xinitrc` detection checked for the
+substring `"kohiko"`, which is also true of `exec kohiko` and `exec
+/usr/local/bin/kohiko` - both of which start Kohiko, just not through
+`kohiko-session`, silently losing its crash-restart supervision with
+nothing anywhere saying so. The reporting user's own `~/.xinitrc`
+turned out to be in exactly this state, predating `kohiko-session`'s
+introduction back in 0.20.0 - and every install-arch.sh run since had
+been reporting it as already correctly configured. A loose substring
+check that happens to be true for the wrong reason is its own small
+lesson: "mentions kohiko" and "starts kohiko *the way this project
+actually intends*" were never quite the same claim, and this is what
+it costs to conflate them.
+
+Real testing here split cleanly into what this sandbox can and can't
+verify, same as every prior phase's own honest accounting of that
+line. The fake-filesystem-tree approach `AutologinConfigurator`'s own
+tests already established extends directly: 64 checks, covering every
+success and refusal path including the two that mattered most (the
+rollback when the profile half fails after the getty half already
+succeeded, and undo leaving a real user's surrounding profile content
+untouched). Past that, this sandbox happens to actually have a real
+`getty@.service` template on disk (from `systemd`/`util-linux` being
+installed, even without `systemd` running as PID 1 here) - so the
+compiled `kohikoctl` binary itself was run directly against real system
+paths and a real account, not just the fake tree: configure, a repeat
+run correctly refusing against its own now-existing drop-in, and
+`--undo` restoring the exact prior state, with everything created by
+hand removed again immediately afterward. What's still genuinely
+unverified is the one thing that can't be faked either way: a real
+machine actually rebooting into a real getty prompt with this
+configured, the console equivalent of the display-manager version's own
+still-open "verified by code review and close analogy, not execution"
+gap from 0.20.0.
+
+Separately, and unrelated to any of the above except in how it was
+found: `include/Version.h` had said `0.20.8` since some point around
+that release and never been updated across five further releases
+since, apparently because the only place it's ever printed is one
+startup log line in `Application.cpp` that nothing regularly checks
+against the changelog. Corrected to `0.21.0` here; worth someone
+eventually deciding whether this should be generated from the
+changelog automatically rather than hand-maintained in a file nothing
+else depends on, so it can't drift silently again the same way.
+
+--------------------------------------------------------------------------
+
 ## Naming: window manager vs desktop environment
 
 Kohiko began, in Phase 1, as a window manager specifically: a BSP tiling
