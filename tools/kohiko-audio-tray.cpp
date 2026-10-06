@@ -9,6 +9,7 @@
 #include <X11/Xlib.h>
 
 #include <map>
+#include <optional>
 
 using namespace Kohiko;
 
@@ -119,7 +120,35 @@ int main()
     // loop, at a tighter cadence than that one specifically because
     // this one actually needs it (see EventLoop.cpp's own comment on
     // kohiko's equivalent choice for the exact same reason).
-    tray.SetInterval(100, [&] { notifications.Tick(); });
+    //
+    // Started only once a toast actually exists to tick, and stops
+    // itself the moment NotificationCenter::HasActive() goes false -
+    // not a plain always-on SetInterval(100, ...) registered once here
+    // at startup, which is what this used to be: confirmed live (real
+    // strace on a real machine) to wake this whole process, and drive
+    // a full poll()/XPending() cycle, ~10 times a second for the
+    // entire time this tray tool runs, the other 99%+ of it with no
+    // toast ever showing at all - not anything PipeWire's own protocol
+    // or event loop was doing (PipeWireClient registers no timer of
+    // its own), just this one, unconditionally, the whole time.
+    std::optional<TrayIconClient::TimerId> notificationTickerId;
+
+    auto ensureNotificationTicker = [&]
+    {
+        if (notificationTickerId.has_value())
+            return;
+
+        notificationTickerId = tray.SetInterval(100, [&]
+        {
+            notifications.Tick();
+
+            if (!notifications.HasActive())
+            {
+                tray.CancelInterval(*notificationTickerId);
+                notificationTickerId.reset();
+            }
+        });
+    };
 
     // Routes Expose events for the notification popups' own windows -
     // which share this same Display connection, see NotificationPopup's
@@ -190,6 +219,7 @@ int main()
         {
             const char* verb = change.kind == DeviceChangeKind::Connected ? " connected" : " disconnected";
             notifications.Post(change.label + verb, rootGeometry());
+            ensureNotificationTicker();
         }
 
         knownNodes = std::move(currentNodes);

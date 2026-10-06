@@ -389,7 +389,8 @@ build/test_rect_clamping: tests/test_rect_clamping.cpp | build
 # NotificationLayout.h's own header comment for why this is tested
 # separately from the live-X11 window behaviour (test-notificationcenter,
 # below - needs a real display, so it's kept out of `make test` the
-# same way test-bar/test-windowclassification/test-trayiconclient are).
+# same way test-bar/test-windowclassification/test-trayiconclient
+# /test-trayiconclient-timers are).
 build/test_notificationlayout: tests/test_notificationlayout.cpp | build
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
 
@@ -489,6 +490,17 @@ test-trayiconclient: build/test_trayiconclient
 	./build/test_trayiconclient
 
 build/test_trayiconclient: tests/test_trayiconclient.cpp $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ $(LIBS) $(RSVG_LIBS)
+
+# Separate from test-trayiconclient above purely because this one is
+# about TrayIconClient's timer/interval mechanism specifically (plus
+# the real NotificationCenter combination kohiko-audio-tray.cpp itself
+# wires up) rather than rendering/docking - same shared-object
+# dependency set either way, for the same reason.
+test-trayiconclient-timers: build/test_trayiconclient_timers
+	./build/test_trayiconclient_timers
+
+build/test_trayiconclient_timers: tests/test_trayiconclient_timers.cpp $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) | build
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ $(LIBS) $(RSVG_LIBS)
 
 # Same "needs a real X11 connection, kept out of `make test`" deal

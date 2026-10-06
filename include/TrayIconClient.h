@@ -71,7 +71,24 @@ public:
     void WatchFd(int fd, FdCallback callback);
 
     using TimerCallback = std::function<void()>;
-    void SetInterval(int intervalMs, TimerCallback callback);
+
+    // Opaque handle returned by SetInterval(), for CancelInterval()
+    // below - not otherwise inspectable, matching Window/GC's own
+    // "type-safe integer" style already used throughout this class.
+    using TimerId = std::size_t;
+
+    TimerId SetInterval(int intervalMs, TimerCallback callback);
+
+    // Stops a timer previously registered with SetInterval() - it
+    // simply never fires again, with no further bookkeeping the caller
+    // needs to do. Safe to call from inside that same timer's own
+    // callback (self-cancellation, for a timer that only needs to run
+    // while some condition holds - see kohiko-audio-tray.cpp's own
+    // notification-tick timer for the real case this exists for) or
+    // from anywhere else in this class's own callbacks; never
+    // invalidates Run()'s own in-progress iteration over its timers -
+    // see Run()'s own comment on why.
+    void CancelInterval(TimerId id);
 
     // Called for every X event Run()'s own loop sees, right after this
     // class's own HandleEvent() - regardless of which window the event
@@ -113,7 +130,21 @@ private:
     void HandleEvent(XEvent& event);
 
     struct FdWatch { int fd; FdCallback callback; };
-    struct Timer { std::chrono::milliseconds interval; std::chrono::steady_clock::time_point next; TimerCallback callback; };
+    struct Timer
+    {
+        std::chrono::milliseconds interval;
+        std::chrono::steady_clock::time_point next;
+        TimerCallback callback;
+        TimerId id;
+
+        // Set by CancelInterval(), not erased on the spot - Run()'s own
+        // timer-firing loop is what's iterating m_timers when a timer
+        // cancels itself (or another timer), and erasing mid-iteration
+        // would invalidate that loop's own reference into this vector.
+        // Actually removed right after that loop finishes instead - see
+        // Run()'s own comment.
+        bool cancelled = false;
+    };
 
     Display* m_display = nullptr;
     int m_screen = 0;
@@ -142,6 +173,7 @@ private:
 
     std::vector<FdWatch> m_fdWatches;
     std::vector<Timer> m_timers;
+    TimerId m_nextTimerId = 1;
 
     // A dock attempt is also retried on this same timer until it
     // succeeds - covers the ordinary session-startup race where a

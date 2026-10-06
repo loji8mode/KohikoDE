@@ -1,5 +1,53 @@
 # Changelog
 
+## Version 0.21.4
+
+Release date: 2026-09-26
+
+### Fixed
+- **Idle `kohiko-audio-tray` woke its whole process roughly 10 times a
+  second, forever** - confirmed live via `strace` on a real machine: a
+  `poll()`+`recvmsg()` cycle repeating every ~100ms with nothing at all
+  going on, while `kohiko-network-tray` and `kohiko-bluetooth-tray`
+  (otherwise built on the exact same `TrayIconClient` event loop) sat
+  correctly idle, waking roughly once every two seconds. Root cause,
+  mapped directly to source: `tools/kohiko-audio-tray.cpp` registered
+  `tray.SetInterval(100, [&]{ notifications.Tick(); })` once,
+  unconditionally, at startup, for the entire process lifetime - a
+  cadence that's only actually needed for the ~2.5 seconds a device-
+  connect/disconnect toast notification is showing, which is the
+  overwhelming minority of an idle tray icon's runtime. Confirmed *not*
+  to be PipeWire's own protocol or event loop: `PipeWireClient`
+  registers no timer of its own anywhere in it.
+  - `TrayIconClient` gained a way to actually cancel a previously-
+    registered interval: `SetInterval()` now returns an opaque
+    `TimerId`, and a new `CancelInterval(id)` stops it for good. Timers
+    cancelled from inside another timer's own callback (the real case
+    this exists for) are marked, not erased, until the current firing
+    pass finishes - erasing mid-iteration would invalidate `Run()`'s
+    own reference into the timer list it's in the middle of walking.
+  - `kohiko-audio-tray.cpp` no longer starts the 100ms ticker at
+    startup. It starts only the first time `NotificationCenter::Post()`
+    actually creates a toast, and the ticker cancels itself the moment
+    `NotificationCenter::HasActive()` goes false again - so an idle
+    audio tray now registers nothing shorter than the existing 2000ms
+    PipeWire reconnect-retry timer, matching network/bluetooth's own
+    profile, and only tightens to ~100ms for the brief window a toast
+    is actually alive.
+  - No change to PipeWire's own dispatch (`WatchFd`/`Iterate()`), the
+    XEmbed/rendering fixes from 0.21.2/0.21.3, or either of the other
+    two tray tools.
+  - New regression coverage in `tests/test_trayiconclient_timers.cpp`:
+    measures real wall-clock time spent inside a single `Run()` call
+    (not just a call-count assertion) to prove the loop genuinely
+    blocks for the full ~700ms of an idle window rather than waking
+    every ~100ms, then wires up the exact real `NotificationCenter` +
+    `TrayIconClient` combination `kohiko-audio-tray.cpp` itself uses to
+    confirm the ticker starts only on `Post()` and stops itself once
+    the toast expires - proven, against a version with the ticker
+    registered unconditionally the old way, to fail specifically at
+    the "never started before anything is posted" assertion.
+
 ## Version 0.21.3
 
 Release date: 2026-09-24

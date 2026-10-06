@@ -160,13 +160,26 @@ void TrayIconClient::WatchFd(int fd, FdCallback callback)
         m_fdWatches.push_back({ fd, std::move(callback) });
 }
 
-void TrayIconClient::SetInterval(int intervalMs, TimerCallback callback)
+TrayIconClient::TimerId TrayIconClient::SetInterval(int intervalMs, TimerCallback callback)
 {
+    TimerId id = m_nextTimerId++;
+
     m_timers.push_back({
         std::chrono::milliseconds(intervalMs),
         std::chrono::steady_clock::now() + std::chrono::milliseconds(intervalMs),
-        std::move(callback)
+        std::move(callback),
+        id,
+        false
     });
+
+    return id;
+}
+
+void TrayIconClient::CancelInterval(TimerId id)
+{
+    for (auto& timer : m_timers)
+        if (timer.id == id)
+            timer.cancelled = true;
 }
 
 void TrayIconClient::SetEventHandler(EventHandler handler)
@@ -290,7 +303,8 @@ void TrayIconClient::Run()
             considerDeadline(m_nextDockAttempt);
 
         for (auto& timer : m_timers)
-            considerDeadline(timer.next);
+            if (!timer.cancelled)
+                considerDeadline(timer.next);
 
         poll(pfds.data(), pfds.size(), haveDeadline ? timeoutMs : -1);
 
@@ -333,12 +347,26 @@ void TrayIconClient::Run()
         now = std::chrono::steady_clock::now();
         for (auto& timer : m_timers)
         {
+            if (timer.cancelled)
+                continue;
+
             if (now >= timer.next)
             {
                 timer.callback();
                 timer.next = now + timer.interval;
             }
         }
+
+        // Actually erased here, after the loop above is done with
+        // m_timers - not inside CancelInterval() itself, which only
+        // sets the flag precisely so it's safe to call from within the
+        // very callback this loop is in the middle of invoking (the
+        // loop above already skips cancelled entries; std::vector::erase
+        // done *during* that same iteration would invalidate its
+        // reference into this vector instead).
+        m_timers.erase(
+            std::remove_if(m_timers.begin(), m_timers.end(), [](const Timer& t) { return t.cancelled; }),
+            m_timers.end());
     }
 }
 
