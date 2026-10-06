@@ -1,5 +1,53 @@
 # Changelog
 
+## Version 0.21.2
+
+Release date: 2026-09-22
+
+### Fixed
+- **Kohiko's own tray icons (`kohiko-audio-tray`, `kohiko-network-tray`,
+  `kohiko-bluetooth-tray`) rendered on a small, visibly wrong-coloured
+  square on the real desktop**, distinct from the Bar's own actual
+  background - easy to mistake for the unrelated 0.20.8 fallback-glyph
+  finding, but confirmed (matching the reported screenshots pixel-for-
+  pixel) to be a different mechanism: every one of these three tools'
+  `DrawCallback`s painted their window's background with
+  `tray.Theme().background` - `UiTheme::Default()`'s own hardcoded
+  constant (`0x121318`), which this codebase deliberately does not read
+  from config (see `UiTheme.h`'s own comment on why) - rather than
+  whatever the Bar's own, actually-configured `bar.background` is
+  (`0x1e1e2e` by default). A standalone control-panel window
+  (`AudioWindow` and friends) not matching the Bar exactly is fine and
+  intentional; a tray icon reparented flush against the Bar itself is
+  not the same case, and the two only ever looked the same on a desktop
+  where both constants happened to coincide.
+  - `TrayIconClient::Create()` now gives its window a `ParentRelative`
+    background instead of a solid fill of its own, so it always shows
+    whatever its real parent - the tray host's container, itself
+    already `ParentRelative` all the way up to the Bar's own real
+    `background_pixel` (see `SystemTray.cpp`) - actually has, and keeps
+    tracking it live across a `bar.background`-changing config reload
+    with no extra work.
+  - `TrayIconClient::Redraw()` (now public - see below) explicitly
+    clears to that background before every draw, since this can just
+    as easily run from a state-change `RequestRedraw()` with no real
+    `Expose` behind it at all as from a real one.
+  - All three tray tools' `DrawCallback`s no longer paint their own
+    background fill at all - `Redraw()` above already has.
+  - No change to the fallback-glyph behaviour itself (`DrawText()`),
+    the XEmbed dock handshake, icon lookup/resolution, or SVG
+    rasterization - all confirmed correct and untouched; see this
+    fix's own investigation notes for how each was ruled out.
+  - `TrayIconClient::Redraw()` moved from private to public, so it can
+    be triggered synchronously (a test included) without going through
+    `Run()`'s blocking event loop.
+  - New regression coverage in `tests/test_trayiconclient.cpp`: docks a
+    real `TrayIconClient` window into a hand-built stand-in for a real
+    Bar/tray-container pair whose background is deliberately *not*
+    `UiTheme::Default()`'s constant, and confirms the docked window's
+    own background matches the stand-in Bar's real colour - both at
+    dock time and after that colour changes live, with no re-dock.
+
 ## Version 0.21.1
 
 Release date: 2026-09-21

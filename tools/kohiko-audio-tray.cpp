@@ -211,9 +211,11 @@ int main()
 
     tray.SetDrawCallback([&](Display* display, Window window, GC gc, Visual*, Colormap, int size)
     {
-        XSetForeground(display, gc, tray.Theme().background);
-        XFillRectangle(display, window, gc, 0, 0, size, size);
-
+        // TrayIconClient::Redraw() has already cleared `window` to the
+        // tray host's real, live background (ParentRelative, chained
+        // all the way to the Bar's own `bar.background`) before
+        // calling this - see that function's own comment for why
+        // painting a solid fill of our own here would be wrong.
         const AudioNode* node = FindDefaultOutput(pipewire);
         std::string iconName = IconForOutput(node);
 

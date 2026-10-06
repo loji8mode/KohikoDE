@@ -87,6 +87,15 @@ public:
 
     void RequestRedraw() { m_dirty = true; }
 
+    // Clears this widget's own window to its real, live background
+    // (see Create()'s own comment on why that's ParentRelative rather
+    // than a solid fill) and then runs the DrawCallback, synchronously,
+    // right now - exactly what Run()'s own loop does whenever it sees
+    // m_dirty. Public (rather than folded silently into Run()'s loop
+    // alone) so a caller - a test included - can force one redraw pass
+    // without going through Run()'s blocking event loop to get it.
+    void Redraw();
+
     void Run();
     void Quit() { m_running = false; }
 
@@ -102,7 +111,6 @@ private:
 
     bool TryDock();
     void HandleEvent(XEvent& event);
-    void Redraw();
 
     struct FdWatch { int fd; FdCallback callback; };
     struct Timer { std::chrono::milliseconds interval; std::chrono::steady_clock::time_point next; TimerCallback callback; };

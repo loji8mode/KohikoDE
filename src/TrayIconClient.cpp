@@ -56,15 +56,39 @@ bool TrayIconClient::Create(int iconSize)
     m_visual = DefaultVisual(m_display, m_screen);
     m_colormap = DefaultColormap(m_display, m_screen);
 
+    // Background: ParentRelative, not a solid fill of any colour this
+    // class itself owns - m_theme (UiTheme::Default()'s built-in
+    // values, see UiTheme.h's own comment on why those are
+    // deliberately not read from Kohiko's config) is a reasonable
+    // guess for a standalone control-panel window, but this window
+    // isn't one - once docked, it's reparented flush against Kohiko's
+    // real Bar (see SystemTray::DockIcon()), whose own background is
+    // whatever `bar.background` is actually configured to. A solid
+    // guess here would only coincidentally ever match that, which is
+    // exactly what used to make every one of Kohiko's own tray icons
+    // sit on a visibly wrong-coloured square on any desktop whose
+    // configured bar colour wasn't the same as this struct's built-in
+    // default. ParentRelative instead asks X to paint whatever this
+    // window's own parent would have painted there - a live reference
+    // that resolves correctly whether this window is (briefly, before
+    // TryDock() succeeds) still a direct child of the root window, or
+    // (after docking) a child of SystemTray's own container, which is
+    // itself ParentRelative all the way up to the Bar window's real
+    // background_pixel - and keeps tracking it automatically even
+    // across a config reload that changes bar.background, with no
+    // extra work here. See Redraw()'s own comment for the other half
+    // of this: painting the background attribute alone isn't enough,
+    // since this window is also unconditionally redrawn from
+    // RequestRedraw() with no real Expose behind it at all.
     XSetWindowAttributes attrs{};
-    attrs.background_pixel = m_theme.background;
+    attrs.background_pixmap = ParentRelative;
     attrs.event_mask = ExposureMask | ButtonPressMask | ButtonReleaseMask;
 
     m_window = XCreateWindow(
         m_display, RootWindow(m_display, m_screen),
         0, 0, m_iconSize, m_iconSize, 0,
         DefaultDepth(m_display, m_screen), InputOutput, m_visual,
-        CWBackPixel | CWEventMask, &attrs
+        CWBackPixmap | CWEventMask, &attrs
     );
 
     // Every window docked by a system tray host is required to carry
@@ -152,6 +176,26 @@ void TrayIconClient::SetEventHandler(EventHandler handler)
 
 void TrayIconClient::Redraw()
 {
+    // Lazily created here rather than only in Run() - Redraw() being
+    // public (see its own header comment) means it can now run before
+    // Run() ever does, e.g. from a test that wants one synchronous
+    // redraw without an event loop.
+    if (!m_gc)
+        m_gc = XCreateGC(m_display, m_window, 0, nullptr);
+
+    // Repaints the whole window with its current background
+    // attribute first - ParentRelative, per Create() - so every
+    // redraw starts from the tray host's real, live background rather
+    // than whatever was left over from the previous frame. Needed
+    // even though the X server *also* auto-paints newly-exposed
+    // regions from that same attribute on its own: this Redraw() runs
+    // just as often from RequestRedraw() alone (a mute/signal/
+    // connection-state change, with no real Expose behind it -
+    // XCopyArea drawing a smaller or differently-shaped icon than
+    // last time would otherwise leave old pixels showing at the
+    // edges) as it does from an actual Expose.
+    XClearWindow(m_display, m_window);
+
     if (m_drawCallback)
         m_drawCallback(m_display, m_window, m_gc, m_visual, m_colormap, m_iconSize);
 
@@ -190,9 +234,6 @@ void TrayIconClient::HandleEvent(XEvent& event)
 
 void TrayIconClient::Run()
 {
-    if (!m_gc)
-        m_gc = XCreateGC(m_display, m_window, 0, nullptr);
-
     m_running = true;
     int x11Fd = ConnectionNumber(m_display);
 
