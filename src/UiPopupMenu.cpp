@@ -8,6 +8,20 @@
 namespace Kohiko
 {
 
+namespace
+{
+
+// Predicate for XIfEvent() below: matches only events for the popup's
+// own window. `arg` is a pointer to the Window to match against -
+// Xlib's C callback signature has no way to capture context otherwise.
+Bool IsEventForWindow(Display*, XEvent* event, XPointer arg)
+{
+    Window target = *reinterpret_cast<Window*>(arg);
+    return event->xany.window == target;
+}
+
+}
+
 void PopupMenu::AddItem(const std::string& label, std::function<void()> onClick, bool enabled)
 {
     m_items.push_back({ label, std::move(onClick), enabled, false });
@@ -130,7 +144,24 @@ void PopupMenu::Show(
     while (!dismissed)
     {
         XEvent event;
-        XNextEvent(display, &event);
+
+        // XIfEvent(), not XNextEvent(): this loop shares its
+        // connection with whatever else is going on - most
+        // importantly, the TrayIconClient that opened this popup in
+        // the first place, whose own window can perfectly well need
+        // an Expose delivered (typically once this menu closes and
+        // uncovers it again) while this loop still owns the only
+        // thing reading this connection. XNextEvent() would hand back
+        // literally the next event for *any* window on the
+        // connection - already caught misattributing exactly that
+        // Expose to this popup's own redraw() and silently losing the
+        // real one. The predicate above restricts this to events for
+        // `popup` specifically; anything else is left exactly where
+        // it is in Xlib's own queue, in order, for whoever reads this
+        // connection next (this loop's own next iteration, or
+        // TrayIconClient::Run() once this function returns) to see -
+        // nothing is consumed, reordered, or dropped.
+        XIfEvent(display, &event, IsEventForWindow, reinterpret_cast<XPointer>(&popup));
 
         switch (event.type)
         {

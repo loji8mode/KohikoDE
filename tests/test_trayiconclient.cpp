@@ -47,6 +47,47 @@
 // has) and having Redraw() clear to that before every draw, rather
 // than each tray tool separately painting a solid guess of its own.
 //
+// Also covers the (0.21.3) "tray icon corrupts immediately after its
+// own popup closes" finding: PopupMenu::Show() (the dropdown each tray
+// tool opens on click) runs its own blocking loop directly on
+// TrayIconClient's own shared X connection - XNextEvent(display, ...),
+// not filtered to the popup's own window - because that connection is
+// also what the tray icon's own window lives on. Confirmed live and
+// reproduced here exactly: an Expose meant for the tray icon (the
+// ordinary result of the popup, which necessarily overlaps the icon it
+// dropped down from, being destroyed and uncovering it again) that
+// happens to arrive while Show()'s loop still owns the connection was
+// silently misattributed to "the popup needs a redraw" (Show()'s old
+// `case Expose: redraw();` never checked which window the event was
+// actually for) and lost for good - the tray icon was left showing
+// only its own correct, live background (0.21.2's fix), with no icon
+// glyph on top, until some *unrelated* later event on the same
+// connection happened to drag the stranded one out along with it (a
+// real symptom on the reporter's machine: clicking the same icon again
+// to open its full GUI window - not its dropdown - restored it).
+// TrayIconClient::Run()'s own poll()-gated event drain compounded this:
+// it only ever checked XPending() when poll() reported the raw socket
+// readable, but Xlib keeps its own internal queue in front of that
+// socket, and any blocking round-trip call anywhere in the process can
+// silently drain bytes into it as a side effect - invisible to poll(),
+// which only ever sees genuinely new, still-unread socket data. Fixed
+// two ways, each closing a different half of this: PopupMenu::Show()
+// now waits specifically for events addressed to its own window
+// (XIfEvent with a window-matching predicate) rather than blindly
+// taking whatever XNextEvent() hands back next, so anything else stays
+// exactly where it is in Xlib's queue rather than being consumed or
+// reordered; and TrayIconClient::Run() now checks XPending() every
+// iteration unconditionally, rather than only when poll() said the
+// socket had new data, so anything left waiting there is never more
+// than one loop iteration from being noticed. (A third, related but
+// independently-confirmed-harmless finding from the same investigation:
+// SystemTray::Reposition() called XMoveResizeWindow() on the tray
+// container unconditionally on every single Bar redraw, identical
+// geometry or not - real, wasteful X11 traffic, but proven not to be
+// what caused this specific symptom - given its own change-detection
+// guard anyway, matching the pattern Bar::Redraw() already uses for
+// itself.)
+//
 // Needs a real X11 connection (TrayIconClient creates a real X
 // window). Same "gracefully skip without a real, even if headless/
 // Xvfb, $DISPLAY" deal as test_bar.cpp - kept out of `make test` the
@@ -60,12 +101,14 @@
 
 #include "TrayIconClient.h"
 #include "UiIconCache.h"
+#include "UiPopupMenu.h"
 
 #include <X11/Xlib.h>
 
 #include <cstdio>
 #include <cstdlib>
 #include <unistd.h>
+#include <sys/wait.h>
 
 using namespace Kohiko;
 
@@ -334,6 +377,201 @@ int main()
     // destroying that already-gone window a second time is a BadWindow
     // - harmless (Xlib's default handler doesn't treat it as fatal),
     // but avoided entirely by just not doing either explicitly.
+
+    std::printf("\n-- The 0.21.3 bug: an Expose for the tray icon, arriving while its own "
+                "popup is still open, used to be lost for good --\n");
+
+    // A third, independent TrayIconClient/connection, docked into its
+    // own fake Bar/container pair the same way as the section above -
+    // this one is specifically for exercising the real click ->
+    // PopupMenu::Show() -> dismiss -> Run() lifecycle, so it needs its
+    // own real event loop rather than being drawn into directly.
+    constexpr unsigned long kThirdFakeBarBackground = 0x1e1e2e;
+
+    TrayIconClient tray3;
+    Check(tray3.Create(22), "a third TrayIconClient/X connection can be created for the popup-lifecycle section");
+
+    Display* display3 = tray3.GetDisplay();
+    int screen3 = tray3.GetScreen();
+    Window trayWindow3 = tray3.GetWindow();
+
+    XSetWindowAttributes bar3Attrs{};
+    bar3Attrs.background_pixel = kThirdFakeBarBackground;
+    Window fakeBar3 = XCreateWindow(
+        display3, RootWindow(display3, screen3), 0, 0, 300, 30, 0,
+        DefaultDepth(display3, screen3), InputOutput, DefaultVisual(display3, screen3),
+        CWBackPixel, &bar3Attrs);
+    XMapWindow(display3, fakeBar3);
+
+    XSetWindowAttributes container3Attrs{};
+    container3Attrs.background_pixmap = ParentRelative;
+    Window fakeContainer3 = XCreateWindow(
+        display3, fakeBar3, 0, 0, 22, 22, 0,
+        DefaultDepth(display3, screen3), InputOutput, DefaultVisual(display3, screen3),
+        CWBackPixmap, &container3Attrs);
+    XMapWindow(display3, fakeContainer3);
+
+    XReparentWindow(display3, trayWindow3, fakeContainer3, 0, 0);
+    XMapWindow(display3, trayWindow3);
+    WaitUntilViewable(display3, trayWindow3);
+
+    // A distinctive "icon" - solid magenta in the middle, leaving a
+    // border so the background is independently sampleable. What
+    // matters for this section is purely whether this gets (re)drawn
+    // after the popup closes, not what a real icon looks like.
+    tray3.SetDrawCallback([](Display* d, Window w, GC gc, Visual*, Colormap, int size)
+    {
+        XSetForeground(d, gc, 0xFF00FF);
+        XFillRectangle(d, w, gc, 4, 4, size - 8, size - 8);
+    });
+    tray3.Redraw();
+    XSync(display3, False);
+
+    Check(SamplePixel(display3, trayWindow3, 11, 11) == 0xFF00FF,
+          "the tray icon renders normally before any popup interaction");
+
+    XSync(display3, True); // drain setup-generated events, isolate what follows
+
+    Window dummyChild3;
+    int rootX3 = 0, rootY3 = 0;
+    XTranslateCoordinates(display3, trayWindow3, RootWindow(display3, screen3), 0, 0, &rootX3, &rootY3, &dummyChild3);
+
+    // What every real tray tool's click handler does: build the popup
+    // and call Show() from inside the handler itself, which blocks
+    // until the popup is dismissed. Positioned well away from the
+    // tray icon - deliberately *not* overlapping it - so the only
+    // thing that can possibly cause the tray icon to need redrawing
+    // during this section is the synthetic Expose sent below, with no
+    // second, naturally-occurring one (from the popup itself covering
+    // and later uncovering the icon) able to mask whether that one
+    // survived on its own.
+    tray3.SetLeftClickHandler([&]
+    {
+        PopupMenu menu;
+        menu.AddItem("Test Item", [] {});
+        menu.Show(display3, screen3, tray3.GetVisual(), tray3.GetColormap(), tray3.GetFont(), tray3.Theme(),
+                  rootX3 + 200, rootY3 + 200);
+    });
+
+    pid_t clickerPid = fork();
+
+    if (clickerPid == 0)
+    {
+        // --- "clicker" process: independent X connection, standing in
+        // for real user input arriving concurrently with the popup's
+        // own event loop. ---
+        Display* d4 = XOpenDisplay(nullptr);
+        if (!d4) _exit(1);
+        Window root = RootWindow(d4, DefaultScreen(d4));
+
+        usleep(200000); // let the parent get into Run()'s poll() first
+
+        Window before[512];
+        unsigned int nBefore = 0;
+        {
+            Window r, p, *kids = nullptr;
+            unsigned int n = 0;
+            XQueryTree(d4, root, &r, &p, &kids, &n);
+            nBefore = n < 512 ? n : 512;
+            for (unsigned int i = 0; i < nBefore; ++i) before[i] = kids[i];
+            if (kids) XFree(kids);
+        }
+
+        XEvent press{};
+        press.xbutton.type = ButtonPress;
+        press.xbutton.display = d4;
+        press.xbutton.window = trayWindow3;
+        press.xbutton.root = root;
+        press.xbutton.x = 11; press.xbutton.y = 11;
+        press.xbutton.x_root = rootX3 + 11; press.xbutton.y_root = rootY3 + 11;
+        press.xbutton.button = Button1;
+        press.xbutton.time = CurrentTime;
+        press.xbutton.same_screen = True;
+        XSendEvent(d4, trayWindow3, False, ButtonPressMask, &press);
+
+        XEvent release = press;
+        release.xbutton.type = ButtonRelease;
+        XSendEvent(d4, trayWindow3, False, ButtonReleaseMask, &release);
+        XFlush(d4);
+
+        Window popup = 0;
+        for (int tries = 0; tries < 500 && !popup; ++tries)
+        {
+            usleep(10000);
+            Window r, p, *kids = nullptr;
+            unsigned int n = 0;
+            XQueryTree(d4, root, &r, &p, &kids, &n);
+            for (unsigned int i = 0; i < n; ++i)
+            {
+                bool known = false;
+                for (unsigned int j = 0; j < nBefore; ++j)
+                    if (kids[i] == before[j]) known = true;
+                if (!known) { popup = kids[i]; break; }
+            }
+            if (kids) XFree(kids);
+        }
+
+        if (!popup)
+            _exit(2);
+
+        // The crux of this test: a synthetic Expose for the tray
+        // icon's own window, sent while PopupMenu::Show()'s loop is
+        // confirmed still running - standing in for any of the real
+        // reasons an Expose can arrive for the tray icon during a
+        // popup's lifetime (most commonly the popup itself covering
+        // and later uncovering the icon - deliberately not the case
+        // here, see the popup's own position above, so there's no
+        // second, naturally-occurring Expose able to mask whether
+        // *this* one survived on its own). A real Expose is always
+        // paired with the server having already repainted that region
+        // from the window's background attribute *before* notifying
+        // the client - that's what actually erases the previously-
+        // drawn icon glyph in the real bug, not the event by itself -
+        // so this clears the window the same way here, right before
+        // sending the event, rather than just sending a notification
+        // about content that was never actually touched.
+        XClearWindow(d4, trayWindow3);
+        XFlush(d4);
+
+        XEvent expose{};
+        expose.xexpose.type = Expose;
+        expose.xexpose.display = d4;
+        expose.xexpose.window = trayWindow3;
+        expose.xexpose.width = 22;
+        expose.xexpose.height = 22;
+        expose.xexpose.count = 0;
+        XSendEvent(d4, trayWindow3, False, ExposureMask, &expose);
+        XFlush(d4);
+        usleep(50000);
+
+        XEvent click{};
+        click.xbutton.type = ButtonRelease;
+        click.xbutton.display = d4;
+        click.xbutton.window = popup;
+        click.xbutton.root = root;
+        click.xbutton.x = 10; click.xbutton.y = 15;
+        click.xbutton.x_root = rootX3 + 10; click.xbutton.y_root = rootY3 + 15;
+        click.xbutton.button = Button1;
+        click.xbutton.time = CurrentTime;
+        click.xbutton.same_screen = True;
+        XSendEvent(d4, popup, False, ButtonReleaseMask, &click);
+        XFlush(d4);
+
+        XCloseDisplay(d4);
+        _exit(0);
+    }
+
+    tray3.SetInterval(500, [&] { tray3.Quit(); });
+    tray3.Run();
+
+    waitpid(clickerPid, nullptr, 0);
+
+    Check(SamplePixel(display3, trayWindow3, 11, 11) == 0xFF00FF,
+          "after a real click opens the popup, an Expose for the tray icon arrives while the popup is "
+          "still open, and the popup is then dismissed, the tray icon's own icon glyph is still there "
+          "afterward - this is exactly the assertion the pre-fix PopupMenu::Show() (misattributing any "
+          "Expose to itself) and TrayIconClient::Run() (only checking XPending() when poll() saw new "
+          "socket data, blind to anything Xlib already buffered internally) could not pass");
 
     std::printf("\nALL %d CHECKS PASSED.\n", g_pass);
     return 0;

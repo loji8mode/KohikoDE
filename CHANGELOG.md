@@ -1,5 +1,66 @@
 # Changelog
 
+## Version 0.21.3
+
+Release date: 2026-09-24
+
+### Fixed
+- **Kohiko's own tray icons went blank immediately after their own popup
+  closed** - confirmed live: the icon glyph disappeared completely,
+  leaving only the correct (0.21.2-fixed) background, and stayed that
+  way until some later, unrelated interaction with the icon (e.g.
+  opening its full GUI window instead of the small popup) happened to
+  restore it. Root cause was two compounding issues, both in the path
+  between `TrayIconClient` and the `PopupMenu` each tray tool opens on
+  click:
+  - `PopupMenu::Show()` runs its own blocking loop
+    (`XNextEvent(display, ...)`) directly on the same shared X
+    connection as the tray icon's own window, with no filter for which
+    window an event actually belongs to. An `Expose` for the tray icon
+    - the ordinary result of the popup (which necessarily overlaps the
+    icon it dropped down from) being destroyed and uncovering it again
+    - arriving while `Show()`'s loop still owned the connection was
+    silently misattributed to "the popup needs a redraw" and lost for
+    good, along with whatever else needed the icon to actually redraw.
+  - `TrayIconClient::Run()`'s event loop only checked `XPending()` when
+    `poll()` reported its raw connection fd as readable - but Xlib
+    keeps its own internal event queue in front of that fd, and any
+    blocking round-trip call anywhere in the process (`XGetImage`,
+    `XQueryPointer`, `XGrabPointer`, and so on - including ones deep
+    inside `PopupMenu::Show()`'s own cleanup) can silently drain bytes
+    off the socket and park unrelated events there as a side effect,
+    invisible to `poll()`. An event stranded that way stayed stranded
+    until some *unrelated* later socket activity happened to wake
+    `poll()` again for a different reason - exactly the "another click
+    restores it" symptom reported live.
+  - Fixed both, independently: `PopupMenu::Show()` now waits
+    specifically for events addressed to its own window (`XIfEvent`
+    with a window-matching predicate) rather than blindly acting on
+    whatever `XNextEvent()` hands back next, so anything else is left
+    exactly where it is in Xlib's queue - not consumed, not reordered -
+    for whoever reads the connection next. `TrayIconClient::Run()` now
+    checks `XPending()` unconditionally on every loop iteration, rather
+    than only when `poll()` reported new socket data, so anything left
+    waiting there is never more than one iteration from being noticed.
+  - Also fixed, from the same investigation and confirmed independently
+    harmless to this specific bug: `SystemTray::Reposition()` called
+    `XMoveResizeWindow()` on the tray container unconditionally on
+    every single Bar redraw, identical geometry or not. Given its own
+    change-detection guard, matching the pattern `Bar::Redraw()`
+    already uses for itself, to stop the redundant X11 traffic.
+  - No change to the XEmbed dock handshake, the fallback-glyph
+    behaviour, icon lookup/resolution, SVG rasterization, or 0.21.2's
+    background fix itself - all confirmed correct and untouched.
+  - New regression coverage in `tests/test_trayiconclient.cpp`: opens a
+    real `PopupMenu` from a real click on a docked `TrayIconClient`,
+    positioned so it does *not* overlap the icon (isolating the
+    mechanism from the popup's own, separate cover/uncover cycle),
+    clears the icon's window and delivers a synthetic `Expose` for it
+    while the popup's loop is confirmed still running, then dismisses
+    the popup and confirms the icon's glyph is back - proven to fail
+    against the pre-fix code and pass against the fix, run repeatedly
+    for determinism.
+
 ## Version 0.21.2
 
 Release date: 2026-09-22

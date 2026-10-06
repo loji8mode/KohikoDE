@@ -128,6 +128,14 @@ private:
     int m_margin = 6;
     int m_barHeight = 26;
 
+    // What the container was last actually positioned/sized to (see
+    // Reposition()'s own comment) - -1 so the very first call, however
+    // it computes out, is always treated as a real change.
+    int m_lastContainerX = -1;
+    int m_lastContainerY = -1;
+    int m_lastContainerWidth = -1;
+    int m_lastContainerHeight = -1;
+
 };
 
 }

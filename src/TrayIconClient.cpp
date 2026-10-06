@@ -263,13 +263,15 @@ void TrayIconClient::Run()
         // every real deadline this loop needs to notice (the next
         // registered timer, and the dock-retry attempt while not yet
         // docked) is folded in explicitly below instead. m_dirty
-        // doesn't need a deadline of its own: RequestRedraw() is only
-        // ever called from inside one of the callbacks below, which
-        // only run after poll() has already woken this same iteration
-        // for an unrelated reason (an fd becoming readable, or one of
-        // those same timers) - so the very next loop iteration's
-        // `if (m_dirty) Redraw()` at the top always sees it with no
-        // extra wakeup needed to notice it sooner.
+        // doesn't need a deadline of its own either: every place that
+        // can set it runs synchronously on this same thread, so by the
+        // time control gets back here at all, the unconditional
+        // XPending() drain below (not gated behind poll()'s report for
+        // the X11 fd specifically - see its own comment) has already
+        // had its chance to run first, and `if (m_dirty) Redraw()`
+        // above always sees the result on the very next iteration
+        // regardless of what actually woke poll() up, or whether
+        // anything did.
         bool haveDeadline = false;
         int timeoutMs = 0;
 
@@ -292,17 +294,34 @@ void TrayIconClient::Run()
 
         poll(pfds.data(), pfds.size(), haveDeadline ? timeoutMs : -1);
 
-        if (pfds[0].revents & POLLIN)
+        // Deliberately NOT gated behind `pfds[0].revents & POLLIN`.
+        // Xlib keeps its own internal event queue in front of the raw
+        // socket, and any blocking round-trip call anywhere in this
+        // process (XGetImage, XQueryPointer, XGrabPointer... anything
+        // that waits on a reply, including ones deep inside a nested
+        // loop like PopupMenu::Show()'s own) can silently drain bytes
+        // off the socket and park extra, unrelated events it wasn't
+        // looking for in that internal queue as a side effect - poll()
+        // on the raw fd only reports genuinely *new*, still-unread
+        // socket data, so it has no way to know those are sitting
+        // there. Gating XPending() behind POLLIN means an event
+        // stranded that way is invisible until some *unrelated* later
+        // socket activity happens to wake poll() again - which is
+        // exactly what let a tray icon's own post-popup Expose sit
+        // unprocessed until the next click came along and dragged it
+        // out along with itself. XPending() itself is cheap (an
+        // in-memory check first, and if genuinely empty, an already-
+        // nonblocking one) so checking it unconditionally every
+        // iteration costs nothing in the common case where there's
+        // really nothing pending.
+        while (XPending(m_display))
         {
-            while (XPending(m_display))
-            {
-                XEvent event;
-                XNextEvent(m_display, &event);
-                HandleEvent(event);
+            XEvent event;
+            XNextEvent(m_display, &event);
+            HandleEvent(event);
 
-                if (m_extraEventHandler)
-                    m_extraEventHandler(event);
-            }
+            if (m_extraEventHandler)
+                m_extraEventHandler(event);
         }
 
         for (std::size_t i = 0; i < m_fdWatches.size(); ++i)

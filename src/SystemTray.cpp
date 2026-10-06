@@ -162,6 +162,22 @@ void SystemTray::Reposition(
     int width = Width();
     int x = std::max(0, barWidth - width - m_margin);
     int y = std::max(0, (barHeight - m_iconSize) / 2);
+    int clampedWidth = std::max(width, 1);
+
+    // Only actually touch the X server if the geometry really changed
+    // - the same pattern Bar::Redraw() itself already uses for its own
+    // fast path. Reposition() runs on every single Bar redraw (any
+    // Expose the Bar gets forces one - see WindowManager::HandleExpose()),
+    // so without this an idle desktop reissues an identical
+    // XMoveResizeWindow() on every such redraw for no reason.
+    if (x == m_lastContainerX && y == m_lastContainerY &&
+        clampedWidth == m_lastContainerWidth && m_iconSize == m_lastContainerHeight)
+        return;
+
+    m_lastContainerX = x;
+    m_lastContainerY = y;
+    m_lastContainerWidth = clampedWidth;
+    m_lastContainerHeight = m_iconSize;
 
     Display* display = m_connection->GetDisplay();
 
@@ -170,7 +186,7 @@ void SystemTray::Reposition(
         m_container,
         x,
         y,
-        static_cast<unsigned int>(std::max(width, 1)),
+        static_cast<unsigned int>(clampedWidth),
         static_cast<unsigned int>(m_iconSize));
 }
 
