@@ -34,8 +34,42 @@ bool ConfigMigration::BackupConfig(
     return !error;
 }
 
+const std::vector<std::string>& ConfigMigration::RetiredKeys()
+{
+    static const std::vector<std::string> kRetired = {
+        "general.adaptive_placement",
+    };
+
+    return kRetired;
+}
+
+std::vector<std::string> ConfigMigration::RetireObsoleteData(
+    const std::filesystem::path& dataDir)
+{
+    static const char* const kObsoleteFiles[] = {
+        "placement_habits",
+    };
+
+    std::vector<std::string> removed;
+
+    for (const char* name : kObsoleteFiles)
+    {
+        std::error_code error;
+        std::filesystem::path path = dataDir / name;
+
+        if (std::filesystem::is_regular_file(path, error) &&
+            std::filesystem::remove(path, error) && !error)
+        {
+            removed.push_back(name);
+        }
+    }
+
+    return removed;
+}
+
 bool ConfigMigration::MigrateIfNeeded(
-    const std::string& configPath)
+    const std::string& configPath,
+    std::vector<std::string>* retiredKeys)
 {
     ConfigWriter writer;
 
@@ -43,6 +77,23 @@ bool ConfigMigration::MigrateIfNeeded(
         return false; // no file (or unreadable) - see this class's header comment
 
     bool changed = false;
+
+    for (const std::string& key : RetiredKeys())
+    {
+        if (!writer.Contains(key))
+            continue;
+
+        if (!changed)
+        {
+            BackupConfig(configPath);
+            changed = true;
+        }
+
+        writer.RemoveScalar(key);
+
+        if (retiredKeys)
+            retiredKeys->push_back(key);
+    }
 
     for (const ConfigOption& option : ConfigSchema::All())
     {

@@ -198,6 +198,183 @@ void BluezClient::RemoveDevice(const std::string& adapterPath, const std::string
     m_bus.Call(kBluezService, adapterPath, kAdapterIface, "RemoveDevice", { DBusValue::MakeObjectPath(devicePath) });
 }
 
+// ---------------------------------------------------------------------
+// Asynchronous operations. Every job body below runs on the worker
+// thread with `bus` - the worker's private connection - and only
+// reads/writes values it was handed by copy; it never touches
+// m_bus, m_adapters, m_devices or anything else on this object.
+// ---------------------------------------------------------------------
+
+namespace
+{
+
+// The D-Bus error name BlueZ answers Pair() with when the device is
+// already paired - not a failure for "pair and connect".
+bool IsAlreadyPaired(const std::string& error)
+{
+    return error.find("AlreadyExists") != std::string::npos;
+}
+
+}
+
+// Adapter-wide controls (power, discoverable, scan) and per-device
+// operations (pair, connect, ...) are independent and run on separate
+// lanes, so a 15-second connect never delays the Bluetooth toggle.
+constexpr int kAdapterLane = 1;
+
+std::string BluezClient::DeviceKey(const std::string& devicePath)
+{
+    return "device:" + devicePath;
+}
+
+std::string BluezClient::AdapterKey(const std::string& adapterPath)
+{
+    return "adapter:" + adapterPath;
+}
+
+bool BluezClient::IsDeviceBusy(const std::string& devicePath) const
+{
+    return m_ops.IsBusy(DeviceKey(devicePath));
+}
+
+bool BluezClient::IsAdapterBusy(const std::string& adapterPath) const
+{
+    return m_ops.IsBusy(AdapterKey(adapterPath));
+}
+
+bool BluezClient::AnyOperationPending() const
+{
+    return m_ops.Busy();
+}
+
+int BluezClient::OperationFd() const
+{
+    return m_ops.Fd();
+}
+
+void BluezClient::DispatchOperations()
+{
+    m_ops.Dispatch();
+}
+
+bool BluezClient::PairAndConnectAsync(const std::string& devicePath, Completion done)
+{
+    return m_ops.Submit(DeviceKey(devicePath), [devicePath](DBusClient& bus)
+    {
+        // Same two steps - and the same timeouts - as PairDevice() then
+        // ConnectDevice(), but each outcome is now looked at. A device
+        // BlueZ already knows ("AlreadyExists") is simply not
+        // re-paired; if pairing fails for any other reason Connect() is
+        // still attempted (BlueZ can pair implicitly while connecting,
+        // as it always could here), and only if THAT fails too is the
+        // whole operation a failure - reported with both reasons.
+        std::string pairError;
+        bool paired = bus.Call(kBluezService, devicePath, kDeviceIface, "Pair", {}, nullptr, &pairError, 30000)
+                      || IsAlreadyPaired(pairError);
+
+        std::string connectError;
+        bool connected = bus.Call(kBluezService, devicePath, kDeviceIface, "Connect", {}, nullptr, &connectError, 15000);
+
+        if (connected)
+            return OperationResult::Success("Connected");
+
+        if (!paired)
+            return OperationResult::Failure("Pairing failed: " + (pairError.empty() ? std::string("unknown error") : pairError)
+                                            + "; connecting failed: " + (connectError.empty() ? std::string("unknown error") : connectError));
+
+        return OperationResult::Failure("Paired, but connecting failed: " + (connectError.empty() ? std::string("unknown error") : connectError));
+    }, std::move(done));
+}
+
+bool BluezClient::ConnectDeviceAsync(const std::string& devicePath, Completion done)
+{
+    return m_ops.Submit(DeviceKey(devicePath), [devicePath](DBusClient& bus)
+    {
+        std::string error;
+        bool ok = bus.Call(kBluezService, devicePath, kDeviceIface, "Connect", {}, nullptr, &error, 15000);
+        return ok ? OperationResult::Success("Connected") : OperationResult::Failure("Connecting failed: " + (error.empty() ? std::string("unknown error") : error));
+    }, std::move(done));
+}
+
+bool BluezClient::DisconnectDeviceAsync(const std::string& devicePath, Completion done)
+{
+    return m_ops.Submit(DeviceKey(devicePath), [devicePath](DBusClient& bus)
+    {
+        std::string error;
+        bool ok = bus.Call(kBluezService, devicePath, kDeviceIface, "Disconnect", {}, nullptr, &error);
+        return ok ? OperationResult::Success("Disconnected") : OperationResult::Failure("Disconnecting failed: " + (error.empty() ? std::string("unknown error") : error));
+    }, std::move(done));
+}
+
+bool BluezClient::RemoveDeviceAsync(const std::string& adapterPath, const std::string& devicePath, Completion done)
+{
+    return m_ops.Submit(DeviceKey(devicePath), [adapterPath, devicePath](DBusClient& bus)
+    {
+        std::string error;
+        bool ok = bus.Call(kBluezService, adapterPath, kAdapterIface, "RemoveDevice", { DBusValue::MakeObjectPath(devicePath) }, nullptr, &error);
+        return ok ? OperationResult::Success("Device forgotten") : OperationResult::Failure("Forgetting the device failed: " + (error.empty() ? std::string("unknown error") : error));
+    }, std::move(done));
+}
+
+bool BluezClient::DisconnectAndRemoveAsync(const std::string& adapterPath, const std::string& devicePath, Completion done)
+{
+    return m_ops.Submit(DeviceKey(devicePath), [adapterPath, devicePath](DBusClient& bus)
+    {
+        // Disconnect first, as the synchronous path did; a device that
+        // was already gone is not a reason to skip forgetting it.
+        std::string disconnectError;
+        bus.Call(kBluezService, devicePath, kDeviceIface, "Disconnect", {}, nullptr, &disconnectError);
+
+        std::string error;
+        bool ok = bus.Call(kBluezService, adapterPath, kAdapterIface, "RemoveDevice", { DBusValue::MakeObjectPath(devicePath) }, nullptr, &error);
+
+        if (ok)
+            return OperationResult::Success("Device disconnected and forgotten");
+
+        return OperationResult::Failure("Forgetting the device failed: " + (error.empty() ? std::string("unknown error") : error));
+    }, std::move(done));
+}
+
+bool BluezClient::SetDeviceTrustedAsync(const std::string& devicePath, bool trusted, Completion done)
+{
+    return m_ops.Submit(DeviceKey(devicePath), [devicePath, trusted](DBusClient& bus)
+    {
+        std::string error;
+        bool ok = bus.SetProperty(kBluezService, devicePath, kDeviceIface, "Trusted", DBusValue::MakeBool(trusted), &error);
+        return ok ? OperationResult::Success() : OperationResult::Failure("Changing the trust setting failed: " + (error.empty() ? std::string("unknown error") : error));
+    }, std::move(done));
+}
+
+bool BluezClient::SetAdapterPoweredAsync(const std::string& adapterPath, bool powered, Completion done)
+{
+    return m_ops.Submit(AdapterKey(adapterPath), [adapterPath, powered](DBusClient& bus)
+    {
+        std::string error;
+        bool ok = bus.SetProperty(kBluezService, adapterPath, kAdapterIface, "Powered", DBusValue::MakeBool(powered), &error);
+        return ok ? OperationResult::Success() : OperationResult::Failure(std::string("Turning Bluetooth ") + (powered ? "on" : "off") + " failed: " + (error.empty() ? std::string("unknown error") : error));
+    }, std::move(done), kAdapterLane);
+}
+
+bool BluezClient::SetAdapterDiscoverableAsync(const std::string& adapterPath, bool discoverable, Completion done)
+{
+    return m_ops.Submit(AdapterKey(adapterPath), [adapterPath, discoverable](DBusClient& bus)
+    {
+        std::string error;
+        bool ok = bus.SetProperty(kBluezService, adapterPath, kAdapterIface, "Discoverable", DBusValue::MakeBool(discoverable), &error);
+        return ok ? OperationResult::Success() : OperationResult::Failure("Changing discoverability failed: " + (error.empty() ? std::string("unknown error") : error));
+    }, std::move(done), kAdapterLane);
+}
+
+bool BluezClient::StartDiscoveryAsync(const std::string& adapterPath, Completion done)
+{
+    return m_ops.Submit(AdapterKey(adapterPath), [adapterPath](DBusClient& bus)
+    {
+        std::string error;
+        bool ok = bus.Call(kBluezService, adapterPath, kAdapterIface, "StartDiscovery", {}, nullptr, &error);
+        return ok ? OperationResult::Success("Scanning for devices") : OperationResult::Failure("Starting the scan failed: " + (error.empty() ? std::string("unknown error") : error));
+    }, std::move(done), kAdapterLane);
+}
+
 void BluezClient::SetChangeHandler(ChangeHandler handler)
 {
     m_changeHandler = std::move(handler);

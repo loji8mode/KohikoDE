@@ -56,6 +56,23 @@ float ParsePercent(
     }
 }
 
+std::string ShellQuote(
+    const std::string& text)
+{
+    std::string quoted = "'";
+
+    for (char c : text)
+    {
+        if (c == '\'')
+            quoted += "'\\''";
+        else
+            quoted += c;
+    }
+
+    quoted += "'";
+    return quoted;
+}
+
 std::vector<std::string> SplitWhitespace(
     const std::string& value)
 {

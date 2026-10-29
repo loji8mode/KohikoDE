@@ -1,6 +1,8 @@
 #include "AppInstanceLock.h"
 #include "NetworkManagerClient.h"
+#include "NotificationClient.h"
 #include "TrayIconClient.h"
+#include "TrayInteraction.h"
 #include "UiIconCache.h"
 #include "UiPopupMenu.h"
 
@@ -140,66 +142,72 @@ int main()
         }
     });
 
-    tray.SetRightClickHandler([]
-    {
-        AppInstanceLock::LaunchOrRaise("kohiko-network", "kohiko-network");
-    });
+    // The one mouse contract of Kohiko's native tray utilities (see
+    // TrayInteraction.h): left click = open/raise the Network window,
+    // right click = this quick menu. (This tool used to have the two
+    // swapped relative to the audio tray.) The menu's actions are
+    // asynchronous - they return at once and a failure becomes a
+    // desktop notification - so choosing one can never freeze the tray.
+    tray.WatchFd(networkManager.OperationFd(), [&] { networkManager.DispatchOperations(); });
 
-    tray.SetLeftClickHandler([&]
-    {
-        PopupMenu menu;
+    NotificationClient notifications;
+    notifications.Connect();
 
+    auto report = [&notifications](const OperationResult& result)
+    {
+        if (!result.ok && notifications.Available())
+            notifications.Notify("Kohiko Network", "network-wireless", "Network", result.message, 8000);
+    };
+
+    TrayInteraction::Spec spec;
+    spec.appId = "kohiko-network";
+    spec.executable = "kohiko-network";
+    spec.openLabel = "Open Network Settings";
+    spec.buildMenu = [&networkManager, report](PopupMenu& menu)
+    {
         if (!networkManager.Available())
         {
             menu.AddItem("NetworkManager is not available", nullptr, false);
+            return;
         }
-        else
+
+        bool wirelessEnabled = networkManager.WirelessEnabled();
+        menu.AddItem(wirelessEnabled ? "Turn Wi-Fi off" : "Turn Wi-Fi on",
+            [&networkManager, wirelessEnabled, report] { networkManager.SetWirelessEnabledAsync(!wirelessEnabled, report); });
+        menu.AddSeparator();
+
+        const NetworkDevice* wifiDevice = nullptr;
+        for (auto& device : networkManager.Devices())
+            if (device.kind == NetworkDeviceKind::WiFi) { wifiDevice = &device; break; }
+
+        if (wifiDevice && wirelessEnabled)
         {
-            bool wirelessEnabled = networkManager.WirelessEnabled();
-            menu.AddItem(wirelessEnabled ? "Turn Wi-Fi off" : "Turn Wi-Fi on",
-                [&networkManager, wirelessEnabled] { networkManager.SetWirelessEnabled(!wirelessEnabled); });
-            menu.AddSeparator();
-
-            const NetworkDevice* wifiDevice = nullptr;
-            for (auto& device : networkManager.Devices())
-                if (device.kind == NetworkDeviceKind::WiFi) { wifiDevice = &device; break; }
-
-            if (wifiDevice && wirelessEnabled)
+            int shown = 0;
+            for (auto& ap : wifiDevice->accessPoints)
             {
-                int shown = 0;
-                for (auto& ap : wifiDevice->accessPoints)
+                if (shown++ >= 6)
+                    break;
+
+                std::string label = (ap.isActiveConnection ? "\u2713 " : "   ") + ap.ssid;
+                std::string devicePath = wifiDevice->objectPath;
+                std::string apPath = ap.objectPath;
+                std::string ssid = ap.ssid;
+                bool secured = ap.secured;
+                bool isActive = ap.isActiveConnection;
+
+                menu.AddItem(label, [&networkManager, devicePath, apPath, ssid, secured, isActive, report]
                 {
-                    if (shown++ >= 6)
-                        break;
-
-                    std::string label = (ap.isActiveConnection ? "\u2713 " : "   ") + ap.ssid;
-                    std::string devicePath = wifiDevice->objectPath;
-                    std::string apPath = ap.objectPath;
-                    std::string ssid = ap.ssid;
-                    bool secured = ap.secured;
-                    bool isActive = ap.isActiveConnection;
-
-                    menu.AddItem(label, [&networkManager, devicePath, apPath, ssid, secured, isActive]
-                    {
-                        if (isActive || secured)
-                            return; // opening the full password prompt from the tray's quick menu isn't worth the complexity - open the app instead
-                        networkManager.ConnectToAccessPoint(devicePath, apPath, ssid, "");
-                    });
-                }
-
-                menu.AddSeparator();
+                    if (isActive || secured)
+                        return; // opening the full password prompt from the tray's quick menu isn't worth the complexity - open the app instead
+                    networkManager.ConnectToAccessPointAsync(devicePath, apPath, ssid, "", report);
+                });
             }
+
+            menu.AddSeparator();
         }
+    };
 
-        menu.AddItem("Open Network Settings", [] { AppInstanceLock::LaunchOrRaise("kohiko-network", "kohiko-network"); });
-
-        Window rootReturn, childReturn;
-        int rootX, rootY, winX, winY;
-        unsigned int mask;
-        XQueryPointer(tray.GetDisplay(), tray.GetWindow(), &rootReturn, &childReturn, &rootX, &rootY, &winX, &winY, &mask);
-
-        menu.Show(tray.GetDisplay(), tray.GetScreen(), tray.GetVisual(), tray.GetColormap(), tray.GetFont(), tray.Theme(), rootX, rootY);
-    });
+    TrayInteraction::Install(tray, spec);
 
     tray.Run();
     return 0;

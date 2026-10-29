@@ -71,6 +71,7 @@ public:
 private:
 
     int m_listenFd = -1;
+    int m_lockFd = -1;   // holds the flock that decides which process is "the" instance
     std::string m_socketPath;
     RaiseHandler m_handler;
 };

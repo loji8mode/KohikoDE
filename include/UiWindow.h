@@ -95,7 +95,19 @@ public:
     // this window runs - what level meters and the Bluetooth/Wi-Fi
     // "scanning..." spinner animation use, since neither has an fd of
     // its own to wait on.
-    void SetInterval(int intervalMs, TimerCallback callback);
+    // Opaque handle for CancelInterval().
+    using TimerId = std::size_t;
+
+    TimerId SetInterval(int intervalMs, TimerCallback callback);
+
+    // Stops a timer registered with SetInterval(): it never fires
+    // again. Safe to call from inside any callback, including that
+    // timer's own (it is only flagged here and erased by Run() once it
+    // is done iterating). This is what lets a window run a timer ONLY
+    // while there is something for it to do - a toast on screen, an
+    // operation in flight - instead of waking the process 10 times a
+    // second for as long as the window exists.
+    void CancelInterval(TimerId id);
 
     // Called for every X event Run()'s own loop sees, right after this
     // window's own HandleEvent() - regardless of which window the
@@ -184,7 +196,7 @@ private:
     void ResizeBacking(int width, int height);
 
     struct FdWatch { int fd; FdCallback callback; };
-    struct Timer { std::chrono::milliseconds interval; std::chrono::steady_clock::time_point next; TimerCallback callback; };
+    struct Timer { std::chrono::milliseconds interval; std::chrono::steady_clock::time_point next; TimerCallback callback; TimerId id; bool cancelled; };
 
     Display* m_display = nullptr;
     int m_screen = 0;
@@ -217,6 +229,7 @@ private:
 
     std::vector<FdWatch> m_fdWatches;
     std::vector<Timer> m_timers;
+    TimerId m_nextTimerId = 1;
     ResizeHandler m_resizeHandler;
     EventHandler m_extraEventHandler;
 

@@ -74,9 +74,14 @@ private:
     // Which sub-control of a structured row a raw block's caretRow/
     // caretCol refer to - only meaningful while the focused
     // RawBlockPanel has kind != RawText (see RawBlockPanel::Kind and
-    // LayoutAndDrawStructuredBlock()). Action isn't included here:
-    // it's a click-to-cycle button (mirroring CycleEnumField()), not
-    // a text cell, so it never holds the caret.
+    // LayoutAndDrawStructuredBlock()). A window rule's Horizontal/
+    // Vertical/Mode choices aren't included here: they're click-to-cycle
+    // buttons (mirroring CycleEnumField()), not text cells, so they
+    // never hold the caret.
+    //
+    // Class is a window rule's first selector cell: the application key
+    // (`app:`), or - for a hand-written legacy rule that uses it - the
+    // `class:` substring; see WindowRuleDraft::firstCellIsClass().
     enum class StructuredCell { Class, Instance, Title, Output, Workspace };
 
     struct RawBlockPanel
@@ -116,12 +121,14 @@ private:
         // Unused (left empty) for a RawText panel.
         struct RowRects
         {
-            Rect actionRect{};     // WindowRule only
-            Rect classRect{};      // WindowRule only
-            Rect instanceRect{};   // WindowRule only
-            Rect titleRect{};      // WindowRule only
-            Rect outputRect{};     // Monitor only
-            Rect workspaceRect{};  // WindowRule (only when its action is Workspace) and Monitor
+            Rect classRect{};       // WindowRule only: the application (app:/class:) cell
+            Rect instanceRect{};    // WindowRule only
+            Rect titleRect{};       // WindowRule only
+            Rect horizontalRect{};  // WindowRule only: click-to-cycle Default/Left/Right
+            Rect verticalRect{};    // WindowRule only: click-to-cycle Default/Top/Bottom
+            Rect modeRect{};        // WindowRule only: click-to-cycle Default/Tiled/Floating/Fullscreen
+            Rect outputRect{};      // Monitor only
+            Rect workspaceRect{};   // WindowRule and Monitor
             Rect removeRect{};
         };
         std::vector<RowRects> rowRects;
@@ -136,18 +143,48 @@ private:
     // entry - see ParseWindowRuleDraft()/SerializeWindowRuleDraft().
     // Deliberately its own lightweight, tolerant-of-partial-input type
     // rather than reusing WindowRule::Parse() directly: that parser
-    // lowercases pattern values (correct for matching at runtime, but
-    // it would silently mangle whatever case the user is mid-typing
-    // here) and rejects anything incomplete outright, whereas a row
-    // being actively edited is expected to pass through invalid
-    // in-between states (e.g. no selector at all yet).
+    // rejects anything incomplete outright, whereas a row being
+    // actively edited is expected to pass through invalid in-between
+    // states (e.g. no selector at all yet) - and it keeps the text
+    // exactly as typed. (Whether a finished line is VALID is a
+    // separate question, answered by ValidateRawBlockLine() asking
+    // WindowRule::Parse(), so the editor and the window manager can
+    // never disagree about what a rule means.)
+    //
+    // Every choice has an explicit Default (index 0 / empty text) that
+    // means "this rule has no opinion about that aspect".
     struct WindowRuleDraft
     {
-        int actionIndex = 1; // index into kWindowRuleActionTokens; 1 = "tile"
-        std::string workspaceText; // digits typed after "workspace:" - only meaningful when actionIndex names the Workspace action
+        // Selectors, as typed (decoded - %XX escapes shown as the
+        // character they stand for; SerializeWindowRuleDraft()
+        // re-escapes). appText is the exact application key (`app:`,
+        // what kohiko-choose-window writes); classText/instanceText/
+        // titleText are the substring selectors of hand-written rules.
+        std::string appText;
         std::string classText;
         std::string instanceText;
         std::string titleText;
+
+        // `role:` (exact WM_WINDOW_ROLE) and `type:` (primary window
+        // type) selectors. This editor has no cells for them - they are
+        // written by kohiko-choose-window's --scope or by hand - but a
+        // row that has them must keep them when any OTHER cell is
+        // edited: dropping one would silently turn a rule for one kind
+        // of window (a browser's Picture-in-Picture overlay) into a rule
+        // for every window of the application.
+        std::string roleText;
+        std::string typeText;
+
+        std::string workspaceText;   // digits; "" = Default (no workspace rule)
+        int horizontalIndex = 0;     // 0 Default, 1 Left, 2 Right
+        int verticalIndex = 0;       // 0 Default, 1 Top, 2 Bottom
+        int modeIndex = 0;           // 0 Default, 1 Tiled, 2 Floating, 3 Fullscreen
+        bool denyFullscreen = false; // legacy `nofullscreen` - kept, not editable here
+
+        // True when the first text cell is showing/editing the legacy
+        // `class:` substring rather than the exact `app:` key: only for
+        // a hand-written rule that has class: and no app:.
+        bool firstCellIsClass() const { return appText.empty() && !classText.empty(); }
     };
 
     // A monitor= line's structured fields - see WindowRuleDraft's
@@ -239,10 +276,9 @@ private:
     std::string StructuredCellText(const RawBlockPanel& panel, std::size_t row, StructuredCell cell) const;
     void SetStructuredCellText(RawBlockPanel& panel, std::size_t row, StructuredCell cell, const std::string& value);
 
-    // The text-cell Tab order for `panel.lines[row]` - Class/
-    // Instance/Title (+ Workspace, only when that row's action is
-    // "Workspace") for a WindowRule panel, or Output/Workspace for a
-    // Monitor one. Used by both MoveStructuredFocus() and mouse-click
+    // The text-cell Tab order for `panel.lines[row]` - Class(app)/
+    // Instance/Title/Workspace for a WindowRule panel, or Output/
+    // Workspace for a Monitor one. Used by both MoveStructuredFocus() and mouse-click
     // handling to agree on the same set of tabbable cells.
     std::vector<StructuredCell> StructuredCellOrder(const RawBlockPanel& panel, std::size_t row) const;
 
@@ -251,10 +287,12 @@ private:
     // the adjacent row when it runs off either end of the current one.
     void MoveStructuredFocus(RawBlockPanel& panel, int direction);
 
-    // Advances a row's action to the next entry in kWindowRuleActionTokens
-    // (WindowRule panels only) - the click-to-cycle button mirrors
-    // CycleEnumField()'s own interaction model.
-    void CycleStructuredAction(RawBlockPanel& panel, std::size_t row);
+    // Advances one of a window rule row's click-to-cycle choices -
+    // `which`: 0 Horizontal (Default/Left/Right), 1 Vertical (Default/
+    // Top/Bottom), 2 Mode (Default/Tiled/Floating/Fullscreen) - to its
+    // next value, wrapping back to Default. (WindowRule panels only;
+    // mirrors CycleEnumField()'s own interaction model.)
+    void CycleStructuredChoice(RawBlockPanel& panel, std::size_t row, int which);
 
     // A single freshly-created row for "+ Add rule"/"+ Add monitor
     // rule" - "tile" with no selector yet for WindowRule (matching

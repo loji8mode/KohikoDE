@@ -25,6 +25,40 @@
 //     --color r,g,b           Fill color, 0-255 each (default a
 //                              distinct color per instance so
 //                              screenshots are easy to tell apart)
+//     --send-dock-request     After mapping, send a real
+//                              SYSTEM_TRAY_REQUEST_DOCK for this window
+//                              to whoever owns _NET_SYSTEM_TRAY_S<n>
+//     --dock-delay-ms N       Wait N ms between the map and the dock
+//                              request (default 0 - just the one X
+//                              round trip the request itself needs).
+//                              Lets a test place the dock request
+//                              inside/outside the WM's grace window.
+//     --set-pid               Set _NET_WM_PID to this process's pid, like a
+//                              real application does. Needed to test
+//                              anything that matches a window to the
+//                              process that launched it (the
+//                              workspace<N>= autostart placement).
+//     --report-events         Print "EVENT=<MapNotify|UnmapNotify|
+//                              ReparentNotify> parent=0x<id>" lines for
+//                              this window, in arrival order - lets a
+//                              test see whether a window was ever
+//                              *mapped at root level* before being
+//                              reparented into a tray (the "flash")
+//     --instance NAME         WM_CLASS instance (default: same as --class)
+//     --role ROLE             Set WM_WINDOW_ROLE (what Firefox/Zen/Qt/GTK
+//                              apps use to tell their own window kinds
+//                              apart, e.g. "browser" vs
+//                              "PictureInPicture")
+//     --map-delay-ms N        Create the window, set every property, then
+//                              wait N ms before XMapWindow() - a slow-
+//                              starting application (its window is
+//                              created long after the process, and the
+//                              WM only sees a MapRequest at the end)
+//     --report-map-latency    Also print "MAP_LATENCY_MS=<x>" once the
+//                              window actually gets mapped, measured
+//                              from this client's own XMapWindow() to
+//                              the MapNotify it receives (i.e. how long
+//                              the window manager sat on it)
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -33,8 +67,16 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <string>
 #include <unistd.h>
+
+static double NowMs()
+{
+    timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+}
 
 int main(int argc, char** argv)
 {
@@ -47,6 +89,13 @@ int main(int argc, char** argv)
     int width = 400, height = 300;
     int r = 100, g = 120, b = 200;
     bool sendDockRequest = false;
+    int dockDelayMs = 0;
+    bool reportMapLatency = false;
+    bool reportEvents = false;
+    bool setPid = false;
+    std::string instanceName;
+    std::string role;
+    int mapDelayMs = 0;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -67,6 +116,13 @@ int main(int argc, char** argv)
             sscanf(c.c_str(), "%d,%d,%d", &r, &g, &b);
         }
         else if (arg == "--send-dock-request") sendDockRequest = true;
+        else if (arg == "--dock-delay-ms") dockDelayMs = atoi(next().c_str());
+        else if (arg == "--report-map-latency") reportMapLatency = true;
+        else if (arg == "--report-events") reportEvents = true;
+        else if (arg == "--set-pid") setPid = true;
+        else if (arg == "--instance") instanceName = next();
+        else if (arg == "--role") role = next();
+        else if (arg == "--map-delay-ms") mapDelayMs = atoi(next().c_str());
     }
 
     Display* display = XOpenDisplay(nullptr);
@@ -95,7 +151,7 @@ int main(int argc, char** argv)
     XStoreName(display, win, title.c_str());
 
     XClassHint classHint{};
-    classHint.res_name = const_cast<char*>(className.c_str());
+    classHint.res_name = const_cast<char*>(instanceName.empty() ? className.c_str() : instanceName.c_str());
     classHint.res_class = const_cast<char*>(className.c_str());
     XSetClassHint(display, win, &classHint);
 
@@ -137,11 +193,40 @@ int main(int argc, char** argv)
                          reinterpret_cast<unsigned char*>(data), 2);
     }
 
+    if (!role.empty())
+    {
+        Atom windowRole = XInternAtom(display, "WM_WINDOW_ROLE", False);
+        XChangeProperty(display, win, windowRole, XA_STRING, 8, PropModeReplace,
+                         reinterpret_cast<const unsigned char*>(role.c_str()), static_cast<int>(role.size()));
+    }
+
+    if (setPid)
+    {
+        Atom netWmPid = XInternAtom(display, "_NET_WM_PID", False);
+        unsigned long pid = static_cast<unsigned long>(getpid());
+        XChangeProperty(display, win, netWmPid, XA_CARDINAL, 32, PropModeReplace,
+                        reinterpret_cast<unsigned char*>(&pid), 1);
+    }
+
+    if (mapDelayMs > 0)
+    {
+        // The window already exists with all its properties; only the
+        // MapRequest is late - exactly what a slow-starting application
+        // looks like to a window manager.
+        std::printf("CREATED=0x%lx PID=%d\n", win, getpid());
+        std::fflush(stdout);
+        usleep(static_cast<useconds_t>(mapDelayMs) * 1000);
+    }
+
+    double mapRequestedAt = NowMs();
     XMapWindow(display, win);
     XFlush(display);
 
     if (sendDockRequest)
     {
+        if (dockDelayMs > 0)
+            usleep(static_cast<useconds_t>(dockDelayMs) * 1000);
+
         // The real freedesktop system tray protocol: find whoever
         // owns _NET_SYSTEM_TRAY_S<screen> (Kohiko's SystemTray, once
         // Initialize()'d) and ask them, via a ClientMessage, to dock
@@ -183,6 +268,25 @@ int main(int argc, char** argv)
     {
         XEvent event;
         XNextEvent(display, &event);
+
+        if (reportMapLatency && event.type == MapNotify && event.xmap.window == win)
+        {
+            std::printf("MAP_LATENCY_MS=%.1f\n", NowMs() - mapRequestedAt);
+            std::fflush(stdout);
+            reportMapLatency = false;
+        }
+
+        if (reportEvents && event.xany.window == win)
+        {
+            if (event.type == MapNotify)
+                std::printf("EVENT=MapNotify\n");
+            else if (event.type == UnmapNotify)
+                std::printf("EVENT=UnmapNotify\n");
+            else if (event.type == ReparentNotify)
+                std::printf("EVENT=ReparentNotify parent=0x%lx root=%d\n", event.xreparent.parent,
+                            event.xreparent.parent == root ? 1 : 0);
+            std::fflush(stdout);
+        }
 
         if (event.type == Expose)
         {

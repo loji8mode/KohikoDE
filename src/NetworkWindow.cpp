@@ -301,7 +301,7 @@ bool NetworkWindow::Initialize()
     m_notifications.Connect();
 
     m_networkManager.Connect(); // fine if this fails - RebuildPage() just shows an unavailable message, see its own comment
-    m_networkManager.SetChangeHandler([this] { m_networkDirty = true; });
+    m_networkManager.SetChangeHandler([this] { ScheduleRebuild(); });
 
     RebuildChrome();
 
@@ -312,14 +312,31 @@ bool NetworkWindow::Initialize()
     if (m_networkManager.Available())
     {
         m_window.WatchFd(m_networkManager.Fd(), [this] { m_networkManager.Dispatch(); });
-        m_networkManager.RequestWiFiScan();
+        m_networkManager.RequestWiFiScanAsync([this](const OperationResult& r) { OnOperationDone(NetworkManagerClient::ScanKey(), r); });
     }
 
-    // Same throttled-rebuild shape as AudioWindow's interval, guarded
-    // by !IsInteracting() so a saved-connection change landing mid-
-    // search-typing (or mid Ethernet/VPN toggle drag) doesn't yank
-    // the tree out from under it - see IsInteracting()'s own comment.
-    m_window.SetInterval(300, [this]
+    // Results of the slow operations arrive on this fd (an eventfd the
+    // worker thread signals when it finishes); the loop sleeps in
+    // poll() until then - there is no timer waiting for them.
+    m_window.WatchFd(m_networkManager.OperationFd(), [this] { m_networkManager.DispatchOperations(); });
+
+    return true;
+}
+
+void NetworkWindow::ScheduleRebuild()
+{
+    m_networkDirty = true;
+
+    if (m_rebuildTimer)
+        return;
+
+    // Same throttled-rebuild shape as before, guarded by
+    // !IsInteracting() so a change landing mid-search-typing (or mid
+    // Ethernet/VPN toggle drag) doesn't yank the tree out from under
+    // it - see IsInteracting()'s own comment. It used to be registered
+    // for the life of the window; now it exists only while a rebuild is
+    // actually waiting and cancels itself once that has run.
+    m_rebuildTimer = m_window.SetInterval(300, [this]
     {
         if (m_networkDirty && !m_window.IsInteracting())
         {
@@ -327,9 +344,30 @@ bool NetworkWindow::Initialize()
             RebuildPage();
             m_window.RequestRedraw();
         }
-    });
 
-    return true;
+        if (!m_networkDirty && m_rebuildTimer)
+        {
+            m_window.CancelInterval(*m_rebuildTimer);
+            m_rebuildTimer.reset();
+        }
+    });
+}
+
+void NetworkWindow::OnOperationDone(const std::string& target, const OperationResult& result)
+{
+    if (result.ok)
+    {
+        m_notes.erase(target);
+    }
+    else
+    {
+        m_notes[target] = { result.message, true };
+
+        if (m_notifications.Available())
+            m_notifications.Notify("Kohiko Network", "network-wireless", "Network", result.message, 8000);
+    }
+
+    ScheduleRebuild();
 }
 
 void NetworkWindow::Run()
@@ -377,7 +415,10 @@ int NetworkWindow::AppendToolbar(Widget& content, int y, int contentWidth)
     wifiToggle->value = wirelessEnabled;
     wifiToggle->enabled = available;
     wifiToggle->bounds = { row1.x + 50, row1.y + (rowHeight - 26) / 2, 46, 26 };
-    wifiToggle->onChange = [this](bool enabled) { m_networkManager.SetWirelessEnabled(enabled); };
+    wifiToggle->onChange = [this](bool enabled)
+    {
+        m_networkManager.SetWirelessEnabledAsync(enabled, [this](const OperationResult& r) { OnOperationDone(NetworkManagerClient::RadioKey(), r); });
+    };
     content.AddChild(std::move(wifiToggle));
 
     int cursorX = row1.x + 50 + 46 + 20;
@@ -414,7 +455,7 @@ int NetworkWindow::AppendToolbar(Widget& content, int y, int contentWidth)
     refresh->bounds = { row1.Right() - rowHeight, row1.y, rowHeight, rowHeight };
     refresh->onClick = [this]
     {
-        m_networkManager.RequestWiFiScan();
+        m_networkManager.RequestWiFiScanAsync([this](const OperationResult& r) { OnOperationDone(NetworkManagerClient::ScanKey(), r); });
         m_networkManager.Refresh();
         RebuildPage();
         m_window.RequestRedraw();
@@ -526,7 +567,18 @@ std::unique_ptr<Widget> NetworkWindow::BuildDetailsPanel(const NetworkDevice& wi
     bool connected = ap.isActiveConnection;
     const UiTheme& theme = UiTheme::Default();
 
-    card->AddChild(MakeDetailRow({ x, y, w, 22 }, "Status", connected ? "Connected" : "Not connected", connected ? theme.accent : 0));
+    // The Status line is where an operation's progress and failure show:
+    // "Working..." while one is pending for this adapter, else the last
+    // failure (full text; also sent as a notification), else the state.
+    const bool busy = m_networkManager.IsBusy(NetworkManagerClient::DeviceKey(wifiDevice.objectPath));
+    auto note = m_notes.find(wifiDevice.objectPath);
+
+    if (busy)
+        card->AddChild(MakeDetailRow({ x, y, w, 22 }, "Status", "Working...", theme.muted));
+    else if (note != m_notes.end())
+        card->AddChild(MakeDetailRow({ x, y, w, 22 }, "Status", note->second.text, theme.danger));
+    else
+        card->AddChild(MakeDetailRow({ x, y, w, 22 }, "Status", connected ? "Connected" : "Not connected", connected ? theme.accent : 0));
     y += 30;
 
     card->AddChild(MakeDetailRow({ x, y, w, 22 }, "Signal Strength", std::to_string(ap.strength) + "%"));
@@ -563,15 +615,20 @@ std::unique_ptr<Widget> NetworkWindow::BuildDetailsPanel(const NetworkDevice& wi
     auto disconnectBtn = std::make_unique<Button>();
     disconnectBtn->label = "Disconnect";
     disconnectBtn->tone = Button::Tone::Danger;
-    disconnectBtn->enabled = connected;
+    disconnectBtn->enabled = connected && !busy;
     disconnectBtn->bounds = { x, y, buttonWidth, buttonHeight };
-    disconnectBtn->onClick = [this, devicePath] { m_networkManager.DisconnectDevice(devicePath); };
+    disconnectBtn->onClick = [this, devicePath]
+    {
+        m_notes.erase(devicePath);
+        m_networkManager.DisconnectDeviceAsync(devicePath, [this, devicePath](const OperationResult& r) { OnOperationDone(devicePath, r); });
+        ScheduleRebuild();
+    };
     card->AddChild(std::move(disconnectBtn));
 
     auto connectBtn = std::make_unique<Button>();
-    connectBtn->label = "Connect";
+    connectBtn->label = busy ? "Connecting..." : "Connect";
     connectBtn->tone = Button::Tone::Accent;
-    connectBtn->enabled = !connected;
+    connectBtn->enabled = !connected && !busy;
     connectBtn->bounds = { x + buttonWidth + buttonGap, y, buttonWidth, buttonHeight };
     connectBtn->onClick = [this, devicePath, apPath, ssid, secured]
     {
@@ -590,10 +647,38 @@ std::unique_ptr<Widget> NetworkWindow::BuildDetailsPanel(const NetworkDevice& wi
         // correctly treats as "activate with whatever's already
         // saved, don't touch it" rather than as "the user wants no
         // password".
-        if (!secured || m_networkManager.HasUsableSavedSecret(ssid))
-            m_networkManager.ConnectToAccessPoint(devicePath, apPath, ssid, "");
-        else
-            PromptAndConnect(devicePath, apPath, ssid, secured);
+        //
+        // Both the secret lookup (it can wait on a keyring/secret-agent
+        // prompt - on the user) and the connect itself now run off the
+        // event loop; the password prompt, a modal dialog the user
+        // answers, is the only thing that still runs here.
+        m_notes.erase(devicePath);
+
+        auto connectNow = [this, devicePath, apPath, ssid]
+        {
+            m_networkManager.ConnectToAccessPointAsync(devicePath, apPath, ssid, "",
+                [this, devicePath](const OperationResult& r) { OnOperationDone(devicePath, r); });
+            ScheduleRebuild();
+        };
+
+        if (!secured)
+        {
+            connectNow();
+            return;
+        }
+
+        // The secrets key is per SSID, so a second click while the
+        // lookup is still running is refused rather than queued.
+        bool started = m_networkManager.HasUsableSavedSecretAsync(ssid,
+            [this, devicePath, apPath, ssid, secured, connectNow](bool usable)
+            {
+                if (usable)
+                    connectNow();
+                else
+                    PromptAndConnect(devicePath, apPath, ssid, secured);
+            });
+
+        (void)started;
     };
     card->AddChild(std::move(connectBtn));
 
@@ -982,12 +1067,19 @@ int NetworkWindow::RebuildAdvancedPage(Widget& content, int contentWidth)
                     auto toggle = std::make_unique<ToggleSwitch>();
                     toggle->value = isActive;
                     toggle->bounds = { 0, 0, 0, 26 };
+                    toggle->enabled = !m_networkManager.IsBusy(NetworkManagerClient::ConnectionKey(connPath));
                     toggle->onChange = [this, connPath](bool enable)
                     {
+                        m_notes.erase(connPath);
+
+                        auto done = [this, connPath](const OperationResult& r) { OnOperationDone(connPath, r); };
+
                         if (enable)
-                            m_networkManager.ActivateSavedConnection(connPath, "/");
+                            m_networkManager.ActivateSavedConnectionAsync(connPath, "/", done);
                         else
-                            m_networkManager.DeactivateConnection(connPath);
+                            m_networkManager.DeactivateConnectionAsync(connPath, done);
+
+                        ScheduleRebuild();
                     };
 
                     row->Layout(rowBounds, std::move(toggle), 46);
@@ -1035,7 +1127,11 @@ void NetworkWindow::PromptAndConnect(const std::string& devicePath, const std::s
     );
 
     if (password.has_value())
-        m_networkManager.ConnectToAccessPoint(devicePath, apPath, ssid, *password);
+    {
+        m_networkManager.ConnectToAccessPointAsync(devicePath, apPath, ssid, *password,
+            [this, devicePath](const OperationResult& r) { OnOperationDone(devicePath, r); });
+        ScheduleRebuild();
+    }
 }
 
 }

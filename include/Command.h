@@ -35,6 +35,10 @@ enum class CommandType
     LauncherToggle,
     NotepadToggle,
 
+    // Open kohiko-choose-window for the focused window - the dialog
+    // that sets its explicit window rule (workspace, side, mode).
+    ChooseWindow,
+
     // `lock` - shows the native lock screen immediately, unless
     // lockscreen.after=never. See LockScreen.h; also triggered
     // automatically before Suspend (see PowerMenu's suspend callback)

@@ -371,6 +371,12 @@ DBusClient::~DBusClient()
 
 bool DBusClient::Connect(Bus bus)
 {
+    // libdbus may only be used from more than one thread if this was
+    // called before its first use (DBusOperationQueue runs a second,
+    // private connection on a worker thread). Idempotent: documented as
+    // safe to call repeatedly, and a no-op once it has succeeded.
+    dbus_threads_init_default();
+
     DBusError error;
     dbus_error_init(&error);
 
@@ -538,12 +544,13 @@ bool DBusClient::SetProperty(
     const std::string& objectPath,
     const std::string& interface,
     const std::string& propertyName,
-    const DBusValue& value)
+    const DBusValue& value,
+    std::string* errorOut)
 {
     return Call(
         destination, objectPath, "org.freedesktop.DBus.Properties", "Set",
         { DBusValue::MakeString(interface), DBusValue::MakeString(propertyName), DBusValue::MakeVariant(value) },
-        nullptr
+        nullptr, errorOut
     );
 }
 

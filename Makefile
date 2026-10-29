@@ -41,11 +41,17 @@ LIBS += $(shell pkg-config --libs xft fontconfig)
 DESKTOP_SHARED_SRC := src/DBusValue.cpp src/DBusClient.cpp src/AppInstanceLock.cpp \
     src/AppConfigStore.cpp src/NotificationClient.cpp src/UiWindow.cpp src/UiWidget.cpp \
     src/UiListRow.cpp src/UiScrollView.cpp src/UiSidebar.cpp src/UiPopupMenu.cpp \
-    src/UiIconCache.cpp src/SvgRenderer.cpp src/TrayIconClient.cpp
+    src/UiIconCache.cpp src/SvgRenderer.cpp src/TrayIconClient.cpp \
+    src/OperationWorker.cpp src/DBusOperationQueue.cpp src/TrayInteraction.cpp
 DESKTOP_APP_ONLY_SRC := src/PipeWireClient.cpp src/NetworkManagerClient.cpp src/BluezClient.cpp \
     src/AudioWindow.cpp src/NetworkWindow.cpp src/BluetoothWindow.cpp
 
-GUI_ONLY_SRC := src/SettingsWindow.cpp $(DESKTOP_SHARED_SRC) $(DESKTOP_APP_ONLY_SRC)
+# kohiko-choose-window's dialog (see include/ChooseWindowDialog.h) is a
+# separate GUI process exactly like kohiko-settings, for the same reason.
+# ChooseWindowModel.cpp has no X11 in it but is part of that tool only.
+CHOOSER_SRC := src/ChooseWindowDialog.cpp src/ChooseWindowModel.cpp
+
+GUI_ONLY_SRC := src/SettingsWindow.cpp $(CHOOSER_SRC) $(DESKTOP_SHARED_SRC) $(DESKTOP_APP_ONLY_SRC)
 
 SRC := $(filter-out $(GUI_ONLY_SRC),$(wildcard src/*.cpp))
 OBJ := $(patsubst src/%.cpp,build/%.o,$(SRC))
@@ -56,7 +62,7 @@ OBJ := $(patsubst src/%.cpp,build/%.o,$(SRC))
 # helpers) - deliberately NOT the whole $(SRC) list above, which is
 # full of WM-only code (BSP layout, EWMH, XRandr monitor handling,
 # ...) kohiko-settings has no use for.
-SETTINGS_SRC := src/SettingsWindow.cpp src/ConfigWriter.cpp src/ConfigSchema.cpp src/Config.cpp src/Utils.cpp src/Font.cpp
+SETTINGS_SRC := src/SettingsWindow.cpp src/ConfigWriter.cpp src/ConfigSchema.cpp src/Config.cpp src/Utils.cpp src/Font.cpp src/WindowRule.cpp src/Logger.cpp
 SETTINGS_OBJ := $(patsubst src/%.cpp,build/%.o,$(SETTINGS_SRC))
 
 ifeq ($(shell pkg-config --exists xrandr && echo yes),yes)
@@ -121,7 +127,7 @@ DESKTOP_COMMON_OBJ := build/Font.o build/Config.o build/IconResolver.o build/Xdg
 
 .PHONY: all clean test install uninstall
 
-all: kohiko kohikoctl kohiko-settings
+all: kohiko kohikoctl kohiko-settings kohiko-choose-window
 
 ifeq ($(KOHIKO_HAVE_PIPEWIRE)-$(KOHIKO_HAVE_DBUS_PKG)-$(KOHIKO_HAVE_LIBRSVG),yes-yes-yes)
 all: kohiko-audio kohiko-network kohiko-bluetooth kohiko-audio-tray kohiko-network-tray kohiko-bluetooth-tray
@@ -149,6 +155,20 @@ kohiko-settings: $(SETTINGS_OBJ) build/kohiko-settings-main.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ -lX11 $(shell pkg-config --libs xft fontconfig)
 
 build/kohiko-settings-main.o: tools/kohiko-settings.cpp | build
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
+
+# kohiko-choose-window: the explicit per-application window rule
+# chooser. Like kohiko-settings it is an ordinary X11 client needing
+# only X11/Xft/fontconfig - deliberately NOT built on the D-Bus/
+# PipeWire/librsvg-based Ui* toolkit, so it exists on every install
+# (its default keybinding must never point at nothing).
+CHOOSER_APP_SRC := $(CHOOSER_SRC) src/WindowRule.cpp src/WindowRuleStore.cpp src/ConfigWriter.cpp src/Config.cpp src/Utils.cpp src/Font.cpp src/Logger.cpp
+CHOOSER_APP_OBJ := $(patsubst src/%.cpp,build/%.o,$(CHOOSER_APP_SRC))
+
+kohiko-choose-window: $(CHOOSER_APP_OBJ) build/kohiko-choose-window-main.o
+	$(CXX) $(CXXFLAGS) $^ -o $@ -lX11 $(shell pkg-config --libs xft fontconfig)
+
+build/kohiko-choose-window-main.o: tools/kohiko-choose-window.cpp | build
 	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
 
 # --- kohiko-audio -----------------------------------------------------------------
@@ -224,12 +244,16 @@ ifeq ($(KOHIKO_HAVE_PIPEWIRE)-$(KOHIKO_HAVE_DBUS_PKG)-$(KOHIKO_HAVE_LIBRSVG),yes
     TEST_NETWORKWINDOW := build/test_networkwindow
     TEST_BLUETOOTHWINDOW := build/test_bluetoothwindow
     TEST_AUDIO_LIVE_DEPS := kohiko-audio kohiko-audio-tray
+    TEST_TRAY_REDRAW := build/tray_redraw_probe
 endif
 
-test: kohiko build/x11_test_client build/test_bsptree build/test_launcherscoring build/test_placementhabits build/test_dbusvalue build/test_sessionstore build/test_configmigration build/test_recoverymode build/test_lockrecovery build/test_appdirwatcher build/test_autologinconfigurator build/test_consoleautologinconfigurator build/test_wallpapermanager build/test_desktopentry build/test_iconresolver build/test_eventloop build/test_windowplacementnotice build/test_rect_clamping build/test_notificationlayout build/test_devicenotificationdiff $(TEST_NETWORKMANAGERCLIENT) $(TEST_SCROLLHITTEST) $(TEST_NETWORKWINDOW) $(TEST_NETWORKMANAGER_LIVE_HARNESS) $(TEST_BLUETOOTHWINDOW) $(TEST_AUDIO_LIVE_DEPS)
+test: kohiko kohikoctl kohiko-choose-window build/x11_test_client build/test_bsptree build/test_launcherscoring build/test_windowrule build/test_windowrulestore build/test_autostartplan build/test_choosewindowmodel build/test_dbusvalue build/test_sessionstore build/test_configmigration build/test_recoverymode build/test_lockrecovery build/test_appdirwatcher build/test_autologinconfigurator build/test_consoleautologinconfigurator build/test_wallpapermanager build/test_desktopentry build/test_iconresolver build/test_eventloop build/test_windowplacementnotice build/test_rect_clamping build/test_notificationlayout build/test_devicenotificationdiff build/test_barlayout build/test_operationworker build/x11_input build/x11_probe build/lock_probe_app build/launch_or_raise_probe $(TEST_NETWORKMANAGERCLIENT) $(TEST_SCROLLHITTEST) $(TEST_NETWORKWINDOW) $(TEST_NETWORKMANAGER_LIVE_HARNESS) $(TEST_BLUETOOTHWINDOW) $(TEST_AUDIO_LIVE_DEPS) $(TEST_TRAY_REDRAW)
 	./build/test_bsptree
 	./build/test_launcherscoring
-	./build/test_placementhabits
+	./build/test_windowrule
+	./build/test_windowrulestore
+	./build/test_autostartplan
+	./build/test_choosewindowmodel
 	./build/test_dbusvalue
 	./build/test_sessionstore
 	./build/test_configmigration
@@ -246,17 +270,35 @@ test: kohiko build/x11_test_client build/test_bsptree build/test_launcherscoring
 	./build/test_rect_clamping
 	./build/test_notificationlayout
 	./build/test_devicenotificationdiff
+	./build/test_barlayout
+	./build/test_operationworker
+	sh tests/test_instance_lock_live.sh
+	sh tests/test_floating_stacking_live.sh
+	sh tests/test_zen_window_rules_live.sh
+	sh tests/test_launcher_live.sh
+	sh tests/test_taskbar_click_live.sh
 	sh tests/test_kohiko_session.sh
 	sh tests/test_networkmanager_live.sh
-	sh tests/test_xembed_dock_timeout.sh
+	sh tests/test_xembed_dock_grace.sh
+	sh tests/test_no_adaptive_placement.sh
+	sh tests/test_window_rules_live.sh
+	sh tests/test_autostart_live.sh
+	sh tests/test_session_restore_live.sh
 ifeq ($(KOHIKO_HAVE_DBUS_PKG),yes)
 	./build/test_networkmanagerclient
+endif
+ifeq ($(KOHIKO_HAVE_LIBRSVG),yes)
+	$(MAKE) build/ui_probe build/tray_contract_probe build/kohiko-bluetooth-fakebus
+	sh tests/test_ui_event_queue_live.sh
+	sh tests/test_tray_contract_live.sh
+	sh tests/test_native_responsive_live.sh
 endif
 ifeq ($(KOHIKO_HAVE_PIPEWIRE)-$(KOHIKO_HAVE_DBUS_PKG)-$(KOHIKO_HAVE_LIBRSVG),yes-yes-yes)
 	./build/test_scrollhittest
 	./build/test_networkwindow
 	./build/test_bluetoothwindow
 	sh tests/test_audio_notification_live.sh
+	sh tests/test_tray_redraw_latency.sh
 endif
 
 build/test_bsptree: tests/test_bsptree.cpp src/BSPTree.cpp src/BSPLeaf.cpp src/BSPSplit.cpp src/ManagedWindow.cpp src/LayoutEngine.cpp | build
@@ -268,10 +310,68 @@ build/test_bsptree: tests/test_bsptree.cpp src/BSPTree.cpp src/BSPLeaf.cpp src/B
 build/test_launcherscoring: tests/test_launcherscoring.cpp src/LauncherScoring.cpp src/Utils.cpp | build
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
 
-# Same reasoning again - pure logic, plus a throwaway XDG_DATA_HOME
-# the test redirects itself to (see the file) so it never touches a
-# real user's actual learned habits.
-build/test_placementhabits: tests/test_placementhabits.cpp src/PlacementHabitStore.cpp src/Xdg.cpp | build
+# Pure logic again: WindowRule's grammar/matching/resolution needs no
+# X11 and no files; WindowRuleStore's tests additionally write throwaway
+# config files in the system temp dir (never anything real).
+build/test_windowrule: tests/test_windowrule.cpp src/WindowRule.cpp src/Config.cpp src/Utils.cpp src/Logger.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
+
+build/test_barlayout: tests/test_barlayout.cpp include/BarLayout.h | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $< -o $@
+
+# OperationWorker is plain C++ + std::thread: no X11, no D-Bus.
+# `make test-operationworker-tsan` also runs it under ThreadSanitizer.
+build/test_operationworker: tests/test_operationworker.cpp src/OperationWorker.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ -pthread
+
+.PHONY: test-operationworker-tsan
+test-operationworker-tsan: tests/test_operationworker.cpp src/OperationWorker.cpp | build
+	$(CXX) -std=c++20 -O1 -g -fsanitize=thread $(INCLUDES) $^ -o build/test_operationworker_tsan -pthread
+	./build/test_operationworker_tsan
+
+# Real XTEST input and a read-only look at what the X server actually has
+# (stacking order, pixels, grabs): see the headers of these two files.
+build/x11_input: tests/live/x11_input.cpp | build
+	$(CXX) $(CXXFLAGS) -Wall -Wextra $< -o $@ -lX11
+
+build/x11_probe: tests/live/x11_probe.cpp | build
+	$(CXX) $(CXXFLAGS) -Wall -Wextra $< -o $@ -lX11
+
+# Single-instance (AppInstanceLock) probes - no X11 needed.
+build/lock_probe_app: tests/live/lock_probe_app.cpp src/AppInstanceLock.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
+
+build/launch_or_raise_probe: tests/live/launch_or_raise_probe.cpp src/AppInstanceLock.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
+
+# --- test doubles: the real native apps against a scripted fake bus --------------
+#
+# tests/fakes/FakeDBusClient.cpp implements DBusClient's public API
+# in-process (see its header comment), so kohiko-bluetooth / its real
+# BluezClient / the worker queue / UiWindow can be driven under Xvfb with
+# no D-Bus daemon, BlueZ or NetworkManager - and with latencies and
+# errors the test chooses. Needs librsvg (SvgRenderer) but not libdbus.
+FAKEBUS_SHARED_OBJ := $(filter-out build/DBusClient.o,$(DESKTOP_SHARED_OBJ)) build/FakeDBusClient.o
+
+build/FakeDBusClient.o: tests/fakes/FakeDBusClient.cpp | build
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCLUDES) -c $< -o $@
+
+build/kohiko-bluetooth-fakebus: $(FAKEBUS_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) build/BluezClient.o build/BluetoothWindow.o build/kohiko-bluetooth-main.o
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LIBS) $(RSVG_LIBS) -pthread
+
+build/ui_probe: tests/live/ui_probe.cpp $(FAKEBUS_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ $(LIBS) $(RSVG_LIBS) -pthread
+
+build/tray_contract_probe: tests/live/tray_contract_probe.cpp $(FAKEBUS_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ $(LIBS) $(RSVG_LIBS) -pthread
+
+build/test_choosewindowmodel: tests/test_choosewindowmodel.cpp src/ChooseWindowModel.cpp src/WindowRule.cpp src/Config.cpp src/Utils.cpp src/Logger.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
+
+build/test_autostartplan: tests/test_autostartplan.cpp src/AutostartPlan.cpp src/Utils.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
+
+build/test_windowrulestore: tests/test_windowrulestore.cpp src/WindowRuleStore.cpp src/WindowRule.cpp src/ConfigWriter.cpp src/Config.cpp src/Utils.cpp src/Logger.cpp | build
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
 
 # DBusValue is pure data-structure logic too (no actual D-Bus
@@ -279,7 +379,7 @@ build/test_placementhabits: tests/test_placementhabits.cpp src/PlacementHabitSto
 build/test_dbusvalue: tests/test_dbusvalue.cpp src/DBusValue.cpp | build
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
 
-# Like test_placementhabits, this only exercises Load()'s on-disk
+# Like test_windowrule, this only exercises Load()'s on-disk
 # format by hand-writing session files (no live X11/XRandr connection
 # needed - see the file itself), but SessionStore.cpp's Save() still
 # references the full Monitor/Workspace/BSP chain, so that has to be
@@ -346,7 +446,7 @@ build/test_wallpapermanager: tests/test_wallpapermanager.cpp src/WallpaperManage
 # autostart fix (see WindowManager::RunXdgAutostartEntries()'s own
 # comment). Redirects XDG_CONFIG_HOME/XDG_CONFIG_DIRS/PATH to
 # throwaway temp locations itself (see the file), same as
-# test_placementhabits redirecting XDG_DATA_HOME.
+# test_sessionstore redirecting XDG_DATA_HOME.
 build/test_desktopentry: tests/test_desktopentry.cpp src/DesktopEntry.cpp src/IniFile.cpp src/Xdg.cpp src/Utils.cpp | build
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
 
@@ -416,7 +516,7 @@ build/test_networkmanager_live_harness: tests/live/test_networkmanager_live_harn
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ $(LIBS)
 
 # Plain X11 client (no Kohiko headers/objects at all) driving
-# tests/test_xembed_dock_timeout.sh - see that script and
+# tests/test_xembed_dock_grace.sh - see that script and
 # tests/live/x11_test_client.cpp's own header comment.
 build/x11_test_client: tests/live/x11_test_client.cpp | build
 	$(CXX) $(CXXFLAGS) -Wall -Wextra $< -o $@ -lX11
@@ -500,6 +600,12 @@ build/test_trayiconclient: tests/test_trayiconclient.cpp $(DESKTOP_SHARED_OBJ) $
 test-trayiconclient-timers: build/test_trayiconclient_timers
 	./build/test_trayiconclient_timers
 
+# Live tray-redraw-latency probe (see tests/test_tray_redraw_latency.sh):
+# the real TrayIconClient docked into a real kohiko tray, measured from
+# a second X connection.
+build/tray_redraw_probe: tests/live/tray_redraw_probe.cpp $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ $(LIBS) $(RSVG_LIBS)
+
 build/test_trayiconclient_timers: tests/test_trayiconclient_timers.cpp $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) | build
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ $(LIBS) $(RSVG_LIBS)
 
@@ -528,10 +634,11 @@ build/test_notificationcenter: tests/test_notificationcenter.cpp $(DESKTOP_COMMO
 # other XDG-compliant one) through completely ordinary desktop-file
 # indexing - nothing is hardcoded into Launcher.cpp/AppIndex.cpp
 # to make that happen.
-install: kohiko kohikoctl kohiko-settings
+install: kohiko kohikoctl kohiko-settings kohiko-choose-window
 	install -Dm755 kohiko $(DESTDIR)/usr/local/bin/kohiko
 	install -Dm755 kohikoctl $(DESTDIR)/usr/local/bin/kohikoctl
 	install -Dm755 kohiko-settings $(DESTDIR)/usr/local/bin/kohiko-settings
+	install -Dm755 kohiko-choose-window $(DESTDIR)/usr/local/bin/kohiko-choose-window
 	install -Dm644 config/default.conf $(DESTDIR)/usr/local/share/kohiko/default.conf
 	for wallpaper in assets/wallpapers/*.png; do \
 		install -Dm644 "$$wallpaper" "$(DESTDIR)/usr/local/share/kohiko/wallpapers/$$(basename $$wallpaper)"; \
@@ -647,7 +754,7 @@ uninstall-desktop-apps:
 endif
 
 clean:
-	rm -rf build kohiko kohikoctl kohiko-settings \
+	rm -rf build kohiko kohikoctl kohiko-settings kohiko-choose-window \
 		kohiko-audio kohiko-network kohiko-bluetooth \
 		kohiko-audio-tray kohiko-network-tray kohiko-bluetooth-tray
 

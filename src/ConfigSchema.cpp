@@ -52,41 +52,46 @@ const std::vector<ConfigOption>& ConfigSchema::All()
             "Same floor as general.min_tile_width, for height.",
             {}
         },
+        // ==================================================================
+        // Autostart - the ONE place that controls launching programs.
+        // (Per-workspace launch lines workspace<N>= are built by
+        // SettingsWindow::BuildWorkspaceFields() into this same tab.)
+        // ==================================================================
         {
-            "General", "Autostart", "auto_start_programs", ConfigValueType::String, "Telegram discord zen-browser flameshot",
-            "Space-separated programs launched once, automatically, right "
-            "after Kohiko finishes starting up - no keybind needed. Each runs "
-            "exactly like an exec.<name>= command (through /bin/sh -c, on "
-            "this session's DISPLAY). Leave empty to autostart nothing. Want "
-            "one of these on a specific workspace instead of wherever's "
-            "current? Use the Workspaces category's per-workspace autostart "
-            "fields instead of (not in addition to) this one.",
+            "Autostart", "Programs", "auto_start_programs", ConfigValueType::String, "flameshot",
+            "Space-separated programs launched once per login session, right "
+            "after Kohiko starts - no keybind needed. Each runs exactly like "
+            "an exec.<n>= command (through /bin/sh -c, on this session's "
+            "DISPLAY). Leave empty to launch nothing. This only LAUNCHES "
+            "programs: where their windows go is decided by Window Rules (or "
+            "by a \"Launch on workspace\" line below). A program that is "
+            "also listed on a workspace line below, or that has its own "
+            "~/.config/autostart entry, is still started only once - the "
+            "workspace line wins, then this list, then the autostart entry - "
+            "and Kohiko logs which duplicate it skipped. Restarting Kohiko "
+            "inside the same login session does not launch these again.",
             {}
         },
+
+        // ==================================================================
+        // Window Rules - where specific applications' windows are managed.
+        // (The rules themselves are the windowrule= lines, edited by the
+        // structured editor SettingsWindow::BuildRawBlocks() adds to this
+        // same tab, or with kohiko-choose-window.)
+        // ==================================================================
         {
-            "General", "Session Restore", "session.restore_priority", ConfigValueType::Enum, "config",
-            "When a window's saved session state and a matching windowrule= "
-            "disagree (e.g. it was on workspace 1 last time Kohiko exited, "
-            "but a windowrule now pins it to workspace 3), which one wins. "
-            "'config' keeps your windowrule=s authoritative; 'session' prefers "
-            "whatever was actually true last time you used it. Recommended: "
-            "config, unless you're actively relying on session restore to "
-            "remember placements you're not ready to write permanent rules "
-            "for yet.",
+            "Window Rules", "Session restore", "session.restore_priority", ConfigValueType::Enum, "config",
+            "What happens when a window was restored from the previous "
+            "session (it was already open when Kohiko started) and one of "
+            "your Window Rules above disagrees with where it was - say it "
+            "was on workspace 1 when Kohiko last exited, but a rule now puts "
+            "that application on workspace 3. 'config' keeps your rules "
+            "authoritative, so the same rule always gives the same "
+            "placement (recommended). 'session' puts the window back exactly "
+            "where it was instead. Only affects windows that were already "
+            "open when Kohiko started; every window opened afterwards just "
+            "follows its rules.",
             {"config", "session"}
-        },
-        {
-            "General", "Session Restore", "general.adaptive_placement", ConfigValueType::Boolean, "true",
-            "Learns, per application, which workspace and which side of the "
-            "tiling layout you repeatedly move its windows to by hand, and "
-            "starts placing new windows of that application there "
-            "automatically once the pattern is clear and consistent - during "
-            "an ordinary session, not just after a restart. Never overrides "
-            "an explicit windowrule= or a precise Session Restore match; only "
-            "fills in when neither has an opinion. Turn off to open every "
-            "new window using only the ordinary placement rules, with no "
-            "learned habits at all.",
-            {}
         },
 
         // ==================================================================

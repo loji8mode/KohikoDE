@@ -75,6 +75,8 @@ file(GLOB KOHIKO_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/*.cpp)
 # the GUI-only exclusion, for the same "lightweight WM binary" reason.
 list(REMOVE_ITEM KOHIKO_SOURCES
     ${CMAKE_SOURCE_DIR}/src/SettingsWindow.cpp
+    ${CMAKE_SOURCE_DIR}/src/ChooseWindowDialog.cpp
+    ${CMAKE_SOURCE_DIR}/src/ChooseWindowModel.cpp
     ${CMAKE_SOURCE_DIR}/src/DBusValue.cpp
     ${CMAKE_SOURCE_DIR}/src/DBusClient.cpp
     ${CMAKE_SOURCE_DIR}/src/AppInstanceLock.cpp
@@ -89,6 +91,9 @@ list(REMOVE_ITEM KOHIKO_SOURCES
     ${CMAKE_SOURCE_DIR}/src/UiIconCache.cpp
     ${CMAKE_SOURCE_DIR}/src/SvgRenderer.cpp
     ${CMAKE_SOURCE_DIR}/src/TrayIconClient.cpp
+    ${CMAKE_SOURCE_DIR}/src/OperationWorker.cpp
+    ${CMAKE_SOURCE_DIR}/src/DBusOperationQueue.cpp
+    ${CMAKE_SOURCE_DIR}/src/TrayInteraction.cpp
     ${CMAKE_SOURCE_DIR}/src/PipeWireClient.cpp
     ${CMAKE_SOURCE_DIR}/src/NetworkManagerClient.cpp
     ${CMAKE_SOURCE_DIR}/src/BluezClient.cpp
@@ -148,10 +153,36 @@ add_executable(kohiko-settings
     src/Config.cpp
     src/Utils.cpp
     src/Font.cpp
+    src/WindowRule.cpp
+    src/Logger.cpp
 )
 target_include_directories(kohiko-settings PRIVATE ${CMAKE_SOURCE_DIR}/include ${X11_INCLUDE_DIR})
 target_link_libraries(kohiko-settings PRIVATE ${X11_LIBRARIES} PkgConfig::Xft)
 target_compile_options(kohiko-settings PRIVATE -Wall -Wextra)
+
+# --- kohiko-choose-window: the explicit per-application window rule chooser ------
+#
+# Another completely ordinary X11 client (see include/ChooseWindowDialog.h):
+# the popup `choose_window` (SUPER+SHIFT+W in the default config) opens for
+# the focused window, plus --list/--show/--set/--delete for scripting. Like
+# kohiko-settings it needs only X11/Xft/fontconfig and deliberately NOT the
+# D-Bus/PipeWire/librsvg-based Ui* toolkit, so it exists on every install -
+# its default keybinding must never point at nothing.
+add_executable(kohiko-choose-window
+    tools/kohiko-choose-window.cpp
+    src/ChooseWindowDialog.cpp
+    src/ChooseWindowModel.cpp
+    src/WindowRule.cpp
+    src/WindowRuleStore.cpp
+    src/ConfigWriter.cpp
+    src/Config.cpp
+    src/Utils.cpp
+    src/Font.cpp
+    src/Logger.cpp
+)
+target_include_directories(kohiko-choose-window PRIVATE ${CMAKE_SOURCE_DIR}/include ${X11_INCLUDE_DIR})
+target_link_libraries(kohiko-choose-window PRIVATE ${X11_LIBRARIES} PkgConfig::Xft)
+target_compile_options(kohiko-choose-window PRIVATE -Wall -Wextra)
 
 # --- kohiko-audio / kohiko-network / kohiko-bluetooth + tray widgets -------------
 #
@@ -200,6 +231,9 @@ if(KOHIKO_DESKTOP_APPS_AVAILABLE)
         src/UiIconCache.cpp
         src/SvgRenderer.cpp
         src/TrayIconClient.cpp
+        src/OperationWorker.cpp
+        src/DBusOperationQueue.cpp
+        src/TrayInteraction.cpp
         src/NotificationPopup.cpp
         src/NotificationCenter.cpp
         src/Font.cpp
@@ -288,15 +322,48 @@ add_executable(test_launcherscoring
 target_include_directories(test_launcherscoring PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME LauncherScoring COMMAND test_launcherscoring)
 
-# Pure logic + a throwaway XDG_DATA_HOME the test redirects itself to
-# (see the file) - no X11 display needed.
-add_executable(test_placementhabits
-    tests/test_placementhabits.cpp
-    src/PlacementHabitStore.cpp
-    src/Xdg.cpp
+# Pure logic - no X11 display needed. test_windowrulestore additionally
+# writes throwaway config files in the system temp dir.
+add_executable(test_windowrule
+    tests/test_windowrule.cpp
+    src/WindowRule.cpp
+    src/Config.cpp
+    src/Utils.cpp
+    src/Logger.cpp
 )
-target_include_directories(test_placementhabits PRIVATE ${CMAKE_SOURCE_DIR}/include)
-add_test(NAME PlacementHabitStore COMMAND test_placementhabits)
+target_include_directories(test_windowrule PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME WindowRule COMMAND test_windowrule)
+
+add_executable(test_choosewindowmodel
+    tests/test_choosewindowmodel.cpp
+    src/ChooseWindowModel.cpp
+    src/WindowRule.cpp
+    src/Config.cpp
+    src/Utils.cpp
+    src/Logger.cpp
+)
+target_include_directories(test_choosewindowmodel PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME ChooseWindowModel COMMAND test_choosewindowmodel)
+
+add_executable(test_autostartplan
+    tests/test_autostartplan.cpp
+    src/AutostartPlan.cpp
+    src/Utils.cpp
+)
+target_include_directories(test_autostartplan PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME AutostartPlan COMMAND test_autostartplan)
+
+add_executable(test_windowrulestore
+    tests/test_windowrulestore.cpp
+    src/WindowRuleStore.cpp
+    src/WindowRule.cpp
+    src/ConfigWriter.cpp
+    src/Config.cpp
+    src/Utils.cpp
+    src/Logger.cpp
+)
+target_include_directories(test_windowrulestore PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME WindowRuleStore COMMAND test_windowrulestore)
 
 # Needs a real X11/XRandR connection (skips its X-dependent checks
 # gracefully if $DISPLAY isn't set - see the file for why) - the same
@@ -379,7 +446,7 @@ add_test(NAME Bar COMMAND test_bar)
 
 # Pure data-structure logic (no D-Bus connection involved - see the
 # file itself), same category as test_launcherscoring/
-# test_placementhabits above.
+# test_windowrule above.
 add_executable(test_dbusvalue
     tests/test_dbusvalue.cpp
     src/DBusValue.cpp
@@ -387,7 +454,7 @@ add_executable(test_dbusvalue
 target_include_directories(test_dbusvalue PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME DBusValue COMMAND test_dbusvalue)
 
-# Like test_placementhabits, only exercises Load()'s on-disk format by
+# Like test_windowrule, only exercises Load()'s on-disk format by
 # hand-writing session files - no X11/XRandR connection needed (see
 # the file itself) - but SessionStore.cpp's Save() still references
 # the full Monitor/Workspace/BSP chain, so that has to be linked in
@@ -433,6 +500,8 @@ add_executable(test_configmigration
 )
 target_include_directories(test_configmigration PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME ConfigMigration COMMAND test_configmigration)
+# Reads config/default.conf (see the test) - run from the source root.
+set_tests_properties(ConfigMigration PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # Pure logic + plain file I/O too - no X11, no real crash involved,
 # just the marker file described in RecoveryMode.h's own comment.
@@ -694,7 +763,7 @@ add_test(
 )
 
 # Plain X11 client (no Kohiko headers/objects) driving
-# test_xembed_dock_timeout.sh - see that script and
+# test_xembed_dock_grace.sh - see that script and
 # tests/live/x11_test_client.cpp's own header comment. Unconditional,
 # same as the kohiko target itself - only needs libX11, already a hard
 # requirement for the whole project.
@@ -702,19 +771,44 @@ add_executable(x11_test_client tests/live/x11_test_client.cpp)
 target_include_directories(x11_test_client PRIVATE ${X11_INCLUDE_DIR})
 target_link_libraries(x11_test_client PRIVATE ${X11_LIBRARIES})
 
-# Live regression test for the 0.20.4 XEmbed dock-timeout fallback fix
-# (see CHANGELOG.md) - runs the real `kohiko` target as an actual
+# Live regression test for the XEmbed dock hold (0.20.4 added it; 0.22.0
+# fixed its 2-3 s cost on every Qt window - see CHANGELOG.md) - runs the real `kohiko` target as an actual
 # window manager under Xvfb, gracefully skipped by the script itself
 # if Xvfb/xwininfo aren't available.
 add_test(
-    NAME XEmbedDockTimeout
-    COMMAND sh ${CMAKE_SOURCE_DIR}/tests/test_xembed_dock_timeout.sh
+    NAME XEmbedDockGrace
+    COMMAND sh ${CMAKE_SOURCE_DIR}/tests/test_xembed_dock_grace.sh
         $<TARGET_FILE:kohiko> $<TARGET_FILE:x11_test_client>
+)
+
+# Live end-to-end tests (0.22.0): the real kohiko under Xvfb, real X11
+# clients, kohikoctl, and the real kohiko-choose-window - see each
+# script's own header for exactly what it pins down. All gracefully skip
+# (exit 0) when Xvfb isn't available.
+add_test(
+    NAME NoAdaptivePlacement
+    COMMAND sh ${CMAKE_SOURCE_DIR}/tests/test_no_adaptive_placement.sh
+)
+add_test(
+    NAME WindowRulesLive
+    COMMAND sh ${CMAKE_SOURCE_DIR}/tests/test_window_rules_live.sh
+        $<TARGET_FILE:kohiko> $<TARGET_FILE:kohikoctl>
+        $<TARGET_FILE:kohiko-choose-window> $<TARGET_FILE:x11_test_client>
+)
+add_test(
+    NAME AutostartLive
+    COMMAND sh ${CMAKE_SOURCE_DIR}/tests/test_autostart_live.sh
+        $<TARGET_FILE:kohiko> $<TARGET_FILE:kohikoctl> $<TARGET_FILE:x11_test_client>
+)
+add_test(
+    NAME SessionRestoreLive
+    COMMAND sh ${CMAKE_SOURCE_DIR}/tests/test_session_restore_live.sh
+        $<TARGET_FILE:kohiko> $<TARGET_FILE:kohikoctl> $<TARGET_FILE:x11_test_client>
 )
 
 # --- install ------------------------------------------------------------------------
 
-install(TARGETS kohiko kohikoctl kohiko-settings RUNTIME DESTINATION bin)
+install(TARGETS kohiko kohikoctl kohiko-settings kohiko-choose-window RUNTIME DESTINATION bin)
 install(FILES config/default.conf DESTINATION share/kohiko)
 file(GLOB WALLPAPER_ASSETS ${CMAKE_SOURCE_DIR}/assets/wallpapers/*.png)
 install(FILES ${WALLPAPER_ASSETS} DESTINATION share/kohiko/wallpapers)

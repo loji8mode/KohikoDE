@@ -128,6 +128,19 @@ Command Command::Parse(const std::string& text)
     {
         command.type = CommandType::NotepadToggle;
     }
+    else if (action == "choose_window" || action == "choosewindow")
+    {
+        command.type = CommandType::ChooseWindow;
+
+        // Optional scope: `choose_window` edits the rule for the whole
+        // application (as always); `choose_window role` edits the rule
+        // for just windows with the focused window's WM_WINDOW_ROLE,
+        // `choose_window type` for its window type, `choose_window
+        // role+type` for both. See WindowRuleStore / RuleScope.
+        std::string scope;
+        stream >> scope;
+        command.stringArg = Utils::Lower(scope);
+    }
     else if (action == "lock")
     {
         command.type = CommandType::Lock;

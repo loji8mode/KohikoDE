@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DBusClient.h"
+#include "DBusOperationQueue.h"
 
 #include <cstdint>
 #include <functional>
@@ -81,12 +82,52 @@ public:
     void SetDeviceTrusted(const std::string& devicePath, bool trusted);
     void RemoveDevice(const std::string& adapterPath, const std::string& devicePath);
 
+    // --- Asynchronous operations -------------------------------------
+    //
+    // The methods above block the calling thread for as long as BlueZ
+    // takes (Pair up to 30 s, Connect up to 15 s, the rest 4 s) and
+    // swallow every error. A window must not call them from its event
+    // loop - the whole window freezes, cannot be moved or closed, until
+    // BlueZ answers. These do the same work on a worker thread with its
+    // own private D-Bus connection (see DBusOperationQueue), return at
+    // once, and report the outcome - including BlueZ's own error text -
+    // to `done`, which runs on the CALLING thread from
+    // DispatchOperations() (never concurrently with the UI).
+    //
+    // Each returns false, and runs nothing, if the same target already
+    // has an operation pending (a double click cannot pair twice).
+    //
+    // Wiring: WatchFd(OperationFd(), [&]{ DispatchOperations(); }).
+    using Completion = OperationWorker::Completion;
+
+    bool PairAndConnectAsync(const std::string& devicePath, Completion done);
+    bool ConnectDeviceAsync(const std::string& devicePath, Completion done);
+    bool DisconnectDeviceAsync(const std::string& devicePath, Completion done);
+    bool RemoveDeviceAsync(const std::string& adapterPath, const std::string& devicePath, Completion done);
+    bool DisconnectAndRemoveAsync(const std::string& adapterPath, const std::string& devicePath, Completion done);
+    bool SetDeviceTrustedAsync(const std::string& devicePath, bool trusted, Completion done);
+    bool SetAdapterPoweredAsync(const std::string& adapterPath, bool powered, Completion done);
+    bool SetAdapterDiscoverableAsync(const std::string& adapterPath, bool discoverable, Completion done);
+    bool StartDiscoveryAsync(const std::string& adapterPath, Completion done);
+
+    int OperationFd() const;
+    void DispatchOperations();
+
+    // The key identifying "an operation on this device / adapter".
+    static std::string DeviceKey(const std::string& devicePath);
+    static std::string AdapterKey(const std::string& adapterPath);
+
+    bool IsDeviceBusy(const std::string& devicePath) const;
+    bool IsAdapterBusy(const std::string& adapterPath) const;
+    bool AnyOperationPending() const;
+
     using ChangeHandler = std::function<void()>;
     void SetChangeHandler(ChangeHandler handler);
 
 private:
 
     DBusClient m_bus;
+    DBusOperationQueue m_ops{ DBusClient::Bus::System };
     std::vector<BluetoothAdapter> m_adapters;
     std::vector<BluetoothDevice> m_devices;
     ChangeHandler m_changeHandler;

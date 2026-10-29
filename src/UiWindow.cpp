@@ -155,13 +155,30 @@ void UiWindow::WatchFd(int fd, FdCallback callback)
         m_fdWatches.push_back({ fd, std::move(callback) });
 }
 
-void UiWindow::SetInterval(int intervalMs, TimerCallback callback)
+UiWindow::TimerId UiWindow::SetInterval(int intervalMs, TimerCallback callback)
 {
+    TimerId id = m_nextTimerId++;
+
     m_timers.push_back({
         std::chrono::milliseconds(intervalMs),
         std::chrono::steady_clock::now() + std::chrono::milliseconds(intervalMs),
-        std::move(callback)
+        std::move(callback),
+        id,
+        false
     });
+
+    return id;
+}
+
+void UiWindow::CancelInterval(TimerId id)
+{
+    // Only flagged: this may be running inside that very timer's
+    // callback, inside Run()'s loop over m_timers. Run() erases it.
+    for (Timer& timer : m_timers)
+    {
+        if (timer.id == id)
+            timer.cancelled = true;
+    }
 }
 
 void UiWindow::RaiseAndFocus()
@@ -491,8 +508,43 @@ void UiWindow::Run()
     m_running = true;
     int x11Fd = ConnectionNumber(m_display);
 
+    // Xlib keeps its own event queue in FRONT of the raw socket. Any
+    // call in this process that waits for a server reply (XSync,
+    // XGetImage, XQueryPointer, a font or icon query ... anywhere,
+    // including inside an fd-watch or timer callback below) reads
+    // whatever else is waiting on the socket while it waits and parks
+    // those events in that queue. poll() on the raw fd only reports
+    // NEW socket data, so an event parked there - a WM_DELETE_WINDOW
+    // (the window's close button), a ConfigureNotify (a move/resize), a
+    // button press - stayed invisible until some unrelated later event
+    // happened to wake poll() again: a window that "cannot be closed
+    // or moved" for as long as nothing else touched it. TrayIconClient
+    // fixed exactly this in 0.21.x; this loop never got the same fix.
+    // So the queue is drained unconditionally - before blocking (this
+    // is also what flushes our own pending requests) and again after
+    // waking - instead of only when poll() reports the X socket.
+    // XPending() is an in-memory check first, so this costs nothing
+    // when there is really nothing there.
+    auto drainXEvents = [&]
+    {
+        while (m_running && XPending(m_display))
+        {
+            XEvent event;
+            XNextEvent(m_display, &event);
+            HandleEvent(event);
+
+            if (m_extraEventHandler)
+                m_extraEventHandler(event);
+        }
+    };
+
     while (m_running)
     {
+        drainXEvents();
+
+        if (!m_running)
+            break;
+
         if (m_dirty)
             Redraw();
 
@@ -516,8 +568,14 @@ void UiWindow::Run()
 
         for (auto& timer : m_timers)
         {
+            if (timer.cancelled)
+                continue;
+
+            // Rounded UP to a whole millisecond (see TrayIconClient::Run()):
+            // truncating made the loop spin on poll(..., 0) for up to a
+            // millisecond before every timer.
             int remaining = std::max<int>(0,
-                static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(timer.next - now).count()));
+                static_cast<int>(std::chrono::ceil<std::chrono::milliseconds>(timer.next - now).count()));
 
             timeoutMs = haveDeadline ? std::min(timeoutMs, remaining) : remaining;
             haveDeadline = true;
@@ -525,34 +583,37 @@ void UiWindow::Run()
 
         poll(pfds.data(), pfds.size(), haveDeadline ? timeoutMs : -1);
 
-        if (pfds[0].revents & POLLIN)
-        {
-            while (XPending(m_display))
-            {
-                XEvent event;
-                XNextEvent(m_display, &event);
-                HandleEvent(event);
+        drainXEvents();
 
-                if (m_extraEventHandler)
-                    m_extraEventHandler(event);
-            }
-        }
-
-        for (std::size_t i = 0; i < m_fdWatches.size(); ++i)
+        for (std::size_t i = 0; i < m_fdWatches.size() && m_running; ++i)
         {
             if (pfds[i + 1].revents & POLLIN)
                 m_fdWatches[i].callback();
         }
 
+        // Index-based: a callback may register or cancel timers, which
+        // can reallocate the vector under a range-for's reference.
         now = std::chrono::steady_clock::now();
-        for (auto& timer : m_timers)
+        for (std::size_t i = 0; i < m_timers.size() && m_running; ++i)
         {
-            if (now >= timer.next)
+            if (m_timers[i].cancelled || now < m_timers[i].next)
+                continue;
+
+            TimerCallback callback = m_timers[i].callback;
+            TimerId id = m_timers[i].id;
+
+            callback();
+
+            for (Timer& timer : m_timers)
             {
-                timer.callback();
-                timer.next = now + timer.interval;
+                if (timer.id == id)
+                    timer.next = now + timer.interval;
             }
         }
+
+        m_timers.erase(
+            std::remove_if(m_timers.begin(), m_timers.end(), [](const Timer& t) { return t.cancelled; }),
+            m_timers.end());
     }
 }
 

@@ -1,6 +1,8 @@
 #include "AppInstanceLock.h"
 #include "BluezClient.h"
+#include "NotificationClient.h"
 #include "TrayIconClient.h"
+#include "TrayInteraction.h"
 #include "UiIconCache.h"
 #include "UiPopupMenu.h"
 
@@ -100,68 +102,74 @@ int main()
         }
     });
 
-    tray.SetRightClickHandler([]
-    {
-        AppInstanceLock::LaunchOrRaise("kohiko-bluetooth", "kohiko-bluetooth");
-    });
+    // The one mouse contract of Kohiko's native tray utilities (see
+    // TrayInteraction.h): left click = open/raise the Bluetooth window,
+    // right click = this quick menu. The menu's actions are all
+    // asynchronous: they return at once, the result is applied when
+    // BlueZ answers, and a failure is shown as a desktop notification
+    // instead of silently doing nothing.
+    tray.WatchFd(bluez.OperationFd(), [&] { bluez.DispatchOperations(); });
 
-    tray.SetLeftClickHandler([&]
-    {
-        PopupMenu menu;
+    NotificationClient notifications;
+    notifications.Connect();
 
+    auto report = [&notifications](const OperationResult& result)
+    {
+        if (!result.ok && notifications.Available())
+            notifications.Notify("Kohiko Bluetooth", "bluetooth", "Bluetooth", result.message, 8000);
+    };
+
+    TrayInteraction::Spec spec;
+    spec.appId = "kohiko-bluetooth";
+    spec.executable = "kohiko-bluetooth";
+    spec.openLabel = "Open Bluetooth Settings";
+    spec.buildMenu = [&bluez, report](PopupMenu& menu)
+    {
         if (!bluez.Available() || bluez.Adapters().empty())
         {
             menu.AddItem("Bluetooth is not available", nullptr, false);
+            return;
         }
-        else
+
+        const BluetoothAdapter& adapter = bluez.Adapters().front();
+        std::string adapterPath = adapter.objectPath;
+        bool powered = adapter.powered;
+
+        menu.AddItem(powered ? "Turn Bluetooth off" : "Turn Bluetooth on",
+            [&bluez, adapterPath, powered, report] { bluez.SetAdapterPoweredAsync(adapterPath, !powered, report); });
+
+        if (powered)
         {
-            const BluetoothAdapter& adapter = bluez.Adapters().front();
-            std::string adapterPath = adapter.objectPath;
-            bool powered = adapter.powered;
+            menu.AddSeparator();
 
-            menu.AddItem(powered ? "Turn Bluetooth off" : "Turn Bluetooth on",
-                [&bluez, adapterPath, powered] { bluez.SetAdapterPowered(adapterPath, !powered); });
-
-            if (powered)
+            bool anyDevice = false;
+            for (auto& device : bluez.Devices())
             {
-                menu.AddSeparator();
+                if (!device.paired)
+                    continue;
 
-                bool anyDevice = false;
-                for (auto& device : bluez.Devices())
+                anyDevice = true;
+                std::string label = (device.connected ? "\u2713 " : "   ") + device.name;
+                std::string devicePath = device.objectPath;
+                bool connected = device.connected;
+
+                menu.AddItem(label, [&bluez, devicePath, connected, report]
                 {
-                    if (!device.paired)
-                        continue;
-
-                    anyDevice = true;
-                    std::string label = (device.connected ? "\u2713 " : "   ") + device.name;
-                    std::string devicePath = device.objectPath;
-                    bool connected = device.connected;
-
-                    menu.AddItem(label, [&bluez, devicePath, connected]
-                    {
-                        if (connected)
-                            bluez.DisconnectDevice(devicePath);
-                        else
-                            bluez.ConnectDevice(devicePath);
-                    });
-                }
-
-                if (!anyDevice)
-                    menu.AddItem("No paired devices", nullptr, false);
-
-                menu.AddSeparator();
+                    if (connected)
+                        bluez.DisconnectDeviceAsync(devicePath, report);
+                    else
+                        bluez.ConnectDeviceAsync(devicePath, report);
+                });
             }
+
+            if (!anyDevice)
+                menu.AddItem("No paired devices", nullptr, false);
         }
 
-        menu.AddItem("Open Bluetooth Settings", [] { AppInstanceLock::LaunchOrRaise("kohiko-bluetooth", "kohiko-bluetooth"); });
+        menu.AddSeparator();
+    };
 
-        Window rootReturn, childReturn;
-        int rootX, rootY, winX, winY;
-        unsigned int mask;
-        XQueryPointer(tray.GetDisplay(), tray.GetWindow(), &rootReturn, &childReturn, &rootX, &rootY, &winX, &winY, &mask);
-
-        menu.Show(tray.GetDisplay(), tray.GetScreen(), tray.GetVisual(), tray.GetColormap(), tray.GetFont(), tray.Theme(), rootX, rootY);
-    });
+    TrayInteraction::Install(tray, spec);
 
     tray.Run();
     return 0;

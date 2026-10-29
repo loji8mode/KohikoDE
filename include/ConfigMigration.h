@@ -1,6 +1,8 @@
 #pragma once
 
+#include <filesystem>
 #include <string>
+#include <vector>
 
 namespace Kohiko
 {
@@ -54,8 +56,38 @@ public:
     // whether m_config needs reloading, and whether it's worth a log
     // line; a config that's already fully up to date is left with its
     // mtime untouched.
+    //
+    // Also RETIRES settings this build no longer has (see
+    // RetiredKeys()): every active line for such a key is removed -
+    // after the same one-time .bak backup - so a setting that no
+    // longer does anything doesn't linger in the file looking like it
+    // still might. If `retiredKeys` is non-null it receives the keys
+    // that were actually removed (for logging). A key that isn't in
+    // the file costs nothing and is not reported.
     static bool MigrateIfNeeded(
-        const std::string& configPath
+        const std::string& configPath,
+        std::vector<std::string>* retiredKeys = nullptr
+    );
+
+    // Settings that existed in earlier versions and are deliberately
+    // gone. Currently: general.adaptive_placement - Kohiko no longer
+    // learns placement from the user's behaviour at all (0.22.0; see
+    // CHANGELOG.md), so there is nothing left for it to switch.
+    static const std::vector<std::string>& RetiredKeys();
+
+    // Deletes on-disk state belonging to features that no longer
+    // exist, from the data directory `dataDir` (normally
+    // Xdg::DataDir() - passed in so this is testable against a
+    // throwaway directory). Currently: `placement_habits`, the vote
+    // tallies the removed adaptive-placement feature kept. That data
+    // is derived (it only ever recorded what the user had done by
+    // hand) and nothing reads it any more, so it is deleted outright
+    // rather than left behind: it must never be reinterpreted as the
+    // new, explicit window rules - those are only ever written by
+    // someone choosing to write one. Returns the names of the files
+    // actually removed (empty when there was nothing to do).
+    static std::vector<std::string> RetireObsoleteData(
+        const std::filesystem::path& dataDir
     );
 
     // Copies `configPath` to `configPath + ".bak"` (overwriting any

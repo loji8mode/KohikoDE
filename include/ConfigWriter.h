@@ -96,6 +96,13 @@ public:
     // (e.g. "windowrule="), in file order, with `prefix` itself
     // stripped off - e.g. GetRawBlock("windowrule=") on a line reading
     // "windowrule=fullscreen class:x" returns "fullscreen class:x".
+    // Deletes every active `key=...` line (comments are never touched).
+    // Returns whether any line was removed. Used to retire a setting
+    // this build no longer has - see ConfigMigration::MigrateIfNeeded().
+    bool RemoveScalar(
+        const std::string& key
+    );
+
     std::vector<std::string> GetRawBlock(
         const std::string& prefix
     ) const;

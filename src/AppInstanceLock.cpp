@@ -1,9 +1,13 @@
 #include "AppInstanceLock.h"
 
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 
 #include <fcntl.h>
+#include <sys/file.h>
+#include <sys/wait.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -14,11 +18,20 @@ namespace Kohiko
 namespace
 {
 
-std::string SocketPathFor(const std::string& appId)
+std::string RuntimeDir()
 {
     const char* runtimeDir = std::getenv("XDG_RUNTIME_DIR");
-    std::string dir = (runtimeDir && *runtimeDir) ? runtimeDir : "/tmp";
-    return dir + "/kohiko-" + appId + ".sock";
+    return (runtimeDir && *runtimeDir) ? runtimeDir : "/tmp";
+}
+
+std::string SocketPathFor(const std::string& appId)
+{
+    return RuntimeDir() + "/kohiko-" + appId + ".sock";
+}
+
+std::string LockPathFor(const std::string& appId)
+{
+    return RuntimeDir() + "/kohiko-" + appId + ".lock";
 }
 
 bool BindAddress(int fd, const std::string& path, sockaddr_un& addr)
@@ -47,37 +60,54 @@ AppInstanceLock::~AppInstanceLock()
         close(m_listenFd);
         unlink(m_socketPath.c_str());
     }
+
+    // Closing the descriptor releases the flock. The lock FILE is left
+    // in place on purpose: unlinking it would let a new instance lock a
+    // fresh inode while an old one still holds the previous one.
+    if (m_lockFd >= 0)
+        close(m_lockFd);
 }
 
 bool AppInstanceLock::AcquireOrListen(const std::string& appId)
 {
     m_socketPath = SocketPathFor(appId);
 
-    // First, check whether an instance is already listening - if so,
-    // this process isn't the one that gets to run.
+    // The decision "am I the one instance?" is made with flock(), which
+    // is atomic. This used to be "connect to the socket; if nobody
+    // answers, unlink it and bind a new one" - two copies started within
+    // the same few milliseconds (a double click on a tray icon, a
+    // tray click racing a Launcher start) both saw an empty socket, both
+    // unlinked, both bound, and BOTH ran: two windows. flock() has no
+    // such gap, is released by the kernel the instant the holder exits
+    // for any reason (so a crash never leaves a stale lock), and only
+    // the holder ever touches the socket file.
+    m_lockFd = open(LockPathFor(appId).c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+
+    if (m_lockFd >= 0 && flock(m_lockFd, LOCK_EX | LOCK_NB) != 0)
     {
-        int probeFd = socket(AF_UNIX, SOCK_STREAM, 0);
-        if (probeFd >= 0)
+        bool heldByAnother = errno == EWOULDBLOCK;
+
+        close(m_lockFd);
+        m_lockFd = -1;
+
+        if (heldByAnother)
         {
-            sockaddr_un addr;
-            std::memset(&addr, 0, sizeof(addr));
-            addr.sun_family = AF_UNIX;
-            std::strncpy(addr.sun_path, m_socketPath.c_str(), sizeof(addr.sun_path) - 1);
-
-            bool connected = connect(probeFd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
-            close(probeFd);
-
-            if (connected)
-                return false;
+            // The running instance wins; tell it somebody wanted the
+            // window (it may still be starting up and not listening
+            // yet - then the user simply gets the window it is about
+            // to show).
+            RequestRaise(appId);
+            return false;
         }
     }
 
-    // Nobody's there (or the socket file is stale/nonexistent) -
-    // become the instance. Unlinking first means a leftover file from
-    // a previous, uncleanly-terminated run never blocks bind().
+    // We hold the lock (or locking is unavailable - then fall back to
+    // running as a normal, unguarded instance, as before).
+    // Nobody else can be listening now, so a leftover socket file from
+    // an uncleanly terminated run is safe to remove.
     unlink(m_socketPath.c_str());
 
-    m_listenFd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    m_listenFd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (m_listenFd < 0)
         return true; // no locking available, but still safe to just run as a normal (unguarded) instance
 
@@ -158,6 +188,33 @@ void AppInstanceLock::LaunchOrRaise(const std::string& appId, const std::string&
     if (RequestRaise(appId))
         return;
 
+    // The application is not listening yet. Either it is not running,
+    // or we started it a moment ago and it is still opening its window
+    // (a few hundred milliseconds - longer on a loaded machine). Starting
+    // it again in the second case is how a quick second click made two
+    // processes; the extra one then had to notice it had lost the
+    // instance lock and exit, but until it did the user could see two
+    // windows' worth of startup work. So remember what this process
+    // started, and do not start the same application while that child
+    // is still alive and has not yet become the listening instance.
+    static std::map<std::string, pid_t> started;
+
+    // Reap every child that has finished (no zombies pile up, and a
+    // finished child no longer blocks a new start).
+    for (auto it = started.begin(); it != started.end();)
+    {
+        int status = 0;
+        pid_t result = waitpid(it->second, &status, WNOHANG);
+
+        if (result == it->second || (result < 0 && errno == ECHILD))
+            it = started.erase(it);
+        else
+            ++it;
+    }
+
+    if (started.count(appId))
+        return; // still starting: the window will appear on its own
+
     pid_t pid = fork();
     if (pid == 0)
     {
@@ -168,6 +225,9 @@ void AppInstanceLock::LaunchOrRaise(const std::string& appId, const std::string&
         execlp(executableName.c_str(), executableName.c_str(), static_cast<char*>(nullptr));
         _exit(127); // only reached if exec itself failed (binary not on PATH, ...)
     }
+
+    if (pid > 0)
+        started[appId] = pid;
 }
 
 }

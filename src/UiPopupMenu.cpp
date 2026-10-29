@@ -1,5 +1,9 @@
 #include "UiPopupMenu.h"
 
+#include <chrono>
+#include <cstdlib>
+#include <functional>
+
 #include <X11/Xatom.h>
 #include <X11/keysym.h>
 
@@ -62,6 +66,24 @@ void PopupMenu::Show(
 
     height += 4; // bottom inset
 
+    // Where the user was pointing when the menu was requested, before
+    // the clamp below moves the menu. See the release handler's guard.
+    const int openX = x;
+    const int openY = y;
+    const auto openedAt = std::chrono::steady_clock::now();
+
+    // Keep the whole menu on the screen. The tray sits at the right end
+    // of the bar and the pointer is on it when the menu opens, so
+    // placing the menu's top-left corner exactly at the pointer pushed
+    // its right part - and the end of every label - off the screen.
+    {
+        const int screenWidth = DisplayWidth(display, screen);
+        const int screenHeight = DisplayHeight(display, screen);
+
+        x = std::max(0, std::min(x, screenWidth - width));
+        y = std::max(0, std::min(y, screenHeight - height));
+    }
+
     XSetWindowAttributes attrs{};
     attrs.override_redirect = True;
     attrs.background_pixel = theme.surface;
@@ -84,9 +106,25 @@ void PopupMenu::Show(
     // menu" (event x/y outside [0,width)x[0,height)) without relying
     // on any particular window manager's focus-follows/click-to-focus
     // behaviour.
-    XGrabPointer(display, popup, False,
+    int pointerGrab = XGrabPointer(display, popup, False,
         ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
         GrabModeAsync, GrabModeAsync, None, None, CurrentTime);
+
+    // Without the pointer grab there is no way to learn that the user
+    // clicked outside (those clicks go to whatever is underneath), so
+    // the loop below could never end: a popup that cannot be dismissed
+    // and a process stuck inside it. Another client holding a grab at
+    // that instant (a window manager mid-drag, another popup) is the
+    // realistic cause; showing nothing is the safe answer.
+    if (pointerGrab != GrabSuccess)
+    {
+        XDestroyWindow(display, popup);
+        XFlush(display);
+        return;
+    }
+
+    // The keyboard grab only adds Escape-to-dismiss; the menu works
+    // (and can be dismissed with the pointer) without it.
     XGrabKeyboard(display, popup, False, GrabModeAsync, GrabModeAsync, CurrentTime);
 
     GC gc = XCreateGC(display, popup, 0, nullptr);
@@ -94,6 +132,14 @@ void PopupMenu::Show(
 
     int hoveredIndex = -1;
     bool dismissed = false;
+
+    // The chosen item's action. It is NOT run inside this loop: the
+    // loop holds an active pointer grab and keyboard grab and has the
+    // menu on screen, so an action that takes a while (it used to be a
+    // synchronous BlueZ/NetworkManager call of several seconds) froze
+    // the whole desktop's input - not just this tray - with the menu
+    // still showing. It runs after everything below has been torn down.
+    std::function<void()> chosen;
 
     auto redraw = [&]()
     {
@@ -189,8 +235,26 @@ void PopupMenu::Show(
                     break;
                 }
 
+                // The menu opens with its corner exactly under the pointer,
+                // so a second quick click on the same tray icon - a
+                // double click, or an impatient repeat - lands on the
+                // FIRST menu item and used to run it ("Mute", "Turn
+                // Bluetooth off", ...) though the user never aimed at it.
+                // A click that arrives almost at once and where the menu
+                // was opened is that repeat, not a choice: ignore it and
+                // leave the menu as it is. Anything deliberate - waiting
+                // a moment, or moving the pointer onto an item first -
+                // is unaffected.
+                auto sinceOpen = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - openedAt);
+
+                if (sinceOpen.count() < 350 &&
+                    std::abs(event.xbutton.x_root - openX) <= 4 &&
+                    std::abs(event.xbutton.y_root - openY) <= 4)
+                    break;
+
                 if (!m_items[idx].separator && m_items[idx].enabled && m_items[idx].onClick)
-                    m_items[idx].onClick();
+                    chosen = m_items[idx].onClick;
 
                 dismissed = true;
                 break;
@@ -215,6 +279,12 @@ void PopupMenu::Show(
     XFreeGC(display, gc);
     XDestroyWindow(display, popup);
     XFlush(display);
+
+    // Only now - grabs released, menu gone from the screen, the flush
+    // above sent - run what the user picked. Whatever it does (even a
+    // slow call) the desktop is already usable again.
+    if (chosen)
+        chosen();
 }
 
 }

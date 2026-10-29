@@ -37,6 +37,18 @@ public:
         const XKeyEvent& event
     );
 
+    // True when this key event is one of the configured `bind=`
+    // shortcuts - exactly the test HandleKeyPress() applies, without
+    // running anything. A KeyPress for a grabbed combination reaches
+    // Kohiko *because* it was grabbed globally (the X server delivers
+    // it to the grabbing client instead of the focused window), so
+    // this is also the question "was that a global shortcut, or text
+    // typed into the focused Launcher?" - answered from the user's own
+    // configuration rather than from a list of special keys.
+    bool IsGlobalShortcut(
+        const XKeyEvent& event
+    ) const;
+
 private:
 
     struct Binding
@@ -45,6 +57,10 @@ private:
         KeyCode keycode = 0;
         Command command;
     };
+
+    const Binding* FindBinding(
+        const XKeyEvent& event
+    ) const;
 
     KeySym ResolveKeysym(
         const std::string& token

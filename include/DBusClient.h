@@ -24,6 +24,15 @@ namespace Kohiko
 // duplication `docs/PROJECT_HISTORY.md`'s "Shared infrastructure"
 // goal calls out.
 //
+// NOTE ON BLOCKING: Call()/GetProperty()/SetProperty() block the
+// calling thread until the reply (or the timeout) arrives. That is only
+// acceptable for the few quick reads a window does on startup. Anything
+// that can take seconds - a Bluetooth pair/connect, a NetworkManager
+// secrets lookup - must NOT be called from a window's event loop: run
+// it through DBusOperationQueue (include/DBusOperationQueue.h), which
+// executes it on a worker thread with its own private connection and
+// delivers the result back to the loop through an fd.
+//
 // Deliberately synchronous for method calls (blocking, with a
 // timeout) rather than fully async/pending-call-based: every call
 // site in this codebase is a foreground UI action (list devices,
@@ -129,7 +138,8 @@ public:
         const std::string& objectPath,
         const std::string& interface,
         const std::string& propertyName,
-        const DBusValue& value
+        const DBusValue& value,
+        std::string* errorOut = nullptr
     );
 
     // org.freedesktop.DBus.ObjectManager.GetManagedObjects - the

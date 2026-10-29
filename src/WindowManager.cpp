@@ -268,6 +268,27 @@ void WindowManager::Initialize()
     SyncFocusToPointer();
 }
 
+const SessionWindowState* WindowManager::ConsumeSessionRecord(WindowID id)
+{
+    // SessionStore matches on the raw X11 window ID, and X11 recycles
+    // them: a client that reconnects gets the same resource-id range
+    // back, and so - verified, the same program launched three times in
+    // a row got window 0x200001 every time - the same window ID. The
+    // saved records are keyed by IDs from the PREVIOUS run, so without
+    // this a brand-new, unrelated window that merely landed on a
+    // recycled ID would inherit some dead window's workspace, floating
+    // and fullscreen state - and, with session.restore_priority=session,
+    // even override its window rules.
+    //
+    // A saved record is therefore only meaningful for a window that was
+    // already alive when Kohiko started (AdoptExistingWindows() notes
+    // exactly those), and only for the first time Manage() looks at it.
+    if (m_sessionRestoreIds.erase(id) == 0)
+        return nullptr;
+
+    return m_session.Find(id);
+}
+
 void WindowManager::AdoptExistingWindows()
 {
     // Direct children of the root, bottom-to-top - exactly what a
@@ -303,6 +324,11 @@ void WindowManager::AdoptExistingWindows()
 
         if (attrs.map_state != IsViewable && !hasSessionRecord)
             continue;
+
+        // Session Restore applies to exactly these windows: ones that
+        // already existed when Kohiko started. See ConsumeSessionRecord().
+        if (hasSessionRecord)
+            m_sessionRestoreIds.insert(child);
 
         Manage(child);
     }
@@ -396,7 +422,6 @@ void WindowManager::Tick()
     m_lockScreen.Tick();
     CheckIdleTimeoutLock();
     CheckSleepInhibition();
-    CheckPendingXEmbedWindows();
 
     // Destroys whatever's expired and restacks whatever's left - see
     // NotificationCenter::Tick()'s own comment, and HasActiveNotification()
@@ -408,6 +433,19 @@ void WindowManager::Tick()
     // Bar::Redraw()'s own expiry check.
     for (auto& [monitor, bar] : m_bars)
         bar->Redraw();
+}
+
+std::optional<std::chrono::steady_clock::time_point> WindowManager::NextXEmbedDeadline() const
+{
+    std::optional<std::chrono::steady_clock::time_point> earliest;
+
+    for (const PendingXEmbedWindow& pending : m_pendingXEmbedWindows)
+    {
+        if (!earliest || pending.deadline < *earliest)
+            earliest = pending.deadline;
+    }
+
+    return earliest;
 }
 
 void WindowManager::CheckPendingXEmbedWindows()
@@ -683,6 +721,11 @@ void WindowManager::HandleDestroyNotify(const XDestroyWindowEvent& event)
     if (m_repository.Contains(event.window))
         Unmanage(event.window);
 
+    // The window is gone, so its X11 ID is free to be handed to some
+    // unrelated future window - make sure a restore candidate can't
+    // outlive it. See ConsumeSessionRecord().
+    m_sessionRestoreIds.erase(event.window);
+
     // A window can be destroyed while still only provisionally
     // pending a dock (see Manage()'s own comment on
     // m_pendingXEmbedWindows) - never having reached m_repository at
@@ -950,8 +993,7 @@ void WindowManager::HandleClientMessage(const XClientMessageEvent& event)
     if (!concernsFullscreen)
         return;
 
-    WindowRuleEffect rules =
-        ResolveWindowRules(window->ClassName(), window->InstanceName(), window->Title());
+    WindowRuleEffect rules = ResolveWindowRules(RuleIdentityOf(*window));
 
     if (rules.denyFullscreen)
         return; // this class is configured to never be allowed real fullscreen
@@ -1030,6 +1072,16 @@ bool WindowManager::HandleModalKeyPress(const XKeyEvent& event)
 
     if (m_launcher.IsOpen())
     {
+        // A key the user bound to a global shortcut (SUPER+3 -> workspace
+        // 3, ...) is not text for the Launcher: the X server only
+        // delivers it to Kohiko because it was grabbed on the root
+        // window, and handing it to the Launcher as well used to type
+        // the digit into the search box instead of switching. Anything
+        // that is not a configured shortcut - plain digits, letters,
+        // Shift+letters, Enter, Escape, arrows - is still the Launcher's.
+        if (m_keyboard.IsGlobalShortcut(event))
+            return false;
+
         switch (m_launcher.HandleKeyPress(event))
         {
             case LauncherResult::Confirmed: CloseLauncher(true);  break;
@@ -1112,6 +1164,7 @@ void WindowManager::Execute(const Command& command)
         case CommandType::Quit:             m_running = false;                     break;
         case CommandType::LauncherToggle:   ToggleLauncher();                      break;
         case CommandType::NotepadToggle:    ToggleNotepad();                       break;
+        case CommandType::ChooseWindow:     ChooseWindowRuleForFocused(command.stringArg); break;
         case CommandType::Lock:
 
             if (LockScreenManualAllowed())
@@ -1174,7 +1227,14 @@ ManagedWindow* WindowManager::FloatingWindowAt(const Point& point) const
             if (!window->Geometry().Contains(point))
                 continue;
 
-            lastMatch = window;
+            // The topmost of the overlapping floating windows is the one
+            // with the newest raise ticket (see ArrangeMonitor()), which
+            // is what the user sees under the cursor. This used to take
+            // whichever overlapping window the repository listed last -
+            // unrelated to stacking, so grabbing the visible window could
+            // pick the one underneath it.
+            if (!lastMatch || window->RaiseSerial() >= lastMatch->RaiseSerial())
+                lastMatch = window;
 
             if (window->Focused())
                 focusedMatch = window;
@@ -1193,16 +1253,10 @@ void WindowManager::SwapWindows(ManagedWindow* first, ManagedWindow* second)
 
     Arrange();
 
-    // Adaptive Placement (see PlacementHabitStore's header comment):
-    // both windows just changed sides by hand (a Super+LMB drag, or
-    // Super+Shift+h/j/k/l - SwapWindows() is the sole chokepoint for
-    // both), so both get a vote for wherever they actually landed,
-    // using the fresh geometry Arrange() just wrote. Deliberately not
-    // called from ApplyAdaptivePlacementNudge()'s own tree.Swap()
-    // calls, which go straight to BSPTree rather than through here -
-    // an automatic nudge isn't a user decision to learn from.
-    RecordAdaptivePositionHabit(first);
-    RecordAdaptivePositionHabit(second);
+    // Deliberately nothing else: swapping windows - by Super+LMB drag
+    // or Super+Shift+h/j/k/l - is a manual, one-off rearrangement, and
+    // it never creates or changes a window rule. Rules are explicit
+    // (see WindowRule.h); Kohiko does not learn from what you do.
 }
 
 void WindowManager::ResizeWindow(ManagedWindow* window, int dx, int dy)
@@ -1350,6 +1404,18 @@ void WindowManager::EndSwapDrag(ManagedWindow* window, const Point& cursor)
         // No valid drop target - snap back to exactly where it was.
         // The tree assignment was never touched during the drag, so
         // window->Geometry() still holds the original tiled rect.
+        //
+        // BeginSwapDrag() raised this tile above everything so it could
+        // be carried across the screen. The swap branch above ends in
+        // Arrange(), which puts the floating tier back on top; this
+        // branch never called it, so a tile dropped without a target
+        // stayed stacked above every floating window - covering a
+        // floating window it overlapped, whose geometry had not changed
+        // and which only reappeared once something else (any later
+        // Arrange()) restacked it. Put the tile back under the floating
+        // tier directly instead of re-running the whole layout.
+        RestackTileBelowFloating(window);
+
         m_animator.Start(window, fromRect, window->Geometry(), kSwapAnimationMs);
     }
 }
@@ -1366,6 +1432,7 @@ void WindowManager::BeginFloatingDrag(ManagedWindow* window, const Point& cursor
     m_dragOffsetY = cursor.y - geometry.y;
     m_dragCurrentRect = geometry;
 
+    NoteRaised(window);
     m_connection.Raise(window->Id());
     RaiseModalWindows();
     m_cursor.SetDragging(true);
@@ -1466,6 +1533,7 @@ void WindowManager::BeginFloatingResize(ManagedWindow* window, const Point& curs
     m_resizeFromLeft = cursor.x < center.x;
     m_resizeFromTop  = cursor.y < center.y;
 
+    NoteRaised(window);
     m_connection.Raise(window->Id());
     RaiseModalWindows();
 }
@@ -1541,6 +1609,11 @@ std::string WindowManager::HandleIpcCommand(const std::string& request)
 
     if (verb == "activewindow")
         return DumpActiveWindowJson();
+
+    // Read-only: what the Launcher is showing right now (open, query,
+    // selection, position) and which workspace the user is on.
+    if (verb == "launcher")
+        return DumpLauncherJson();
 
     if (verb == "tree")
     {
@@ -1662,8 +1735,36 @@ void WindowManager::Manage(WindowID id, bool skipXEmbedCheck)
 
         if (!alreadyPending)
         {
-            static constexpr auto kXEmbedDockTimeout = std::chrono::seconds(2);
-            m_pendingXEmbedWindows.push_back({ id, std::chrono::steady_clock::now() + kXEmbedDockTimeout });
+            // How long a window carrying _XEMBED_INFO is held back in
+            // case a SYSTEM_TRAY_REQUEST_DOCK for it is about to
+            // arrive. Measured, not guessed (see CHANGELOG.md 0.22.0):
+            //
+            //   - A client that docks *before* mapping (Kohiko's own
+            //     TrayIconClient, GTK's GtkStatusIcon - both observed)
+            //     has its dock request delivered ahead of any
+            //     MapRequest on this connection, so it never reaches
+            //     this branch at all; Qt's tray icon is
+            //     override-redirect and doesn't either.
+            //   - A client that maps first and docks right after
+            //     (tests/live/x11_test_client --send-dock-request) is
+            //     one X round trip apart: well under a millisecond.
+            //   - But EVERY Qt top-level window carries _XEMBED_INFO
+            //     (a real FeatherPad main window does), and none of
+            //     those will ever dock - so whatever this value is,
+            //     every Qt application's first appearance waits that
+            //     long. The old 2 s (checked only at ~1 Hz, so
+            //     really 2-3 s) was the whole "window appears after a
+            //     couple of seconds" delay.
+            //
+            // 100 ms leaves two orders of magnitude of scheduling
+            // headroom over the measured dock gap, and is below what
+            // anyone perceives next to an application's own startup.
+            // If a pathologically slow client docks later than this
+            // anyway, HandleClientMessage() already unmanages the
+            // already-tiled window and docks it - a brief cosmetic
+            // flash, never a lost icon.
+            static constexpr auto kXEmbedDockGrace = std::chrono::milliseconds(100);
+            m_pendingXEmbedWindows.push_back({ id, std::chrono::steady_clock::now() + kXEmbedDockGrace });
         }
 
         return;
@@ -1679,6 +1780,7 @@ void WindowManager::Manage(WindowID id, bool skipXEmbedCheck)
     window->SetClassName(className);
     window->SetInstanceName(instanceName);
     window->SetRole(m_connection.GetWindowRole(id, m_atoms));
+    window->SetWindowType(m_connection.GetWindowTypeName(id, m_atoms));
     window->SetPid(m_connection.GetWindowPid(id, m_atoms));
 
     // Provisional - a `windowrule=workspace:N` match or a transient's
@@ -1725,7 +1827,7 @@ void WindowManager::Manage(WindowID id, bool skipXEmbedCheck)
     // "the parent" means this, not the raw transientOwner id.
     ManagedWindow* parent = isTransient ? m_repository.Get(transientOwner) : nullptr;
 
-    WindowRuleEffect rules = ResolveWindowRules(className, instanceName, window->Title());
+    WindowRuleEffect rules = ResolveWindowRules(RuleIdentityOf(*window));
 
     // Whether a `workspace<N>=` autostart line (RunAutostart()) was
     // the thing that launched this window's process in the first
@@ -1734,15 +1836,15 @@ void WindowManager::Manage(WindowID id, bool skipXEmbedCheck)
     // for tiling room on depends on it.
     int autostartWorkspace = ResolveWorkspaceAutostart(window->Pid());
 
-    // Session Restore: a record here means this exact X11 Window ID
-    // was already managed - and had its state saved - the last time
-    // Kohiko ran (see SessionStore's header comment for why the ID
-    // itself is a reliable enough match). `sessionPriority` reflects
-    // session.restore_priority (config/session, default config) and
-    // is reused below for the float/tile decision too - see
-    // AdoptExistingWindows() for the startup call site that makes
-    // most windows this actually fires for.
-    const SessionWindowState* session = m_session.Find(id);
+    // Session Restore: a record here means this window already existed
+    // when Kohiko started - and had its state saved - the last time
+    // Kohiko ran. It is only ever offered to such a window, and only
+    // once (see ConsumeSessionRecord() for why the bare X11 Window ID
+    // is NOT enough to identify a window created later).
+    // `sessionPriority` reflects session.restore_priority
+    // (config/session, default config) and is reused below for the
+    // float/tile decision too.
+    const SessionWindowState* session = ConsumeSessionRecord(id);
     bool sessionPriority = Utils::Lower(m_config.GetString("session.restore_priority", "config")) == "session";
 
     // A `windowrule=workspace:N` match ("open Telegram's media viewer
@@ -1774,8 +1876,6 @@ void WindowManager::Manage(WindowID id, bool skipXEmbedCheck)
         window->SetWorkspace(autostartWorkspace);
     else if (parent)
         window->SetWorkspace(parent->Workspace());
-    else if (int habitWorkspace = AdaptiveWorkspaceHabit(AppClassKey(window)); habitWorkspace != 0)
-        window->SetWorkspace(habitWorkspace);
 
     // Window Placement: a transient/dialog always follows its parent's
     // *monitor*, not just its workspace - if the parent's workspace is
@@ -1857,10 +1957,19 @@ void WindowManager::Manage(WindowID id, bool skipXEmbedCheck)
         // window. Falls back to the usual centered placement for a
         // window with no saved geometry (nothing in session, or one
         // whose class/type just started floating for the first time).
-        Rect geometry =
-            (session && session->floatingGeometry.width > 0 && session->floatingGeometry.height > 0)
-                ? session->floatingGeometry
-                : CenteredFloatingRectForWindow(id, attrs, targetMonitor, parent);
+        bool sessionGeometry =
+            session && session->floatingGeometry.width > 0 && session->floatingGeometry.height > 0;
+
+        Rect geometry = sessionGeometry
+            ? session->floatingGeometry
+            : CenteredFloatingRectForWindow(id, attrs, targetMonitor, parent);
+
+        // An explicit `horizontal:`/`vertical:` rule decides where a
+        // floating window sits; a restored session geometry is the
+        // exact rectangle it had when Kohiko last exited, which is
+        // strictly more precise, so it is left alone.
+        if (!sessionGeometry)
+            geometry = FloatingRectAtRuleEdges(geometry, targetMonitor, rules.horizontal, rules.vertical);
 
         window->SetGeometry(geometry);
         window->SetFloatingGeometry(geometry);
@@ -1952,14 +2061,13 @@ void WindowManager::Manage(WindowID id, bool skipXEmbedCheck)
         }
     }
 
-    // Adaptive Placement (see PlacementHabitStore's header comment):
-    // only for a window that actually landed tiled, and only when
+    // An explicit `horizontal:`/`vertical:` window rule: only for a
+    // window that actually landed tiled, and only when
     // TryRestoreSessionPosition() above didn't already put it exactly
-    // where it sat at last shutdown - that's a strictly more precise
-    // answer than a general habit could ever be, so there's nothing
-    // for the softer heuristic to improve on.
+    // where it sat at last shutdown - that is a strictly more precise
+    // answer, so there is nothing left for the rule to improve on.
     if (window->IsTiled() && !sessionPositionRestored)
-        ApplyAdaptivePlacementNudge(window);
+        ApplyRulePlacementNudge(window, rules.horizontal, rules.vertical);
 
     // A client's own EWMH fullscreen request, made before it was ever
     // mapped (some toolkits set _NET_WM_STATE directly instead of
@@ -2068,6 +2176,18 @@ void WindowManager::Manage(WindowID id, bool skipXEmbedCheck)
         else
         {
             Focus(id);
+
+            // A newly opened floating window - kohiko-choose-window's
+            // dialog being the case that matters most - must not open
+            // hidden behind another floating window (ArrangeMonitor()
+            // re-raises every floating window in the repository's own,
+            // effectively arbitrary, order each pass, so without this
+            // which one ends up on top is down to hash-table luck).
+            if (window->IsFloating())
+            {
+                m_connection.Raise(id);
+                RaiseModalWindows();
+            }
         }
     }
     else
@@ -2078,8 +2198,8 @@ void WindowManager::Manage(WindowID id, bool skipXEmbedCheck)
         // gets pulled into view above instead, see the block just
         // above) landing on a workspace nothing is currently showing
         // is deliberate, existing behaviour, not a bug: a
-        // `workspace<N>=` autostart line, a `windowrule=workspace:N`,
-        // or a learned adaptive-placement habit is explicitly meant
+        // `workspace<N>=` autostart line or a `windowrule=workspace:N`
+        // is explicitly meant
         // to open its target quietly in the background rather than
         // yanking focus away from whatever the user is doing (see the
         // Window Placement comment above). But "quiet" isn't supposed
@@ -2096,7 +2216,7 @@ void WindowManager::Manage(WindowID id, bool skipXEmbedCheck)
         // equivalent for everything else - cheap, undismissable
         // silence is the actual defect here, not the placement
         // decision itself.
-        std::string appName = AppClassKey(window);
+        std::string appName = WindowRule::AppKeyFor(window->ClassName(), window->InstanceName());
 
         ShowNotificationOnMonitor(
             FocusedMonitor(),
@@ -2178,6 +2298,7 @@ void WindowManager::Focus(WindowID id)
 
     m_repository.ClearFocus();
     window->SetFocused(true);
+    NoteRaised(window); // a focused floating window comes to the front at the next restack
 
     m_workspaces.Get(window->Workspace()).Tree().Focus(window);
 
@@ -2334,6 +2455,8 @@ void WindowManager::ArrangeMonitor(Monitor& monitor)
         m_layout.Apply(workspace->Tree().Root(), tilingArea, params);
 
     ManagedWindow* fullscreenWindow = nullptr;
+    ManagedWindow* focusedFloating = nullptr;
+    std::vector<ManagedWindow*> floatingTier;
 
     for (ManagedWindow* window : m_repository.Visible(workspace->Id()))
     {
@@ -2357,14 +2480,50 @@ void WindowManager::ArrangeMonitor(Monitor& monitor)
             m_connection.MoveResizeWindow(window->Id(), window->Geometry());
             m_connection.SetBorderWidth(window->Id(), window->BorderWidth());
             m_connection.MapWindow(window->Id());
-            m_connection.Raise(window->Id());
+
+            // A window that has only just become floating has no
+            // ticket yet (see ManagedWindow::SetRaiseSerial()): it is
+            // the newest member of the tier.
+            if (window->RaiseSerial() == 0)
+                window->SetRaiseSerial(++m_raiseCounter);
+
+            floatingTier.push_back(window);
+
+            if (window->Focused())
+                focusedFloating = window;
+
             continue;
         }
+
+        // No longer part of the floating tier (a window that went back
+        // to tiled): forget the ticket so it gets a fresh one if it
+        // ever floats again.
+        window->SetRaiseSerial(0);
 
         m_connection.MoveResizeWindow(window->Id(), window->Geometry());
         m_connection.SetBorderWidth(window->Id(), window->BorderWidth());
         m_connection.MapWindow(window->Id());
     }
+
+    // Every floating window goes back above every tile (mapping a tile
+    // just now - or a swap drag carrying one - may have put it on top),
+    // and the floating windows keep the order they already had: oldest
+    // ticket first, so the most recently raised ends up on top. The
+    // focused floating window is always last, as before, so it can
+    // never end up hidden under another floating one. Previously this
+    // loop raised each floating window in repository order, which
+    // reshuffled overlapping floating windows on every layout change.
+    std::stable_sort(floatingTier.begin(), floatingTier.end(),
+        [focusedFloating](const ManagedWindow* a, const ManagedWindow* b)
+        {
+            if ((a == focusedFloating) != (b == focusedFloating))
+                return b == focusedFloating;
+
+            return a->RaiseSerial() < b->RaiseSerial();
+        });
+
+    for (ManagedWindow* window : floatingTier)
+        m_connection.Raise(window->Id());
 
     if (fullscreenWindow)
     {
@@ -2492,6 +2651,12 @@ void WindowManager::SwitchWorkspaceOnMonitor(Monitor& monitor, int id)
     // reconcile the two on its own. See SyncFocusToPointer()'s own
     // comment.
     SyncFocusToPointer();
+
+    // An open Launcher/Notepad follows the user to the new workspace
+    // (and keeps keyboard focus). Every way of switching - keyboard
+    // shortcut, taskbar click, `kohikoctl dispatch workspace N` - ends
+    // here, so this is the one place that needs to know.
+    ReconcileModalsAfterWorkspaceChange();
 }
 
 void WindowManager::ShowNotificationOnMonitor(Monitor& monitor, const std::string& text)
@@ -2635,14 +2800,10 @@ void WindowManager::MoveFocusedToWorkspace(int id)
 
     int oldWorkspaceId = window->Workspace();
 
-    // Adaptive Placement: an explicit "move THIS window to workspace
-    // `id`" is exactly the kind of repeated-by-hand signal
-    // PlacementHabitStore learns from - see its header comment. Voted
-    // on unconditionally (not just when the move actually lands
-    // tiled) since the user's *intent* was "this app belongs on
-    // workspace `id`" regardless of how the destination happens to be
-    // laid out right now.
-    RecordAdaptiveWorkspaceHabit(window, id);
+    // Moving a window to another workspace is a manual, one-off
+    // action: it moves this window and nothing else. It never creates
+    // or changes a window rule (see WindowRule.h) - Kohiko does not
+    // learn from what you do.
 
     // Whichever monitor is currently showing the destination workspace
     // is what TryTile()'s capacity math (and the floating fallback's
@@ -3223,14 +3384,57 @@ void WindowManager::ApplyKeyboardLayouts()
 
 void WindowManager::RunAutostart()
 {
-    for (const std::string& program :
-         Utils::SplitWhitespace(
-             m_config.GetString("auto_start_programs")))
+    // Autostart is a property of the login SESSION, not of this
+    // process. kohiko-session restarts kohiko after a crash inside the
+    // same X session - with every autostarted application still
+    // running - and an unconditional RunAutostart() here would launch
+    // the whole list a second time on top of them (the apps' windows
+    // are adopted by AdoptExistingWindows() just before, which is
+    // Session Restore's job, not a reason to start them again). So the
+    // first start in a session launches things and leaves a marker on
+    // the root window - which belongs to the X server and so outlives
+    // this process but not the session - and later starts leave the
+    // already-running programs alone.
+    //
+    // The marker holds a token for the *login* (logind's
+    // XDG_SESSION_ID when there is one), so a display manager that
+    // reuses one X server across logins still launches autostart for
+    // the next user rather than mistaking it for a restart.
+    static constexpr const char* kAutostartMarker = "_KOHIKO_AUTOSTART_DONE";
+
+    unsigned long sessionToken = 1;
+
+    if (const char* sessionId = std::getenv("XDG_SESSION_ID"); sessionId && *sessionId)
     {
-        Process::Spawn(program, m_connection.DisplayName());
+        sessionToken = 2166136261u; // FNV-1a, 32-bit
+
+        for (const char* c = sessionId; *c; ++c)
+        {
+            sessionToken ^= static_cast<unsigned char>(*c);
+            sessionToken *= 16777619u;
+            sessionToken &= 0xffffffffu;
+        }
+
+        sessionToken |= 2; // never collides with the "no session id" token (1)
     }
 
-    RunXdgAutostartEntries();
+    if (m_connection.RootMarkerEquals(kAutostartMarker, sessionToken))
+    {
+        Logger::Info(
+            "autostart already ran in this login session (Kohiko was restarted) - "
+            "not launching the startup programs again");
+        return;
+    }
+
+    m_connection.SetRootMarker(kAutostartMarker, sessionToken);
+
+    // Everything that can ask for a program to be started, gathered
+    // into one plan so no program is launched twice just because two
+    // mechanisms mention it - see AutostartPlan.h for the rules.
+    AutostartInputs inputs;
+
+    inputs.programs = Utils::SplitWhitespace(m_config.GetString("auto_start_programs"));
+    inputs.xdgEntries = CollectXdgAutostartEntries();
 
     // `workspace<N>=` is autostart with a target workspace attached -
     // e.g.
@@ -3240,46 +3444,62 @@ void WindowManager::RunAutostart()
     //   workspace3=steam
     //
     // Every program listed launches exactly like `auto_start_programs`
-    // above (space-separated, through `/bin/sh -c`, args and all) -
-    // the only difference is that whichever window(s) it opens land on
-    // workspace N once they actually show up, however long that takes
-    // (Steam and friends are never instant), instead of wherever
-    // happened to be focused at the moment Kohiko itself started.
-    //
-    // A window is only ever eligible for this for a bounded time after
-    // its process launches - long enough to cover a genuinely slow
-    // starter, not so long that the same process opening some unrelated
-    // window an hour into the session gets silently redirected too.
-    static constexpr auto kWorkspaceAutostartWindow = std::chrono::seconds(60);
-
-    std::chrono::steady_clock::time_point expiry =
-        std::chrono::steady_clock::now() + kWorkspaceAutostartWindow;
-
+    // (space-separated, through `/bin/sh -c`) - the only difference is
+    // that whichever window(s) it opens land on workspace N once they
+    // actually show up, however long that takes (Steam and friends are
+    // never instant), instead of wherever happened to be focused at the
+    // moment Kohiko itself started.
     for (int workspaceId = 1; workspaceId <= m_workspaces.Count(); ++workspaceId)
     {
         std::string key = "workspace" + std::to_string(workspaceId);
 
         for (const std::string& program : Utils::SplitWhitespace(m_config.GetString(key)))
-        {
-            pid_t pid = Process::Spawn(program, m_connection.DisplayName());
+            inputs.workspacePrograms.emplace_back(workspaceId, program);
+    }
 
-            if (pid <= 0)
-                continue;
+    AutostartPlan plan = PlanAutostart(inputs);
 
-            PendingWorkspaceAutostart pending;
-            pending.pid = static_cast<long>(pid);
-            pending.workspace = workspaceId;
-            pending.expiry = expiry;
+    for (const AutostartSkipped& skipped : plan.skipped)
+    {
+        std::string name = skipped.item.source == AutostartItem::Source::Xdg
+            ? "XDG autostart entry " + skipped.item.desktopId + " (" + skipped.item.command + ")"
+            : "auto_start_programs entry " + skipped.item.command;
 
-            m_pendingWorkspaceAutostarts.push_back(pending);
-        }
+        Logger::Info("not launching " + name + " - " + skipped.reason);
+    }
+
+    // A window is only ever eligible for a workspace<N>= placement for
+    // a bounded time after its process launches - long enough to cover
+    // a genuinely slow starter, not so long that the same process
+    // opening some unrelated window an hour into the session gets
+    // silently redirected too.
+    static constexpr auto kWorkspaceAutostartWindow = std::chrono::seconds(60);
+
+    std::chrono::steady_clock::time_point expiry =
+        std::chrono::steady_clock::now() + kWorkspaceAutostartWindow;
+
+    for (const AutostartItem& item : plan.launch)
+    {
+        pid_t pid = Process::Spawn(item.command, m_connection.DisplayName());
+
+        if (item.source != AutostartItem::Source::WorkspaceLine || pid <= 0)
+            continue;
+
+        PendingWorkspaceAutostart pending;
+        pending.pid = static_cast<long>(pid);
+        pending.workspace = item.workspace;
+        pending.expiry = expiry;
+
+        m_pendingWorkspaceAutostarts.push_back(pending);
     }
 }
 
-void WindowManager::RunXdgAutostartEntries()
+std::vector<std::pair<std::string, std::string>> WindowManager::CollectXdgAutostartEntries()
 {
+    std::vector<std::pair<std::string, std::string>> entries;
+
     // Desktop IDs already resolved by a higher-priority directory -
-    // once a given basename has been decided (spawn it, or explicitly
+    // once a given basename has been decided (launch it, or explicitly
     // don't), a same-named file further down the list is a system
     // fallback the user/admin has already overridden and must be
     // ignored outright, not merged with or fallen back to. See
@@ -3314,9 +3534,11 @@ void WindowManager::RunXdgAutostartEntries()
             std::optional<DesktopEntry> entry = ParseDesktopFile(path, 0);
 
             if (entry && ShouldAutostart(*entry))
-                Process::Spawn(entry->exec, m_connection.DisplayName());
+                entries.emplace_back(desktopId, entry->exec);
         }
     }
+
+    return entries;
 }
 
 int WindowManager::ResolveWorkspaceAutostart(
@@ -3353,6 +3575,69 @@ Monitor& WindowManager::MonitorForModal() const
     return *monitor;
 }
 
+void WindowManager::ChooseWindowRuleForFocused(const std::string& scope)
+{
+    ManagedWindow* focused = m_repository.Focused();
+
+    if (!focused)
+        return;
+
+    std::string appKey = WindowRule::AppKeyFor(focused->ClassName(), focused->InstanceName());
+
+    if (appKey.empty())
+    {
+        Logger::Warning("choose_window: the focused window sets neither WM_CLASS class nor instance, so no window rule can match it");
+        return;
+    }
+
+    // Which windows of the application the dialog's rule covers. The
+    // default - and what every existing binding keeps doing - is the
+    // whole application. `role`, `type` and `role+type` narrow it to the
+    // focused window's WM_WINDOW_ROLE / window type, which is how one
+    // application's differently-behaving windows (a browser and its
+    // Picture-in-Picture overlay) get independent rules. A scope the
+    // focused window cannot satisfy is refused instead of quietly
+    // falling back to the whole application.
+    std::string scopeArg;
+
+    if (scope == "role" || scope == "type" || scope == "role+type")
+    {
+        if ((scope == "role" || scope == "role+type") && focused->Role().empty())
+        {
+            Logger::Warning("choose_window " + scope + ": the focused window has no WM_WINDOW_ROLE, so a rule cannot be scoped to it");
+            return;
+        }
+
+        if ((scope == "type" || scope == "role+type") && focused->WindowType().empty())
+        {
+            Logger::Warning("choose_window " + scope + ": the focused window declares no _NET_WM_WINDOW_TYPE, so a rule cannot be scoped to it");
+            return;
+        }
+
+        scopeArg = " --scope " + scope;
+    }
+    else if (!scope.empty() && scope != "app")
+    {
+        Logger::Warning("choose_window: unknown scope \"" + scope + "\" (use app, role, type or role+type)");
+        return;
+    }
+
+    // The dialog is a separate process (see ChooseWindowDialog.h) -
+    // this only hands it the identity of the window to write a rule
+    // for. Everything goes through ShellQuote(): a title is arbitrary
+    // text from another program and must never reach /bin/sh as code.
+    std::string command =
+        "kohiko-choose-window --app " + Utils::ShellQuote(appKey) +
+        " --class " + Utils::ShellQuote(focused->ClassName()) +
+        " --instance " + Utils::ShellQuote(focused->InstanceName()) +
+        " --title " + Utils::ShellQuote(focused->Title()) +
+        " --role " + Utils::ShellQuote(focused->Role()) +
+        " --type " + Utils::ShellQuote(focused->WindowType()) +
+        scopeArg;
+
+    Process::Spawn(command, m_connection.DisplayName());
+}
+
 void WindowManager::ToggleLauncher()
 {
     if (m_launcher.IsOpen())
@@ -3377,41 +3662,55 @@ void WindowManager::CloseLauncher(bool run)
     if (!m_launcher.IsOpen())
         return;
 
-    bool isFile =
-        m_launcher.SelectedIsFile();
+    // Enter was accepted: capture exactly what is selected RIGHT NOW as
+    // an immutable value, once, before anything else can change the
+    // Launcher's page, query or selection. Everything after this line
+    // works on `request`, never on the Launcher.
+    LaunchRequest request;
 
-    std::string command =
-        m_launcher.SelectedCommand();
-
-    std::string path =
-        m_launcher.SelectedPath();
+    if (run)
+        request = m_launcher.TakeLaunchRequest();
 
     m_launcher.Close();
 
     if (run)
-    {
-        if (isFile)
+        SubmitLaunch(request);
+
+    RestoreFocusAfterModal();
+}
+
+void WindowManager::SubmitLaunch(const LaunchRequest& request)
 {
     namespace fs = std::filesystem;
 
-    std::string folder =
-        fs::path(path)
-            .parent_path()
-            .string();
-
-    Process::Spawn(
-        m_fileManager + " \"" + folder + "\"",
-        m_connection.DisplayName());
-}
-        else if (!command.empty())
+    switch (request.kind)
+    {
+        case LaunchRequest::Kind::OpenFolder:
         {
-            Process::Spawn(
-                command,
-                m_connection.DisplayName());
-        }
-    }
+            std::string folder = fs::path(request.path).parent_path().string();
 
-    RestoreFocusAfterModal();
+            Process::Spawn(
+                m_fileManager + " \"" + folder + "\"",
+                m_connection.DisplayName());
+            break;
+        }
+
+        case LaunchRequest::Kind::Command:
+            // The workspace this application's window opens on is NOT
+            // decided here. It is decided when the window asks to be
+            // mapped (Manage(): the workspace the focused monitor shows
+            // at that moment - the user's latest context, however long
+            // the application took to start - unless an explicit
+            // Window Rule names one). Nothing about the Launcher's own
+            // workspace is recorded, so there is nothing that can go stale.
+            Process::Spawn(
+                request.command,
+                m_connection.DisplayName());
+            break;
+
+        case LaunchRequest::Kind::Nothing:
+            break;
+    }
 }
 
 void WindowManager::ToggleNotepad()
@@ -3447,7 +3746,18 @@ void WindowManager::CloseNotepad()
 
 void WindowManager::RestoreFocusAfterModal()
 {
-    if (m_focusBeforeModal != 0 && m_repository.Contains(m_focusBeforeModal))
+    // The window that had focus when the Launcher/Notepad was opened is
+    // only the right one to give focus back to if the user is still
+    // looking at it. If they switched workspace while the modal was
+    // open, that window is on a workspace nobody is showing any more -
+    // Focus() on it would mark an invisible window as "the focused
+    // window" (and ask X to focus an unmapped window), so the next
+    // `close` shortcut or title in the bar would act on something that
+    // is not on screen. ReconcileModalsAfterWorkspaceChange() normally
+    // keeps m_focusBeforeModal current; this check is the backstop.
+    ManagedWindow* previous = m_focusBeforeModal != 0 ? m_repository.Get(m_focusBeforeModal) : nullptr;
+
+    if (previous && (previous->IsScratchpad() || IsWorkspaceVisible(previous->Workspace())))
         Focus(m_focusBeforeModal);
     else
         FocusNextAvailable();
@@ -3455,86 +3765,117 @@ void WindowManager::RestoreFocusAfterModal()
     m_focusBeforeModal = 0;
 }
 
-std::string WindowManager::AppClassKey(ManagedWindow* window)
+void WindowManager::ReconcileModalsAfterWorkspaceChange()
 {
-    if (!window)
-        return std::string();
+    const bool launcherOpen = m_launcher.IsOpen();
+    const bool notepadOpen = m_notepad.IsOpen();
 
-    return !window->ClassName().empty() ? window->ClassName() : window->InstanceName();
-}
-
-int WindowManager::AdaptiveWorkspaceHabit(const std::string& appClass) const
-{
-    if (appClass.empty() || !m_config.GetBool("general.adaptive_placement", true))
-        return 0;
-
-    int habitWorkspace = m_placementHabits.PredictWorkspace(appClass);
-
-    return (habitWorkspace >= 1 && habitWorkspace <= m_workspaces.Count()) ? habitWorkspace : 0;
-}
-
-void WindowManager::RecordAdaptiveWorkspaceHabit(ManagedWindow* window, int workspace)
-{
-    if (!m_config.GetBool("general.adaptive_placement", true))
+    if (!launcherOpen && !notepadOpen)
         return;
 
-    std::string appClass = AppClassKey(window);
+    // 1. The window to give focus back to when the modal closes is
+    //    whichever window is focused NOW, on the workspace the user
+    //    switched to - not the one from the workspace the modal was
+    //    opened on (which may be hidden by now).
+    ManagedWindow* focused = m_repository.Focused();
+    m_focusBeforeModal = focused ? focused->Id() : 0;
 
-    if (!appClass.empty())
-        m_placementHabits.RecordWorkspaceMove(appClass, workspace);
+    // 2. The Launcher follows the user: same box, same query, same
+    //    selection, page and scroll position (Reposition() only moves
+    //    the window), placed on the monitor that is focused now. It is
+    //    redrawn only if it actually landed somewhere with a different
+    //    geometry (another monitor), not on every switch.
+    if (launcherOpen)
+    {
+        Rect before = m_launcher.Geometry();
+        m_launcher.Reposition(FocusedMonitor().Geometry());
+
+        const Rect& after = m_launcher.Geometry();
+
+        if (before.x != after.x || before.y != after.y ||
+            before.width != after.width || before.height != after.height)
+            m_launcher.HandleExpose();
+    }
+    else
+    {
+        m_notepad.Reposition(FocusedMonitor().Geometry());
+    }
+
+    // 3. The workspace switch just focused a window on the new
+    //    workspace (FocusMonitor()); the modal must keep keyboard
+    //    focus and its place on top. Done right here, synchronously -
+    //    waiting for HandleFocusIn()'s correction would leave a window
+    //    in which keystrokes typed into the modal reach the application.
+    RaiseModalWindows();
+    m_connection.SetInputFocus(launcherOpen ? m_launcher.WindowId() : m_notepad.WindowId());
 }
 
-void WindowManager::RecordAdaptivePositionHabit(ManagedWindow* window)
+std::string WindowManager::DumpLauncherJson() const
 {
-    if (!window || !m_config.GetBool("general.adaptive_placement", true))
-        return;
+    std::ostringstream out;
 
-    std::string appClass = AppClassKey(window);
+    out << "{\"open\":" << (m_launcher.IsOpen() ? "true" : "false")
+        << ",\"query\":" << Json::String(m_launcher.Query())
+        << ",\"selected\":" << m_launcher.SelectedIndex()
+        << ",\"scroll\":" << m_launcher.ScrollOffset()
+        << ",\"matches\":" << m_launcher.MatchCount()
+        << ",\"x\":" << m_launcher.Geometry().x
+        << ",\"y\":" << m_launcher.Geometry().y
+        << ",\"width\":" << m_launcher.Geometry().width
+        << ",\"height\":" << m_launcher.Geometry().height
+        << ",\"workspace\":" << FocusedWorkspaceId()
+        << ",\"window\":" << m_launcher.WindowId()
+        << ",\"focus_target\":" << m_focusBeforeModal
+        << "}";
 
-    if (appClass.empty())
-        return;
-
-    Monitor* monitor = m_monitors.Find(window->Monitor());
-
-    if (!monitor)
-        return;
-
-    m_placementHabits.RecordPositionMove(appClass, window->Geometry(), monitor->WorkArea());
+    return out.str();
 }
 
-void WindowManager::ApplyAdaptivePlacementNudge(ManagedWindow* window)
+
+void WindowManager::ApplyRulePlacementNudge(
+    ManagedWindow* window,
+    WindowRule::Horizontal horizontal,
+    WindowRule::Vertical vertical)
 {
     if (!window || !window->IsTiled())
         return;
 
-    if (!m_config.GetBool("general.adaptive_placement", true))
-        return;
+    // Horizontal first, then vertical - fixed, so the same rule always
+    // produces the same layout.
+    std::vector<Direction> directions;
 
-    std::string appClass = AppClassKey(window);
+    if (horizontal == WindowRule::Horizontal::Left)  directions.push_back(Direction::Left);
+    if (horizontal == WindowRule::Horizontal::Right) directions.push_back(Direction::Right);
+    if (vertical == WindowRule::Vertical::Top)       directions.push_back(Direction::Up);
+    if (vertical == WindowRule::Vertical::Bottom)    directions.push_back(Direction::Down);
 
-    if (appClass.empty())
-        return;
-
-    std::vector<Direction> habitDirections = m_placementHabits.PredictPositions(appClass);
-
-    if (habitDirections.empty())
+    if (directions.empty())
         return;
 
     BSPTree& tree = m_workspaces.Get(window->Workspace()).Tree();
 
-    // Best-effort, bounded walk: repeatedly trades places with
-    // whichever neighbor sits one step further toward each confident
-    // direction, strongest axis first, until there's nothing left in
-    // that direction to trade with (window is now flush against that
-    // edge) - exactly what a manual Super+Shift+h/j/k/l move all the
-    // way to the edge would do by hand, just done automatically once
-    // per newly-opened window of a class Kohiko has learned this
-    // about. kMaxHopsPerDirection is purely a defensive bound against
+    // FindNeighbor() reads each leaf's slot rectangle, and those are
+    // only computed by Arrange(). Manage() calls this straight after
+    // TryTile() has inserted the new window - before the layout has
+    // been run - so without laying the tree out first the new leaf has
+    // no geometry yet and has no neighbors in ANY direction: the walk
+    // below would silently do nothing for exactly the windows it exists
+    // for (each swap inside the loop re-arranges, which is why only the
+    // first lookup was ever affected).
+    Arrange();
+
+    // Bounded walk: repeatedly trades places with whichever neighbor
+    // sits one step further toward the requested edge until there is
+    // nothing left in that direction to trade with (the window is
+    // flush against that edge) - exactly what a manual
+    // Super+Shift+h/j/k/l move all the way to the edge would do by
+    // hand, done once per newly-opened window that a rule asks to be
+    // there. kMaxHopsPerDirection is purely a defensive bound against
     // any pathological tree shape; a normal handful-of-windows
     // workspace always runs out of neighbors long before hitting it.
     constexpr int kMaxHopsPerDirection = 16;
 
-    for (Direction direction : habitDirections)
+    for (Direction direction : directions)
     {
         for (int hop = 0; hop < kMaxHopsPerDirection; ++hop)
         {
@@ -3547,6 +3888,35 @@ void WindowManager::ApplyAdaptivePlacementNudge(ManagedWindow* window)
             Arrange();
         }
     }
+}
+
+Rect WindowManager::FloatingRectAtRuleEdges(
+    Rect rect,
+    const Monitor& monitor,
+    WindowRule::Horizontal horizontal,
+    WindowRule::Vertical vertical) const
+{
+    if (horizontal == WindowRule::Horizontal::Default &&
+        vertical == WindowRule::Vertical::Default)
+        return rect;
+
+    const Rect& workArea = monitor.WorkArea();
+    int margin = m_config.GetInt("general.outer_gap", 8);
+    int borderWidth = m_config.GetInt("general.border_size", 2);
+
+    // Only the axis a rule names is moved; the other keeps wherever
+    // the window would otherwise have been centred.
+    if (horizontal == WindowRule::Horizontal::Left)
+        rect.x = workArea.x + margin;
+    else if (horizontal == WindowRule::Horizontal::Right)
+        rect.x = workArea.Right() - rect.width - borderWidth * 2 - margin;
+
+    if (vertical == WindowRule::Vertical::Top)
+        rect.y = workArea.y + margin;
+    else if (vertical == WindowRule::Vertical::Bottom)
+        rect.y = workArea.Bottom() - rect.height - borderWidth * 2 - margin;
+
+    return rect.ClampedTo(workArea, borderWidth);
 }
 
 bool WindowManager::TryRestoreSessionPosition(
@@ -4179,28 +4549,67 @@ void WindowManager::UpdateAllBars()
 }
 
 WindowRuleEffect WindowManager::ResolveWindowRules(
-    const std::string& className,
-    const std::string& instanceName,
-    const std::string& title) const
+    const WindowIdentity& window) const
 {
-    WindowRuleEffect effect;
+    return Kohiko::ResolveWindowRules(m_windowRules, window);
+}
 
-    for (const WindowRule& rule : m_windowRules)
+WindowIdentity WindowManager::RuleIdentityOf(
+    const ManagedWindow& window)
+{
+    WindowIdentity identity;
+    identity.className = window.ClassName();
+    identity.instanceName = window.InstanceName();
+    identity.title = window.Title();
+    identity.role = window.Role();
+    identity.windowType = window.WindowType();
+    return identity;
+}
+
+void WindowManager::NoteRaised(ManagedWindow* window)
+{
+    if (window && window->IsFloating())
+        window->SetRaiseSerial(++m_raiseCounter);
+}
+
+void WindowManager::RestackTileBelowFloating(ManagedWindow* tile)
+{
+    if (!tile)
+        return;
+
+    // The lowest window of the tier that must stay above every tile:
+    // the floating windows on this workspace, a fullscreen window, and
+    // the scratchpad if it is showing. Floating windows are compared by
+    // their raise ticket (lowest = lowest in the stack, the invariant
+    // ArrangeMonitor() maintains); a fullscreen window and the
+    // scratchpad are raised after the floating ones, so they only matter
+    // when there is no floating window at all.
+    ManagedWindow* lowest = nullptr;
+    ManagedWindow* topTierOther = nullptr;
+
+    for (ManagedWindow* other : m_repository.Visible(tile->Workspace()))
     {
-        if (!rule.Matches(className, instanceName, title))
+        if (other == tile)
             continue;
 
-        switch (rule.action)
+        if (other->IsFloating())
         {
-            case WindowRule::Action::Float:       effect.forceFloat      = true;          break;
-            case WindowRule::Action::Tile:        effect.forceTile       = true;          break;
-            case WindowRule::Action::Fullscreen:  effect.forceFullscreen = true;           break;
-            case WindowRule::Action::NoFullscreen: effect.denyFullscreen  = true;          break;
-            case WindowRule::Action::Workspace:   effect.forceWorkspace  = rule.workspace; break;
+            if (!lowest || other->RaiseSerial() < lowest->RaiseSerial())
+                lowest = other;
+        }
+        else if (other->IsFullscreen())
+        {
+            topTierOther = other;
         }
     }
 
-    return effect;
+    if (!lowest && m_scratchpad.HasWindow() && m_scratchpad.IsVisible())
+        topTierOther = m_repository.Get(m_scratchpad.Window());
+
+    ManagedWindow* anchor = lowest ? lowest : topTierOther;
+
+    if (anchor)
+        m_connection.StackBelow(tile->Id(), anchor->Id());
 }
 
 void WindowManager::RaiseModalWindows()

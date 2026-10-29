@@ -152,6 +152,25 @@ void ConfigWriter::SetScalar(
     m_lines.insert(m_lines.begin() + static_cast<std::ptrdiff_t>(insertAt), newLine);
 }
 
+bool ConfigWriter::RemoveScalar(
+    const std::string& key)
+{
+    bool removed = false;
+
+    for (std::size_t i = m_lines.size(); i-- > 0;)
+    {
+        std::string lineKey, lineValue;
+
+        if (SplitActiveLine(m_lines[i], lineKey, lineValue) && lineKey == key)
+        {
+            m_lines.erase(m_lines.begin() + static_cast<std::ptrdiff_t>(i));
+            removed = true;
+        }
+    }
+
+    return removed;
+}
+
 std::vector<std::string> ConfigWriter::GetRawBlock(
     const std::string& prefix) const
 {

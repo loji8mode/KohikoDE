@@ -29,6 +29,34 @@ enum class LauncherResult
     Cancelled   // Escape - close without running anything
 };
 
+// What pressing Enter in the Launcher asks the window manager to do,
+// captured ONCE, at the moment Enter is accepted, from exactly what was
+// selected then - and never read from the Launcher again. Everything in
+// it is a value (no pointer, index or reference back into the Launcher's
+// result list), so nothing that happens afterwards - a page change, a new
+// query, a different selection, the Launcher closing, a background index
+// rebuild replacing the result list - can change what gets launched.
+//
+// It deliberately carries NO workspace: which workspace the application's
+// window ends up on is decided when that window maps (the workspace the
+// user is looking at then, unless an explicit Window Rule says
+// otherwise), not frozen to wherever the Launcher happened to be opened.
+struct LaunchRequest
+{
+    enum class Kind
+    {
+        Nothing,     // nothing selected / nothing to run (not named None: Xlib #defines it)
+        Command,     // run `command` through the shell
+        OpenFolder   // open the folder containing `path` in the file manager
+    };
+
+    Kind kind = Kind::Nothing;
+    std::string command;
+    std::string path;
+
+    bool IsEmpty() const { return kind == Kind::Nothing; }
+};
+
 // Kohiko's native Super+D launcher, replacing the old
 // `exec.launcher=dmenu_run` default: a small centered input box that
 // "instantly opens, cursor already in the input field, type, Enter,
@@ -109,6 +137,20 @@ public:
     std::string SelectedCommand();
     std::string SelectedPath();
     bool SelectedIsFile() const;
+
+    // Snapshots the current selection into an immutable LaunchRequest
+    // (and records the launch in the history, exactly once - the same
+    // side effect SelectedCommand() always had). Call it once, when
+    // Enter is accepted.
+    LaunchRequest TakeLaunchRequest();
+
+    // Read-only view of the visible state - what a test (via
+    // `kohikoctl launcher`) or a status display needs, and what must
+    // survive the Launcher moving between workspaces/monitors.
+    std::size_t SelectedIndex() const { return m_selectedIndex; }
+    std::size_t ScrollOffset() const { return m_scrollOffset; }
+    std::size_t MatchCount() const { return m_matches.size(); }
+    const Rect& Geometry() const { return m_geometry; }
 
     LauncherResult HandleKeyPress(
         const XKeyEvent& event

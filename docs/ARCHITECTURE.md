@@ -29,6 +29,7 @@ Kohiko (desktop environment)
 │   └── SessionStore/SessionLockBridge - session persistence, logind integration
 ├── kohiko-session                    - crash-restart session wrapper (the xsessions entry point)
 ├── kohiko-settings                   - standalone native configuration GUI
+├── kohiko-choose-window              - the explicit window-rule dialog (and --set/--delete CLI)
 ├── kohiko-audio / kohiko-network / kohiko-bluetooth - standalone native apps
 │   └── matching *-tray widgets for the system tray above
 └── kohikoctl                         - CLI / IPC client
@@ -75,6 +76,7 @@ contracts, never on shared memory or a shared address space:
 | `kohiko` | The window manager itself - the only process that speaks X11 as a *window manager* (`SubstructureRedirect` etc.) | X server directly (Xlib); `kohikoctl` over a Unix socket; `kohiko-settings` only indirectly, via the config file |
 | `kohikoctl` | A CLI client - sends one line, reads one response, exits | `kohiko`'s `IPCServer`, over a Unix socket |
 | `kohiko-settings` | A structured GUI editor for `kohiko.conf` | The config file directly (reads via `Config`, writes via `ConfigWriter`); tells `kohiko` to reload via IPC after saving |
+| `kohiko-choose-window` | A small dialog (and scriptable CLI) that edits ONE application's `windowrule=app:...` line - the only thing besides Settings that writes a window rule | The config file directly (`WindowRuleStore` via `ConfigWriter`); tells `kohiko` to reload via IPC; opened by the `choose_window` command, which passes it the focused window's identity. Plain X11/Xft only - deliberately not the D-Bus/PipeWire `Ui*` toolkit, so it exists on every install |
 | `kohiko-audio` / `kohiko-network` / `kohiko-bluetooth` | Ordinary X11 client apps, each a full settings page for one subsystem | PipeWire / NetworkManager (D-Bus) / BlueZ (D-Bus) respectively - never `kohiko` itself |
 | `kohiko-audio-tray` / `kohiko-network-tray` / `kohiko-bluetooth-tray` | Small system-tray clients | The same backend as their matching full app, plus `AppInstanceLock` to raise the full app instead of launching a second instance |
 
@@ -403,7 +405,7 @@ own comments for the full reasoning) -
   `/etc/xdg/autostart` (see `Xdg::AutostartDirs()`'s own ordering and
   `DesktopEntry.cpp`'s `ShouldAutostart()`, which already respects
   `Hidden` - this is exactly what makes the override work, unmodified,
-  through Kohiko's own existing `WindowManager::RunXdgAutostartEntries()`)
+  through Kohiko's own existing `WindowManager::CollectXdgAutostartEntries()`)
   - so it never touches the file Blueman's own package owns, and a
     `pacman -Syu` upgrade of `blueman` can't restore anything. Both
     steps are idempotent: re-running `install-arch.sh` (a reinstall or
@@ -804,7 +806,7 @@ complete example: connect a backend client, call `tray.Initialize()`,
 wire `SetLeftClickHandler`/`SetRightClickHandler`/`SetScrollHandler`,
 call `tray.Run()`). Ships as its own autostart `.desktop` entry under
 `/etc/xdg/autostart` (see `desktop/kohiko-audio-tray.desktop`), which
-`WindowManager::RunXdgAutostartEntries()` picks up and runs generically
+`WindowManager::CollectXdgAutostartEntries()` picks up and `PlanAutostart()` launches generically
 alongside every other autostart entry (see
 [Autostart](../README.md#xdg-autostart-desktop-entries) in the
 README) - `kohiko` itself never needs source changes, or to know a new
@@ -828,14 +830,25 @@ away). That check is a *fast path*, not a permanent veto, as of 0.20.4
 was itself causing (any window carrying `_XEMBED_INFO`, tray icon or
 not, that never actually received a real `SYSTEM_TRAY_REQUEST_DOCK`
 stayed invisible forever) and the bounded-timeout fallback that fixed
-it: `Manage()` still holds off immediately, but `Tick()`-driven
-`CheckPendingXEmbedWindows()` manages the window normally after ~2
-seconds if nothing has actually claimed it by then. A genuine
-`TrayIconClient`-based icon is unaffected by this - it's claimed well
-inside that window - but it means the fast path is now correctly a
-*hint*, not something a new tray-adjacent window can rely on as a
-guarantee it'll never be tiled if something else about its own startup
-sequence goes wrong. One more thing worth carrying over from the three
+it: `Manage()` still holds off immediately, but
+`CheckPendingXEmbedWindows()` manages the window normally once a short
+grace period (`kXEmbedDockGrace`, 100 ms as of 0.22.0 - it was 2 s,
+checked only on the ~1 Hz `Tick()`, which delayed *every Qt window* by
+2-3 s, since every Qt top-level carries `_XEMBED_INFO`; see the 0.22.0
+`CHANGELOG.md` entry for the measurements) has passed with nothing
+claiming it. The deadline is serviced by `EventLoop::Run()` directly
+(`NextXEmbedDeadline()` + `TickSchedule::EarliestWake()`), so it ends at
+the deadline rather than at the next tick, and costs no wake-up when
+nothing is pending. A genuine `TrayIconClient`-based icon is unaffected
+by this - it docks before it maps, so it never reaches the hold at all -
+but it means the fast path is correctly a *hint*, not something a new
+tray-adjacent window can rely on as a guarantee it'll never be tiled if
+something else about its own startup sequence goes wrong. Likewise,
+`TrayIconClient::Redraw()` ends with an `XFlush()`: Xlib only queues
+drawing in a client-side buffer and `Run()` then blocks in `poll()`,
+which does not flush it, so without that flush a redraw waited for the
+next unrelated wake-up - a new tray tool's own timers must not be what
+makes its icon update. One more thing worth carrying over from the three
 existing tray tools rather than rediscovering (0.20.8): whatever
 `UiIconCache::Get()` is asked to resolve for this new icon's `DrawCallback`
 *will* sometimes fail - not as an edge case, but as the likely default
@@ -846,6 +859,24 @@ guaranteed-to-render glyph) for that `else` branch. Leaving it empty
 draws nothing beyond the background fill, indistinguishable from a
 broken icon; see any of `kohiko-audio-tray.cpp`/`kohiko-network-tray.cpp`/
 `kohiko-bluetooth-tray.cpp`'s `FallbackFor*()` for the pattern.
+
+**Placement is decided in one place, by explicit configuration.** A new
+window's workspace, mode and position come from `WindowManager::Manage()`
+consulting, in this order: a restored session (only with
+`session.restore_priority=session`, only for windows open at startup),
+`ResolveWindowRules()` over the `windowrule=` lines (`WindowRule.cpp` -
+pure, no X11), a restored session, a `workspace<N>=` autostart pin, the
+transient parent, the current workspace. Nothing in the event handling
+(`SwapWindows()`, `MoveFocusedToWorkspace()`, drags) writes to any of
+it. The only writers of a rule are `WindowRuleStore` callers:
+`kohiko-choose-window` (its own small X11 process, deliberately not on
+the D-Bus/PipeWire `Ui*` toolkit so it exists on every install) and the
+Settings editor. Launching is separate: `RunAutostart()` builds one
+`PlanAutostart()` (`AutostartPlan.cpp`) over `workspace<N>=`,
+`auto_start_programs` and XDG entries so a program is launched once, and
+runs at most once per login session. Session Restore only ever applies to
+windows that existed when Kohiko started (`ConsumeSessionRecord()`),
+because X11 recycles window ids.
 
 **A new native notification** - see [Native
 notifications](#native-notifications) for the full design. From inside

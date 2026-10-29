@@ -1,6 +1,7 @@
 #include "Application.h"
 
 #include "ConfigMigration.h"
+#include "Xdg.h"
 #include "EventLoop.h"
 #include "Logger.h"
 #include "RecoveryMode.h"
@@ -35,7 +36,7 @@ int Application::Run(
     // $XDG_CURRENT_DESKTOP drives OnlyShowIn=/NotShowIn= filtering for
     // both the launcher (DesktopEntry.cpp's ShouldDisplay()) and XDG
     // autostart (ShouldAutostart(), via WindowManager::
-    // RunXdgAutostartEntries()) - but nothing in this codebase ever
+    // CollectXdgAutostartEntries()) - but nothing in this codebase ever
     // set it, leaving it entirely up to whatever launched this
     // process. A display manager that honours desktop/kohiko.desktop's
     // DesktopNames=Kohiko typically exports it already; a manual
@@ -83,12 +84,28 @@ int Application::Run(
         // this build actually knows about - see ConfigMigration.h.
         // Ahead of Load() below, so a key it just appended is picked
         // up this session too, not only after a second restart.
-        if (ConfigMigration::MigrateIfNeeded(configPath))
-            Logger::Info("added new default settings to " + configPath);
+        std::vector<std::string> retiredKeys;
+
+        if (ConfigMigration::MigrateIfNeeded(configPath, &retiredKeys))
+            Logger::Info("updated " + configPath + " to match this version (previous contents saved to " + configPath + ".bak)");
+
+        for (const std::string& key : retiredKeys)
+            Logger::Info("removed obsolete setting " + key + " from " + configPath +
+                         " - Kohiko no longer learns window placement; use Window Rules instead (kohiko-choose-window / kohiko-settings)");
 
         if (!m_config.Load(configPath))
             Logger::Warning("could not read " + configPath + ", using built-in defaults");
     }
+
+    // Learned placement habits no longer exist as a feature (0.22.0).
+    // Delete what the old one left on disk instead of leaving a dead
+    // file behind that could be mistaken for live state - and never
+    // convert it into explicit rules. Independent of the config
+    // migration above on purpose: it must also run when that is
+    // skipped (crash recovery) or the config can't be read.
+    for (const std::string& name : ConfigMigration::RetireObsoleteData(Xdg::DataDir()))
+        Logger::Info("removed obsolete data file " + (Xdg::DataDir() / name).string() +
+                     " (learned window placement was removed; nothing replaces it automatically)");
 
     WindowManager windowManager(m_connection, m_config, configPath);
     windowManager.Initialize();

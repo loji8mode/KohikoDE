@@ -64,8 +64,8 @@ void KeyboardManager::Configure(
     }
 }
 
-void KeyboardManager::HandleKeyPress(
-    const XKeyEvent& event)
+const KeyboardManager::Binding* KeyboardManager::FindBinding(
+    const XKeyEvent& event) const
 {
     static constexpr unsigned int kRelevantMask =
         ShiftMask | ControlMask | Mod1Mask | Mod4Mask;
@@ -75,11 +75,23 @@ void KeyboardManager::HandleKeyPress(
     for (const Binding& binding : m_bindings)
     {
         if (binding.keycode == event.keycode && binding.modifiers == modifiers)
-        {
-            m_windowManager.Execute(binding.command);
-            return;
-        }
+            return &binding;
     }
+
+    return nullptr;
+}
+
+bool KeyboardManager::IsGlobalShortcut(
+    const XKeyEvent& event) const
+{
+    return FindBinding(event) != nullptr;
+}
+
+void KeyboardManager::HandleKeyPress(
+    const XKeyEvent& event)
+{
+    if (const Binding* binding = FindBinding(event))
+        m_windowManager.Execute(binding->command);
 }
 
 KeySym KeyboardManager::ResolveKeysym(

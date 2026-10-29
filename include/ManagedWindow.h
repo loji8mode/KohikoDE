@@ -59,6 +59,16 @@ public:
 
     const std::string& Role() const;
 
+    // The window's primary _NET_WM_WINDOW_TYPE, normalised ("normal",
+    // "utility", ...), as it was when the window was first managed;
+    // empty if the window declares none. Part of what a window rule's
+    // `type:` selector matches (see WindowRule.h).
+    void SetWindowType(
+        const std::string& type
+    );
+
+    const std::string& WindowType() const;
+
     void SetPid(
         long pid
     );
@@ -130,6 +140,24 @@ public:
     // surfaced it) leave permanent dead space once closed.
     bool OccupiesTreeSlot() const;
 
+    // Where this window sits among the *floating* windows, as a
+    // monotonically increasing "last raised" ticket (0 = not part of
+    // the floating tier right now). WindowManager is the only writer.
+    // It exists because X11 has no cheap way to ask "which of these two
+    // windows is higher" without a synchronous XQueryTree round trip,
+    // and because re-raising the floating windows in whatever order the
+    // repository happens to iterate them (what ArrangeMonitor() used to
+    // do) silently reshuffled windows the user had arranged - a plain
+    // workspace round trip swapped two overlapping floating windows.
+    // Restacking by this ticket instead keeps their relative order
+    // stable and makes "most recently focused/raised is on top" the
+    // rule rather than an accident of hash-table order.
+    void SetRaiseSerial(
+        unsigned long serial
+    );
+
+    unsigned long RaiseSerial() const;
+
     void SetBorderWidth(
         int width
     );
@@ -186,6 +214,7 @@ private:
     std::string m_className;
     std::string m_instanceName;
     std::string m_role;
+    std::string m_windowType;
     long m_pid = 0;
 
     int m_workspace = 1;
@@ -196,6 +225,8 @@ private:
 
     WindowState m_state = WindowState::Tiled;
     WindowState m_previousState = WindowState::Tiled;
+
+    unsigned long m_raiseSerial = 0;
 
     int m_borderWidth = 0;
 

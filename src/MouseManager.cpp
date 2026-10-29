@@ -245,6 +245,20 @@ bool WindowManager::HandleBarOrPowerMenuButtonPress(
             // while a modal is open: dismiss it without acting.
             ClosePowerMenu();
         }
+        else if (event.button == Button1)
+        {
+            // Left-click on a workspace number: go to that workspace, on
+            // THIS bar's monitor, through exactly the function every
+            // keyboard shortcut and `kohikoctl dispatch workspace N`
+            // ends in - so a click and SUPER+N can never behave
+            // differently (an open Launcher follows, a workspace
+            // already shown on another monitor is refused with the same
+            // notice, the bar's highlight is refreshed by the same
+            // path). Only the left button; a click that lands between or
+            // beside the numbers does nothing.
+            if (int workspace = bar->WorkspaceAt(event.x, event.y))
+                SwitchWorkspaceOnMonitor(*monitor, workspace);
+        }
 
         return true;
     }

@@ -7,6 +7,9 @@
 #include "UiScrollView.h"
 #include "UiWindow.h"
 
+#include <map>
+#include <optional>
+
 namespace Kohiko
 {
 
@@ -97,6 +100,34 @@ private:
     // current selection if it still exists, otherwise falls back to
     // the first connected device, otherwise the first device overall.
     void EnsureSelection(const std::vector<BluetoothDevice>& devices);
+
+    // --- Slow BlueZ operations (pair, connect, forget, scan, ...) ---------
+    //
+    // Never run on the window's event loop: each goes through
+    // BluezClient's *Async API, returns at once, and its outcome lands
+    // in OnOperationDone() - on this thread, from the loop, once BlueZ
+    // has answered. While one is pending its device (or the adapter
+    // controls) shows "Working..." and cannot be started a second time;
+    // a failure is shown on the device and as a desktop notification.
+    // `target` is the device path (or the adapter path for adapter-wide
+    // operations) the note is attached to.
+    void OnOperationDone(const std::string& target, const OperationResult& result);
+
+    // Asks for a page rebuild (BlueZ change, operation finished). The
+    // rebuild itself waits until the user is no longer pressing a
+    // widget - see IsInteracting() - and the 300 ms timer that waits for
+    // that exists ONLY while a rebuild is pending, not for the life of
+    // the window.
+    void ScheduleRebuild();
+
+    struct Note
+    {
+        std::string text;
+        bool error = false;
+    };
+
+    std::map<std::string, Note> m_notes;               // target path -> last failure
+    std::optional<UiWindow::TimerId> m_rebuildTimer;
 
     UiWindow m_window;
     BluezClient m_bluez;

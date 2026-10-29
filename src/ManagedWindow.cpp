@@ -183,6 +183,28 @@ bool ManagedWindow::OccupiesTreeSlot() const
     return IsTiled() || (IsFullscreen() && m_previousState == WindowState::Tiled);
 }
 
+void ManagedWindow::SetWindowType(
+    const std::string& type)
+{
+    m_windowType = type;
+}
+
+const std::string& ManagedWindow::WindowType() const
+{
+    return m_windowType;
+}
+
+void ManagedWindow::SetRaiseSerial(
+    unsigned long serial)
+{
+    m_raiseSerial = serial;
+}
+
+unsigned long ManagedWindow::RaiseSerial() const
+{
+    return m_raiseSerial;
+}
+
 void ManagedWindow::SetBorderWidth(
     int width)
 {

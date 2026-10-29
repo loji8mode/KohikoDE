@@ -7,8 +7,8 @@
 // Manage()'s own comment (WindowManager.cpp) for why that placement
 // itself is correct, existing, deliberate behaviour and this
 // notification is the actual fix: without it, a `workspace<N>=`
-// autostart line, a `windowrule=workspace:N`, or a learned
-// adaptive-placement habit sending a freshly launched application
+// autostart line or a `windowrule=workspace:N` sending a freshly
+// launched application
 // (Telegram and Discord, sharing one `workspace2=` line in the
 // shipped default config, were the reproducer - see the 0.20.4
 // CHANGELOG entry) to a background workspace is completely
@@ -21,7 +21,7 @@
 namespace Kohiko::WindowPlacementNotice
 {
 
-// `appName` is whatever WindowManager::AppClassKey() resolved (WM_CLASS
+// `appName` is whatever WindowRule::AppKeyFor() resolved (WM_CLASS
 // class, falling back to instance, falling back to "" if the window
 // set neither) - "" is rare in practice (well-behaved clients always
 // set WM_CLASS) but not impossible, and "A window opened on

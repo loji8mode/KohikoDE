@@ -7,6 +7,9 @@
 #include "UiScrollView.h"
 #include "UiWindow.h"
 
+#include <map>
+#include <optional>
+
 namespace Kohiko
 {
 
@@ -107,6 +110,31 @@ private:
     TextField* m_searchField = nullptr;
 
     bool m_networkDirty = false;
+
+    // --- Slow NetworkManager operations (connect, disconnect, VPN, radio, scan) ---
+    //
+    // Never run on the window's event loop: each goes through
+    // NetworkManagerClient's *Async API, returns at once, and its
+    // outcome lands in OnOperationDone() on this thread once
+    // NetworkManager (or the secret agent it waits on) has answered.
+    // While one is pending its control is disabled and relabelled; a
+    // failure is shown on the network's Status line and as a desktop
+    // notification. `target` is the device or connection path.
+    void OnOperationDone(const std::string& target, const OperationResult& result);
+
+    // Asks for a page rebuild; it waits until the user is no longer
+    // pressing a widget. The 300 ms timer that does the waiting exists
+    // only while a rebuild is pending.
+    void ScheduleRebuild();
+
+    struct Note
+    {
+        std::string text;
+        bool error = false;
+    };
+
+    std::map<std::string, Note> m_notes;
+    std::optional<UiWindow::TimerId> m_rebuildTimer;
 
     std::string m_selectedApPath;
     std::string m_searchQuery;

@@ -1,4 +1,5 @@
 #include "Bar.h"
+#include "BarLayout.h"
 
 #include "Config.h"
 #include "SystemTray.h"
@@ -226,6 +227,13 @@ int Bar::Height() const
     return m_height;
 }
 
+int Bar::WorkspaceAt(
+    int x,
+    int y) const
+{
+    return BarLayout::WorkspaceAt(x, y, m_workspaceCount, m_height);
+}
+
 const Rect& Bar::PowerButtonRect() const
 {
     return m_powerButtonRect;
@@ -344,16 +352,18 @@ void Bar::Redraw(bool forceFullRepaint)
         static_cast<unsigned int>(m_height));
 
     int baseline = m_height / 2 + 5;
-    int x = 10;
 
+    // Each label sits at BarLayout::WorkspaceLabelX(i) - the same
+    // arithmetic WorkspaceAt() uses to map a click back to a workspace.
     for (int i = 1; i <= m_workspaceCount; ++i)
     {
         std::string label = std::to_string(i);
         unsigned long color = (i == m_currentWorkspace) ? m_activePixel : m_foregroundPixel;
 
-        DrawText(x, baseline, label, color);
-        x += 22;
+        DrawText(BarLayout::WorkspaceLabelX(i), baseline, label, color);
     }
+
+    int x = BarLayout::WorkspaceLabelX(m_workspaceCount + 1);
 
     if (m_scratchpadActive)
     {

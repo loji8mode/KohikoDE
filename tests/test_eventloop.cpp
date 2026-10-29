@@ -139,6 +139,38 @@ int main()
               "clamped to zero rather than negative when already past due");
     }
 
+    std::printf("\nTickSchedule::EarliestWake() tests (XEmbed hold deadline, 0.22.0):\n");
+    {
+        using std::chrono::milliseconds;
+
+        // The regression: a window held back as a possible tray icon
+        // has a ~100 ms deadline; the next ~1 Hz tick is a full second
+        // away. The wakeup must come at the earlier of the two, or the
+        // hold ends at the next tick (2-3 s with the old 2 s deadline)
+        // instead of at its own deadline.
+        Check(TickSchedule::EarliestWake(t0 + milliseconds(1000), t0 + milliseconds(100))
+                  == t0 + milliseconds(100),
+              "an XEmbed deadline earlier than the next tick pulls the wakeup forward to itself");
+
+        Check(TickSchedule::EarliestWake(t0 + milliseconds(1000), t0 + milliseconds(1500))
+                  == t0 + milliseconds(1000),
+              "a deadline LATER than the next tick never delays the tick");
+
+        Check(TickSchedule::EarliestWake(t0 + milliseconds(1000), std::nullopt)
+                  == t0 + milliseconds(1000),
+              "no pending deadline at all leaves the tick schedule untouched (no extra wakeups when idle)");
+
+        Check(TickSchedule::EarliestWake(t0 + milliseconds(1000), t0 + milliseconds(1000))
+                  == t0 + milliseconds(1000),
+              "equal deadlines resolve to that same instant");
+
+        // A past-due deadline must make TimeUntilDue() report zero
+        // (wake immediately), not negative.
+        auto wake = TickSchedule::EarliestWake(t0 + milliseconds(1000), t0 - milliseconds(5));
+        Check(TickSchedule::TimeUntilDue(t0, wake) == std::chrono::steady_clock::duration::zero(),
+              "an already-expired deadline means wake immediately (zero wait, never negative)");
+    }
+
     std::printf("\nALL %d CHECKS PASSED.\n", g_pass);
     return 0;
 }

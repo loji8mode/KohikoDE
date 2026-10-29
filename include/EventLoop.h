@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <optional>
 
 namespace Kohiko
 {
@@ -98,6 +99,20 @@ inline bool IsDue(
     std::chrono::steady_clock::time_point nextTick)
 {
     return now >= nextTick;
+}
+
+// The moment select() should next wake: the next Tick() deadline,
+// pulled earlier by any other one-shot deadline that exists right now
+// (today: a window WindowManager::Manage() is briefly holding back as
+// a possible tray icon - see WindowManager::NextXEmbedDeadline()).
+// Never later than `nextTick`, and `nullopt` for `other` leaves it
+// untouched - so a deadline that only exists while something is
+// pending costs nothing, and is never a standing periodic wakeup.
+inline std::chrono::steady_clock::time_point EarliestWake(
+    std::chrono::steady_clock::time_point nextTick,
+    std::optional<std::chrono::steady_clock::time_point> other)
+{
+    return (other && *other < nextTick) ? *other : nextTick;
 }
 
 // How long the caller should ask select() to wait so it wakes up

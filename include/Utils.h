@@ -21,6 +21,14 @@ float ParsePercent(
     float fallback
 );
 
+// `text` as ONE word for /bin/sh -c: wrapped in single quotes, with any
+// single quote inside it written as '\'' - so a window title or class
+// containing spaces, quotes, $, `, ; or anything else reaches the
+// program as exactly that text and is never interpreted by the shell.
+std::string ShellQuote(
+    const std::string& text
+);
+
 // Splits `value` on runs of whitespace, dropping empty tokens - used
 // for space-separated config lists such as `auto_start_programs=`
 // (e.g. "telegram-desktop discord zen-browser" -> 3 tokens).

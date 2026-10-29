@@ -213,8 +213,17 @@ void EventLoop::Run()
             nextTick = now + tickInterval;
         }
 
+        // A window being held back as a possible tray icon has its
+        // own, much shorter, deadline - see NextXEmbedDeadline(). Fold
+        // it into the wakeup (rather than waiting for the next ~1 Hz
+        // tick) so the hold ends when it says it does.
+        m_windowManager.CheckPendingXEmbedWindows();
+
+        auto wakeAt = TickSchedule::EarliestWake(
+            nextTick, m_windowManager.NextXEmbedDeadline());
+
         auto remainingUs = std::chrono::duration_cast<std::chrono::microseconds>(
-            TickSchedule::TimeUntilDue(now, nextTick));
+            TickSchedule::TimeUntilDue(now, wakeAt));
 
         timeval timeout{};
         timeout.tv_sec = static_cast<time_t>(remainingUs.count() / 1000000);

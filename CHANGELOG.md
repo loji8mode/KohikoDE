@@ -1,5 +1,293 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Floating windows no longer vanish under a tile you carried across
+  them.** Dragging a tiled window (Super+drag) raises it above everything
+  so it can be carried; when it was dropped with no swap target - on its
+  own slot, on a gap, on a floating window - the snap-back never restacked
+  it, so it stayed above every floating window it overlapped. The floating
+  window's geometry had not changed and it came back the moment anything
+  else triggered a layout (a workspace switch, another window opening),
+  which looked like a repaint bug. It was stacking: the tile is now put
+  back under the floating tier at the drop (one `ConfigureWindow`, no
+  round trip, no floating window touched). Along the way the floating
+  windows now keep a stable order of their own (most recently raised on
+  top) instead of being re-raised in repository order on every layout -
+  two overlapping floating windows used to swap places on a workspace
+  round trip - and Super+drag grabs the floating window that is actually
+  on top.
+- **Global shortcuts work while the Launcher is open.** SUPER+3 typed a
+  "3" into the Launcher instead of switching workspace: every key press
+  was offered to the Launcher first, including the shortcuts Kohiko had
+  grabbed. A key that is one of your configured `bind=` shortcuts now goes
+  to Kohiko; everything else - digits, letters, Enter, Escape, arrows -
+  is still the Launcher's.
+- **The Launcher follows a workspace switch.** Switching workspace with it
+  open keeps its query, selection and keyboard focus, moves it to the
+  monitor that is focused now, and - this was the stale state - gives
+  focus back, when it closes, to a window on the workspace you are on, not
+  to the (now hidden) window from where it was opened. A window started
+  from the Launcher opens on the workspace you are on when the window
+  appears (never on the Launcher's original one); an explicit
+  `workspace:` Window Rule still wins.
+- **The Launcher launches exactly what Enter accepted.** The selection is
+  captured once as an immutable `LaunchRequest` (command/path as values)
+  and submitted exactly once; nothing typed afterwards can change it.
+- **Taskbar workspace numbers are clickable.** Left-click number N =
+  workspace N, through the same transition as SUPER+N (an open Launcher
+  follows). Hit boxes tile the strip exactly (`BarLayout.h`, shared by
+  drawing and hit testing); right/middle clicks and clicks beside the
+  numbers do nothing.
+- **Native tray icons share one mouse contract**: left click opens or
+  raises the main window, right click opens the quick-action menu
+  (`TrayInteraction`). Network and Bluetooth had the two swapped relative
+  to audio. Also: a tray menu action no longer runs while the menu still
+  holds the pointer and keyboard grabs (a slow action froze the whole
+  desktop's input with the menu on screen); the menu is kept on screen and
+  is not shown if it cannot take the pointer; a quick second click on the
+  icon no longer runs the menu's first item; the single-instance lock is
+  atomic (`flock`) - eight simultaneous starts used to occasionally leave
+  two instances, and three quick clicks on a tray icon started three
+  processes; the tray no longer leaves its icon blank for up to a timer
+  interval after a menu closes (events parked in Xlib's queue by an X
+  round trip in a timer callback were only noticed after the next
+  `poll()` wake-up).
+- **Native control windows stay usable during slow operations.**
+  Bluetooth pair/connect/forget/trust/power/scan and NetworkManager
+  connect/disconnect/VPN/radio/scan ran as synchronous D-Bus calls on the
+  window's event loop (a Bluetooth connect can take 15 s, pairing 30 s;
+  connecting to a Wi-Fi network reads every saved profile and may wait on
+  a keyring prompt) and swallowed every error. They now run on worker
+  threads with private D-Bus connections (`OperationWorker`,
+  `DBusOperationQueue`), complete through an eventfd the loop already
+  polls (no timer), show "Working..." and disable the control meanwhile,
+  refuse a duplicate of an operation already running, and report failures
+  on the device/network and as a desktop notification. The adapter/radio
+  controls run on their own lane so a connect never delays them. Closing
+  the window never waits for a running operation. PipeWire (audio) was
+  not the problem: its operations are already asynchronous and
+  fd-driven.
+- `UiWindow::Run()` only looked at Xlib's event queue after `poll()`
+  reported new socket data, so a close request (or move/resize) parked
+  there by an X round trip inside a timer/fd callback was ignored until
+  some unrelated event arrived. It now drains the queue before blocking
+  as well, and timer waits are rounded up to a whole millisecond (they
+  were truncated, so the loop spun for up to 1 ms before every timer).
+- The audio window's notification ticker (100 ms) now runs only while a
+  toast is on screen instead of for the life of the window; Bluetooth and
+  Network windows' 300 ms rebuild timers likewise exist only while a
+  rebuild is pending.
+
+### Added
+- **Window Rules can target one kind of window of an application**: new
+  `role:` (exact WM_WINDOW_ROLE) and `type:` (primary _NET_WM_WINDOW_TYPE)
+  selectors, e.g. `windowrule=app:zen role:PictureInPicture mode:floating`.
+  A rule asking for a role/type the window lacks never matches (it is not
+  widened into an application-wide rule); the more specific rule beats
+  `app:zen` regardless of file order. `kohiko-choose-window --role R
+  --type T --scope app|role|type|role+type` and the `choose_window role`
+  command write/edit/delete such rules independently of the plain
+  application rule; the Settings Window Rules tab keeps them when other
+  cells of the same rule are edited. Existing rules are unaffected. (A
+  `role:` selector used to be rejected as unsupported, so a line using one
+  was skipped; it now takes effect.)
+- `kohikoctl launcher` (read-only): whether the Launcher is open, its
+  query, selection, position and the workspace you are on.
+- Test tooling: real XTEST input and an X-server-side probe (stacking
+  order, pixels, grabs) for the live tests, a scripted fake D-Bus for the
+  native apps, and new regression tests for everything above.
+
+## Version 0.22.0
+
+### Changed (behaviour change - please read)
+- **Adaptive placement has been removed and replaced by explicit
+  Window Rules.** Kohiko no longer learns anything from where you put
+  windows. The old system counted how often you moved an application to
+  a workspace or side by hand (3 votes at a 70% share was enough) and
+  then placed its windows there automatically - which could turn a
+  temporary, one-off move into a permanent placement, with no way to
+  see or change why. `PlacementHabitStore` and everything that fed it
+  or read it are deleted (`include/PlacementHabitStore.h`,
+  `src/PlacementHabitStore.cpp`, `tests/test_placementhabits.cpp`, the
+  `general.adaptive_placement` setting, the vote calls in
+  `SwapWindows()`/`MoveFocusedToWorkspace()`, the prediction in
+  `Manage()`).
+  - Moving, dragging, resizing, swapping a window or sending it to
+    another workspace is now always just that one action. It never
+    creates, changes or removes a rule.
+  - **Migration.** On the first start Kohiko deletes the old
+    `$XDG_DATA_HOME/kohiko/placement_habits` file and removes
+    `general.adaptive_placement` from `kohiko.conf` (the previous config
+    is saved to `kohiko.conf.bak` first; each removal is logged). The old
+    data is deliberately **not** converted into rules: it recorded
+    accidents as much as intentions. Nothing replaces it automatically;
+    write the rules you want (below).
+  - A `bind=SUPER+SHIFT+W choose_window` line is in `config/default.conf`.
+    The config migration only adds missing *settings*, never
+    keybindings, so an existing config needs that line added by hand.
+
+### Added
+- **Explicit window rules** - `windowrule=` was extended, not
+  duplicated. A rule is whitespace-separated `key:value` tokens in any
+  order, with at least one selector and one property:
+  - selectors: `app:<key>` (exact, case-insensitive match on the
+    window's `WM_CLASS` class, falling back to its instance only if the
+    class is empty - what the dialog writes), and the existing
+    `class:`/`instance:`/`title:` substring selectors;
+  - properties, each optional and independent: `workspace:<N>`,
+    `horizontal:left|right`, `vertical:top|bottom`,
+    `mode:tiled|floating|fullscreen`.
+  - Every legacy form still parses (`tile`, `float`, `fullscreen`,
+    `nofullscreen`, `workspace:N`, selectors in any order, a trailing
+    `# comment`).
+  - Several matching rules are applied least- to most-specific (number
+    of selectors), ties in file order, later overriding earlier per
+    property - so a general app rule plus a `class:`+`title:` rule for
+    one window of it compose. Matching/resolution is a pure function,
+    `ResolveWindowRules()` in `WindowRule.cpp`.
+  - Parsing is strict: an unknown key, a bad value, no selector or no
+    property is skipped with a logged warning instead of being applied
+    in part. (A bare `windowrule=tile` used to be accepted by nothing in
+    particular; one with an unsupported selector such as `role:` used to
+    silently apply to *every* window of the class.)
+  - Position: `horizontal:`/`vertical:` walk a newly opened tiled window
+    toward that edge by swapping with its neighbours (the mechanism the
+    old nudge used); a floating window is placed flush to that edge of
+    the screen. Fixed along the way: that walk read neighbours before
+    the layout had been computed, so for a freshly opened window it
+    found none and silently did nothing - the old adaptive nudge's
+    position half could never actually have moved a new window.
+- **`kohiko-choose-window`** and the `choose_window` command
+  (`Super+Shift+W`, or `kohikoctl dispatch choose_window`): a small
+  keyboard- and mouse-driven dialog for the focused window's
+  application - Workspace, Horizontal, Vertical, Mode, each with an
+  explicit Default - that opens on the saved rule and can Save, Cancel
+  or Reset (delete) it. A plain X11/Xft program like `kohiko-settings`
+  (not the D-Bus/PipeWire `Ui*` toolkit), so it exists on every
+  install. Also `--list`, `--show`, `--set "..."`, `--delete` for
+  scripting, built on the same `WindowRuleStore` code. It never creates
+  a config (one fabricated from scratch has no `bind=` lines and would
+  remove every keybinding) and edits only its own `app:` line, leaving
+  every other line byte-for-byte alone.
+- **Settings reorganised** so each tab has one responsibility:
+  - **Autostart** (new tab): everything that launches programs -
+    `auto_start_programs` (moved out of General) and the per-workspace
+    `workspace<N>=` fields (moved out of Workspaces).
+  - **Workspaces**: just `workspace.count`.
+  - **Window Rules**: the rules, now a two-line row per rule
+    (application/instance/title, then Workspace and click-to-cycle
+    Horizontal/Vertical/Mode buttons), plus `session.restore_priority`
+    (moved out of General). A rule Kohiko would refuse to load is
+    flagged with the parser's own error message (the editor validates
+    with `WindowRule::Parse()`, so the two can never disagree).
+  - Removed: `general.adaptive_placement`. Help texts rewritten to say
+    what each setting does and does not do.
+
+### Fixed
+- **Qt applications (FeatherPad, Telegram, ...) appeared 2-3 seconds
+  after launch.** Measured with a real FeatherPad (Qt 5.15) under a real
+  `kohiko`: window creation to map was **2273, 2378, 2374 ms**; now
+  **104, 105, 104 ms**. Root cause: `Manage()` holds back any window
+  carrying `_XEMBED_INFO` for a possible tray-dock request (added in
+  0.20.4, correctly, to stop genuine tray icons flashing as a full tile).
+  But every Qt top-level window carries that property (a FeatherPad main
+  window does) and none of them dock, so every Qt window paid the full
+  deadline - a fixed 2 s that was only checked on the ~1 Hz `Tick()`,
+  i.e. 2-3 s. Not an X11 round trip, `XIfEvent`, polling or retry loop:
+  a plain deadline plus tick quantization.
+  - The deadline is now `kXEmbedDockGrace` = 100 ms and is serviced by
+    `EventLoop::Run()` itself (`NextXEmbedDeadline()` folded into the
+    `select()` timeout via `TickSchedule::EarliestWake()`), not by
+    `Tick()`. A one-shot wakeup that exists only while such a window is
+    pending - no new timer, idle wake-ups unchanged (measured 1.6-1.7/s
+    for `kohiko`, 0.5/s for `kohiko-audio-tray`, identical to 0.21.4).
+  - The tray fix is not reverted: real GTK3 (`GtkStatusIcon`) and Qt tray
+    icons dock without ever reaching this branch (dock-before-map, or
+    override-redirect), and a client that maps first and docks a moment
+    later is still docked with no root-level map ("flash"), including one
+    40 ms late; one arriving 400 ms late is still docked and visible
+    (it may flash once - the reverse-race path in `HandleClientMessage()`).
+- **Tray icons redrew up to ~2 s late, or never.** `TrayIconClient::
+  Redraw()` queued its drawing in Xlib's output buffer and `Run()` then
+  blocked in `poll()` on the raw socket, which does not flush Xlib; the
+  redraw reached the X server only at the next unrelated wake-up
+  (`XPending()` flushes as a side effect). For `kohiko-audio-tray` that
+  was its 2 s PipeWire-reconnect timer. The detection side was fine
+  (`PipeWireClient::Iterate()` is non-blocking and notifies
+  synchronously); the 100 ms ticker removed in 0.21.4 had been masking
+  this. Measured with the real `TrayIconClient` docked in a real tray,
+  state change to visible pixels: **31-1851 ms (median 590 ms)** with a
+  2 s timer registered and **never** with no other wake-up; now
+  **0.1-1.4 ms** both ways. Fix: one `XFlush()` at the end of
+  `Redraw()`. No polling, no timer.
+- **Duplicate launches at startup.** The same program could start
+  twice. Reproduced: the shipped config launches `zen-browser`,
+  `discord Telegram` and `steam` from `workspace<N>=` lines, while the
+  config migration appended the *schema default* for a missing
+  `auto_start_programs` - `Telegram discord zen-browser flameshot` - so
+  Telegram, discord and zen-browser each started twice. Three
+  mechanisms (`workspace<N>=`, `auto_start_programs`, XDG autostart) ran
+  as three unrelated loops with no knowledge of each other. Now
+  `PlanAutostart()` (`AutostartPlan.cpp`) merges them: one launch per
+  program across mechanisms, the most explicit wins (`workspace<N>=` >
+  `auto_start_programs` > XDG), each skipped duplicate is logged;
+  duplicates *within* one mechanism are honoured (no global dedup by
+  name). The schema default is now `flameshot`, matching
+  `config/default.conf`, and a test compares the two.
+- **Restarting Kohiko relaunched every autostart program.**
+  `kohiko-session` restarts `kohiko` after a crash inside the same X
+  session, and each start ran the whole list again on top of the running
+  applications. Autostart now runs once per login session (a marker on
+  the X root window, keyed on `$XDG_SESSION_ID`).
+- **A new window could inherit a dead window's placement.** Session
+  Restore matched saved records by the bare X11 window id, which X11
+  recycles (the same client got window `0x200001` on three launches in a
+  row) and which were never expired - so after one restart any new
+  window landing on a recycled id inherited a dead window's workspace/
+  floating/fullscreen state, and with `session.restore_priority=session`
+  even overrode its window rules. A record now applies only to a window
+  that existed when Kohiko started, and only once.
+- `config/default.conf` shipped `session.restore_priority=session`
+  although the setting's own default and recommendation is `config`, so
+  a fresh install let a saved session outrank an explicit rule. It now
+  ships `config` (existing configs keep their value).
+- **`kohikoctl dispatch exec ...` did not return until the launched
+  program exited** (measured 6013 ms for a 6 s program): `IPCServer`
+  created its sockets without `SOCK_CLOEXEC`, so every program Kohiko
+  spawned inherited the IPC listener and the live client connection.
+  Now 12 ms. (Needed for `kohikoctl dispatch choose_window`.)
+- A newly opened floating window now comes to the top, and the focused
+  floating window is raised last in each arrange pass - stacking among
+  floating windows had been decided by hash-table iteration order, so
+  the rule dialog could open hidden behind the very window it was for.
+
+### Tests
+- New: `test_windowrule` (86), `test_windowrulestore` (42),
+  `test_autostartplan` (28), `test_choosewindowmodel` (40),
+  `test_no_adaptive_placement.sh` (structural guard), live end-to-end
+  `test_window_rules_live.sh` (63), `test_autostart_live.sh` (21),
+  `test_session_restore_live.sh` (6), `test_tray_redraw_latency.sh` (2),
+  plus new checks in `test_configmigration` and `test_eventloop`.
+- Replaced: `test_placementhabits` (deleted with the feature);
+  `test_xembed_dock_timeout.sh` is now `test_xembed_dock_grace.sh` - the
+  old script asserted the 2 s hold as correct behaviour.
+- Each regression test was run against the 0.21.4 binaries and fails
+  there for the right reason (e.g. FeatherPad-style window mapped after
+  2831 ms vs 103 ms; learned window opens on workspace 3 and writes
+  `placement_habits`; Telegram/discord/zen-browser launched twice).
+
+### Known limitations
+- A position rule only reorders a window among the tiles that already
+  exist (a lone window has nothing to move), and moving it displaces its
+  neighbours, as a manual `Super+Shift+h/j/k/l` would.
+- Two differently named launchers for one application (`Telegram` and
+  `telegram-desktop`) are not recognised as the same program by the
+  autostart plan.
+- Verified under Xvfb and real Qt/GTK clients, not yet on a physical
+  display (see the final report for what to run).
+
 ## Version 0.21.4
 
 Release date: 2026-09-26

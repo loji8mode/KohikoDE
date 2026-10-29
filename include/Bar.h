@@ -105,6 +105,13 @@ public:
     // never negative.
     const Rect& PowerButtonRect() const;
 
+    // The workspace number (1-based) under bar-relative point (x, y), 0
+    // for none. Same layout Redraw() draws with (see BarLayout.h).
+    int WorkspaceAt(
+        int x,
+        int y
+    ) const;
+
     // This bar's own on-screen position/size - WindowManager needs it
     // to translate PowerButtonRect() (bar-window-relative) into the
     // root-relative coordinates PowerMenu::Open() expects.

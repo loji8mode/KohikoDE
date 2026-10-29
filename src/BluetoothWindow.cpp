@@ -53,7 +53,7 @@ bool BluetoothWindow::Initialize()
     m_notifications.Connect();
 
     m_bluez.Connect(); // fine if this fails - RebuildPage() just shows an unavailable message, see its own comment
-    m_bluez.SetChangeHandler([this] { m_bluezDirty = true; });
+    m_bluez.SetChangeHandler([this] { ScheduleRebuild(); });
 
     RebuildChrome();
 
@@ -64,9 +64,27 @@ bool BluetoothWindow::Initialize()
     if (m_bluez.Available())
         m_window.WatchFd(m_bluez.Fd(), [this] { m_bluez.Dispatch(); });
 
-    // Same throttled-rebuild shape as Audio/NetworkWindow's interval,
-    // guarded by !IsInteracting() - see IsInteracting()'s own comment.
-    m_window.SetInterval(300, [this]
+    // Results of the slow operations arrive on this fd (an eventfd the
+    // worker thread signals when it finishes) - the loop sleeps in
+    // poll() until then; there is no timer waiting for them.
+    m_window.WatchFd(m_bluez.OperationFd(), [this] { m_bluez.DispatchOperations(); });
+
+    return true;
+}
+
+void BluetoothWindow::ScheduleRebuild()
+{
+    m_bluezDirty = true;
+
+    if (m_rebuildTimer)
+        return;
+
+    // Throttled, and guarded by !IsInteracting() so a rebuild can never
+    // pull the widget tree out from under a press in progress (see
+    // UiWindow::IsInteracting()) - but only registered while a rebuild
+    // is actually waiting, and cancelled the moment it has run. A
+    // window with nothing happening has no timer at all.
+    m_rebuildTimer = m_window.SetInterval(300, [this]
     {
         if (m_bluezDirty && !m_window.IsInteracting())
         {
@@ -74,9 +92,32 @@ bool BluetoothWindow::Initialize()
             RebuildPage();
             m_window.RequestRedraw();
         }
-    });
 
-    return true;
+        if (!m_bluezDirty && m_rebuildTimer)
+        {
+            m_window.CancelInterval(*m_rebuildTimer);
+            m_rebuildTimer.reset();
+        }
+    });
+}
+
+void BluetoothWindow::OnOperationDone(const std::string& target, const OperationResult& result)
+{
+    if (result.ok)
+    {
+        m_notes.erase(target);
+    }
+    else
+    {
+        m_notes[target] = { result.message, true };
+
+        // Reported where the user is looking AND where they can read the
+        // whole text; the on-device line is necessarily short.
+        if (m_notifications.Available())
+            m_notifications.Notify("Kohiko Bluetooth", "bluetooth", "Bluetooth", result.message, 8000);
+    }
+
+    ScheduleRebuild();
 }
 
 void BluetoothWindow::Run()
@@ -121,7 +162,10 @@ int BluetoothWindow::AppendToolbar(Widget& content, int y, int contentWidth)
     btToggle->value = adapter && adapter->powered;
     btToggle->enabled = available;
     btToggle->bounds = { row1.x + 80, row1.y + (rowHeight - 26) / 2, 46, 26 };
-    btToggle->onChange = [this, adapterPath](bool enabled) { m_bluez.SetAdapterPowered(adapterPath, enabled); };
+    btToggle->onChange = [this, adapterPath](bool enabled)
+    {
+        m_bluez.SetAdapterPoweredAsync(adapterPath, enabled, [this, adapterPath](const OperationResult& r) { OnOperationDone(adapterPath, r); });
+    };
     content.AddChild(std::move(btToggle));
 
     int cursorX = row1.x + 80 + 46 + 24;
@@ -132,7 +176,10 @@ int BluetoothWindow::AppendToolbar(Widget& content, int y, int contentWidth)
     auto discToggle = std::make_unique<ToggleSwitch>();
     discToggle->value = adapter && adapter->discoverable;
     discToggle->enabled = available;
-    discToggle->onChange = [this, adapterPath](bool enabled) { m_bluez.SetAdapterDiscoverable(adapterPath, enabled); };
+    discToggle->onChange = [this, adapterPath](bool enabled)
+    {
+        m_bluez.SetAdapterDiscoverableAsync(adapterPath, enabled, [this, adapterPath](const OperationResult& r) { OnOperationDone(adapterPath, r); });
+    };
 
     const int refreshW = rowHeight;
     const int scanW = 150;
@@ -150,7 +197,11 @@ int BluetoothWindow::AppendToolbar(Widget& content, int y, int contentWidth)
         scanBtn->label = "Scan for devices";
         scanBtn->enabled = available;
         scanBtn->bounds = { row1.Right() - refreshW - 10 - scanW, row1.y, scanW, rowHeight };
-        scanBtn->onClick = [this, adapterPath] { m_bluez.StartDiscovery(adapterPath); };
+        scanBtn->onClick = [this, adapterPath]
+        {
+            m_bluez.StartDiscoveryAsync(adapterPath, [this, adapterPath](const OperationResult& r) { OnOperationDone(adapterPath, r); });
+            ScheduleRebuild();
+        };
         content.AddChild(std::move(scanBtn));
 
         auto refresh = std::make_unique<IconButton>();
@@ -183,7 +234,11 @@ int BluetoothWindow::AppendToolbar(Widget& content, int y, int contentWidth)
         scanBtn->label = "Scan for devices";
         scanBtn->enabled = available;
         scanBtn->bounds = { 0, y, contentWidth, rowHeight };
-        scanBtn->onClick = [this, adapterPath] { m_bluez.StartDiscovery(adapterPath); };
+        scanBtn->onClick = [this, adapterPath]
+        {
+            m_bluez.StartDiscoveryAsync(adapterPath, [this, adapterPath](const OperationResult& r) { OnOperationDone(adapterPath, r); });
+            ScheduleRebuild();
+        };
         content.AddChild(std::move(scanBtn));
         y += rowHeight + kCardGap;
     }
@@ -255,9 +310,30 @@ std::unique_ptr<Widget> BluetoothWindow::BuildDetailsPanel(const BluetoothDevice
 
     const UiTheme& theme = UiTheme::Default();
 
+    // What the second line says: a pending operation ("Working..."),
+    // else the last failure on this device, else its state. The failure
+    // text is the full BlueZ message; Label clips what does not fit, and
+    // the same text was also sent as a desktop notification.
+    const bool busy = m_bluez.IsDeviceBusy(device.objectPath);
+    auto note = m_notes.find(device.objectPath);
+
     auto status = std::make_unique<Label>();
-    status->text = device.connected ? "Connected" : (device.paired ? "Not Connected" : "Not Paired");
-    status->color = device.connected ? theme.accent : theme.muted;
+
+    if (busy)
+    {
+        status->text = "Working...";
+        status->color = theme.muted;
+    }
+    else if (note != m_notes.end())
+    {
+        status->text = note->second.text;
+        status->color = theme.danger;
+    }
+    else
+    {
+        status->text = device.connected ? "Connected" : (device.paired ? "Not Connected" : "Not Paired");
+        status->color = device.connected ? theme.accent : theme.muted;
+    }
     status->bounds = { x + 52, y + 22, w - 52, 20 };
     card->AddChild(std::move(status));
 
@@ -283,10 +359,13 @@ std::unique_ptr<Widget> BluetoothWindow::BuildDetailsPanel(const BluetoothDevice
         pairBtn->label = "Pair";
         pairBtn->primary = true;
         pairBtn->bounds = { x, y, w, buttonHeight };
+        pairBtn->enabled = !busy;
+        if (busy) pairBtn->label = "Pairing...";
         pairBtn->onClick = [this, devicePath]
         {
-            m_bluez.PairDevice(devicePath);
-            m_bluez.ConnectDevice(devicePath);
+            m_notes.erase(devicePath);
+            m_bluez.PairAndConnectAsync(devicePath, [this, devicePath](const OperationResult& r) { OnOperationDone(devicePath, r); });
+            ScheduleRebuild();
         };
         card->AddChild(std::move(pairBtn));
         y += buttonHeight;
@@ -297,17 +376,25 @@ std::unique_ptr<Widget> BluetoothWindow::BuildDetailsPanel(const BluetoothDevice
         disconnectBtn->label = "Disconnect";
         disconnectBtn->tone = Button::Tone::Danger;
         disconnectBtn->bounds = { x, y, w, buttonHeight };
-        disconnectBtn->onClick = [this, devicePath] { m_bluez.DisconnectDevice(devicePath); };
+        disconnectBtn->enabled = !busy;
+        disconnectBtn->onClick = [this, devicePath]
+        {
+            m_notes.erase(devicePath);
+            m_bluez.DisconnectDeviceAsync(devicePath, [this, devicePath](const OperationResult& r) { OnOperationDone(devicePath, r); });
+            ScheduleRebuild();
+        };
         card->AddChild(std::move(disconnectBtn));
         y += buttonHeight + buttonGap;
 
         auto forgetBtn = std::make_unique<Button>();
         forgetBtn->label = "Forget Device";
         forgetBtn->bounds = { x, y, w, buttonHeight };
+        forgetBtn->enabled = !busy;
         forgetBtn->onClick = [this, devicePath, adapterPathCopy]
         {
-            m_bluez.RemoveDevice(adapterPathCopy, devicePath);
-            m_selectedDevicePath.clear();
+            m_notes.erase(devicePath);
+            m_bluez.RemoveDeviceAsync(adapterPathCopy, devicePath, [this, devicePath](const OperationResult& r) { OnOperationDone(devicePath, r); });
+            ScheduleRebuild();
         };
         card->AddChild(std::move(forgetBtn));
         y += buttonHeight + buttonGap;
@@ -315,11 +402,12 @@ std::unique_ptr<Widget> BluetoothWindow::BuildDetailsPanel(const BluetoothDevice
         auto bothBtn = std::make_unique<Button>();
         bothBtn->label = "Disconnect and Forget";
         bothBtn->bounds = { x, y, w, buttonHeight };
+        bothBtn->enabled = !busy;
         bothBtn->onClick = [this, devicePath, adapterPathCopy]
         {
-            m_bluez.DisconnectDevice(devicePath);
-            m_bluez.RemoveDevice(adapterPathCopy, devicePath);
-            m_selectedDevicePath.clear();
+            m_notes.erase(devicePath);
+            m_bluez.DisconnectAndRemoveAsync(adapterPathCopy, devicePath, [this, devicePath](const OperationResult& r) { OnOperationDone(devicePath, r); });
+            ScheduleRebuild();
         };
         card->AddChild(std::move(bothBtn));
         y += buttonHeight;
@@ -330,17 +418,26 @@ std::unique_ptr<Widget> BluetoothWindow::BuildDetailsPanel(const BluetoothDevice
         connectBtn->label = "Connect";
         connectBtn->tone = Button::Tone::Accent;
         connectBtn->bounds = { x, y, w, buttonHeight };
-        connectBtn->onClick = [this, devicePath] { m_bluez.ConnectDevice(devicePath); };
+        connectBtn->enabled = !busy;
+        if (busy) connectBtn->label = "Connecting...";
+        connectBtn->onClick = [this, devicePath]
+        {
+            m_notes.erase(devicePath);
+            m_bluez.ConnectDeviceAsync(devicePath, [this, devicePath](const OperationResult& r) { OnOperationDone(devicePath, r); });
+            ScheduleRebuild();
+        };
         card->AddChild(std::move(connectBtn));
         y += buttonHeight + buttonGap;
 
         auto forgetBtn = std::make_unique<Button>();
         forgetBtn->label = "Forget Device";
         forgetBtn->bounds = { x, y, w, buttonHeight };
+        forgetBtn->enabled = !busy;
         forgetBtn->onClick = [this, devicePath, adapterPathCopy]
         {
-            m_bluez.RemoveDevice(adapterPathCopy, devicePath);
-            m_selectedDevicePath.clear();
+            m_notes.erase(devicePath);
+            m_bluez.RemoveDeviceAsync(adapterPathCopy, devicePath, [this, devicePath](const OperationResult& r) { OnOperationDone(devicePath, r); });
+            ScheduleRebuild();
         };
         card->AddChild(std::move(forgetBtn));
         y += buttonHeight;
@@ -574,7 +671,10 @@ int BluetoothWindow::RebuildAdvancedPage(Widget& content, int contentWidth)
         auto toggle = std::make_unique<ToggleSwitch>();
         toggle->value = device.trusted;
         toggle->bounds = { 0, 0, 0, 26 };
-        toggle->onChange = [this, devicePath](bool trusted) { m_bluez.SetDeviceTrusted(devicePath, trusted); };
+        toggle->onChange = [this, devicePath](bool trusted)
+        {
+            m_bluez.SetDeviceTrustedAsync(devicePath, trusted, [this, devicePath](const OperationResult& r) { OnOperationDone(devicePath, r); });
+        };
 
         row->Layout(rowBounds, std::move(toggle), 46);
         card->AddChild(std::move(row));

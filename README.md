@@ -114,11 +114,14 @@ Two build systems are provided; pick whichever you'd rather have installed.
 **Plain `make`** (no cmake required):
 
 ```sh
-make -j$(nproc)          # -> ./kohiko, ./kohikoctl, ./kohiko-settings, and (if libdbus-1-dev
+make -j$(nproc)          # -> ./kohiko, ./kohikoctl, ./kohiko-settings, ./kohiko-choose-window, and (if libdbus-1-dev
                            #    + libpipewire-0.3-dev are present) ./kohiko-audio, ./kohiko-network,
                            #    ./kohiko-bluetooth, and their three tray widgets
-make test                 # BSP tree, launcher scoring, adaptive-placement, session persistence,
-                           # config migration, recovery mode, DBusValue unit tests (no X server needed)
+make test                 # unit tests (BSP tree, window rules + their config store, autostart plan,
+                           # session persistence, config migration, recovery mode, DBusValue, ...; no
+                           # X server needed) plus live end-to-end tests of the real `kohiko` under
+                           # Xvfb (window rules, autostart, session restore, XEmbed, tray redraw -
+                           # each skips gracefully if Xvfb isn't installed)
 make test-monitors        # MonitorManager/XRandr tests (needs a real X server - skips gracefully without one)
 sudo make install          # installs to /usr/local, incl. every app's .desktop entry + icon,
                            # the tray widgets' autostart entries under /etc/xdg/autostart, and
@@ -493,9 +496,9 @@ notepad.height=50%
 exec.terminal=xterm              # referenced from `bind=... exec terminal`
 exec.screenshot=flameshot gui    # referenced from `bind=Print exec screenshot`
 
-auto_start_programs=telegram-desktop discord zen-browser  # launched once at startup
+auto_start_programs=flameshot      # launched once per login session - see Autostart below
 
-workspace1=zen-browser             # same idea, but pinned to a workspace - see Autostart below
+workspace1=zen-browser             # same, but its window also opens on that workspace
 workspace2=discord telegram-desktop
 workspace3=steam
 
@@ -507,8 +510,10 @@ mouse.resize=SUPER+BTN3
 
 bind=SUPER+RETURN exec terminal
 bind=SUPER+Q close
+bind=SUPER+SHIFT+W choose_window        # opens the window-rule dialog for the focused window
 
-windowrule=fullscreen class:flameshot   # see Window rules below
+windowrule=app:firefox workspace:3 horizontal:right mode:tiled   # see Window rules below
+windowrule=fullscreen class:flameshot   # legacy single-word form still works
 windowrule=tile class:tlauncher
 
 monitor=HDMI-1,workspace=1              # see Multi-monitor below
@@ -540,10 +545,16 @@ desktop-file indexing - nothing is hardcoded into `Launcher.cpp`/
 What it gives you, on top of hand-editing `kohiko.conf`:
 
 - A **category sidebar** (General, Appearance, Launcher, Bar, Input,
-  Monitors, Workspaces, Window Rules, Power, Notepad, Scratchpad,
-  Developer, Lock Screen), with settings further **grouped under
-  sub-headings** within a category (e.g. Appearance's Layout/Colors/Text)
-  instead of one long flat list.
+  Monitors, Workspaces, Autostart, Window Rules, Power, Notepad,
+  Scratchpad, Developer, Lock Screen), with settings further **grouped
+  under sub-headings** within a category (e.g. Appearance's
+  Layout/Colors/Text) instead of one long flat list. Each tab has one
+  responsibility, so no two settings compete for the same job:
+  **Workspaces** is workspace configuration (how many);
+  **Autostart** is everything that *launches programs*
+  (`auto_start_programs=` and the per-workspace `workspace<N>=` lines);
+  **Window Rules** is where specific applications' windows go (the
+  rules themselves, plus how a saved session and a rule are reconciled).
 - **Search** (top of the window) that filters across every category at
   once by key, label, description, or group - clicking a category again
   clears it.
@@ -572,17 +583,20 @@ What it gives you, on top of hand-editing `kohiko.conf`:
   afterward.
 
 `windowrule=` (under Window Rules) and `monitor=` (under Monitors) each
-get a **structured, row-based editor**: one row per rule, with a
-click-to-cycle action button (float/tile/fullscreen/no-fullscreen/
-workspace for a window rule) plus a text field per selector
-(`class:`/`instance:`/`title:`, or an output name and a workspace
-number for a monitor rule) rather than needing to know that syntax by
-hand even inside the GUI - Tab moves between a row's fields and on to
-the next row, and each row gets its own `x` to remove it, plus an
-"+ Add rule" button below the last one. What actually gets saved to
-`kohiko.conf` is still exactly that same `class:foo instance:bar`/
-`HDMI-1,workspace=2` syntax - the structured editor is purely a
-friendlier way to produce it, never a different underlying format.
+get a **structured, row-based editor**: one row per rule. A window rule
+is two lines - the application (plus optional `instance:`/`title:`
+fields to narrow it) and then its Workspace field and click-to-cycle
+**Horizontal** (Default/Left/Right), **Vertical** (Default/Top/Bottom)
+and **Mode** (Default/Tiled/Floating/Fullscreen) buttons, where
+*Default* always means "this rule has no opinion about that". A monitor
+rule is an output name and a workspace number. Tab moves between a
+row's fields and on to the next row, and each row gets its own `x` to
+remove it, plus an "+ Add rule" button below the last one. What
+actually gets saved to `kohiko.conf` is still exactly the
+`windowrule=app:firefox workspace:3 ...`/`HDMI-1,workspace=2` syntax -
+the structured editor is purely a friendlier way to produce it, never a
+different underlying format - and a rule Kohiko would refuse to load is
+flagged right there with the parser's own error message.
 
 `bind=` (under Input's "Keybindings" group) and `exec.<name>=` (under
 Developer) are, by contrast, each edited as their own small block of
@@ -591,9 +605,9 @@ the file) - a keybinding or a named command doesn't decompose into a
 handful of independent selector fields the way a window/monitor rule
 does, so a structured editor wouldn't actually be simpler than typing
 the line itself. `workspace<N>=` autostart, on the other hand, *is* a
-plain per-workspace text field (one per workspace, right under
-`workspace.count` in the Workspaces category) since each is genuinely
-its own distinct key rather than one repeated one.
+plain per-workspace text field (one per workspace, under "Launch on a
+workspace" in the Autostart category) since each is genuinely its own
+distinct key rather than one repeated one.
 
 Throughout, **`kohiko.conf` remains the actual source of truth**: Save
 edits the file's existing lines in place - preserving every comment,
@@ -609,10 +623,10 @@ file instead of guessing where else it might belong.
 
 Reload after editing `kohiko.conf` by hand without restarting: `kohikoctl
 reload` (also bound to `Super+Shift+C` by default, and what Kohiko
-Settings' own Save does automatically). `auto_start_programs` and
-`workspace<N>=` are the one exception - both only ever run right after
-Kohiko itself starts, never on reload, so reloading the config doesn't
-relaunch every autostart program.
+Settings' own Save does automatically). Autostart
+(`auto_start_programs=`, `workspace<N>=` and XDG entries) is the one
+exception - it only ever runs once per login session, never on reload,
+so reloading the config doesn't relaunch every autostart program.
 
 ## Configuration migration & recovery mode
 
@@ -648,45 +662,124 @@ permanently unusable.
 
 ## Window rules
 
-No amount of automatic window-type detection can guess every
-application's intentions correctly, so - the same as i3's `for_window` or
-Hyprland's `windowrule` - Kohiko lets you pin down exactly how a specific
-application behaves, overriding whatever it asks for itself:
+Kohiko decides the default layout. **You** explicitly override it, per
+application, with a window rule - and Kohiko never silently learns
+anything from where you happen to put windows. Moving, dragging,
+resizing, swapping or sending a window to another workspace is always
+just that one manual action: it never creates, changes or removes a
+rule. A rule exists only because you wrote one - with the dialog below,
+in the Settings Window Rules tab, or by hand in `kohiko.conf` - so the
+same application with the same saved rule always opens in the same
+place.
 
-```ini
-windowrule=float class:pavucontrol
-windowrule=tile class:tlauncher
-windowrule=fullscreen class:flameshot
-windowrule=nofullscreen class:mpv
-windowrule=workspace:4 class:telegram title:photo
+### Setting a rule: `Super+Shift+W`
+
+Focus a window and press **`Super+Shift+W`** (`choose_window`; or run
+`kohikoctl dispatch choose_window`). A small dialog opens for that
+window's application:
+
+```
+Window Rules
+Application: firefox
+class: firefox   instance: Navigator
+
+Workspace    [Default] [1] [2] [3] [4]
+Horizontal   [Default] [Left] [Right]
+Vertical     [Default] [Top] [Bottom]
+Mode         [Default] [Tiled] [Floating] [Fullscreen]
+
+[Reset rule]                          [Cancel] [Save]
 ```
 
-- `float` - always open floating (centered, sized to its own natural
-  size - see below), never tiled, regardless of window type.
-- `tile` - always tile it, strictly, even if it's the kind of window
-  (a dialog, or one that insists on opening at its own fixed size -
-  Tlauncher is the canonical example of a Java/Swing app that does this
-  and fights being resized) Kohiko would otherwise float automatically.
-- `fullscreen` - open already fullscreen. flameshot's screenshot overlay
-  needs this to work at all (a partial-screen overlay can't select the
-  rest of the screen); it already asks for real EWMH fullscreen on its
-  own and Kohiko honours that automatically the moment it's mapped (see
-  [EWMH support](#ewmh-support)), so this mostly exists as an explicit
-  belt-and-suspenders pin, or for apps that don't ask for it themselves.
-- `nofullscreen` - never allow real fullscreen for this app, whether it
-  asks for it itself or `fullscreen`/`Super+F` asks on its behalf; it
-  stays tiled/floating instead.
-- `workspace:N` - always open on workspace N regardless of whichever
-  workspace is current - e.g. exiling a chat app's media-viewer windows
-  to their own workspace ("a new virtual display") instead of covering
-  whatever you're doing on the current one.
+Every row has an explicit **Default** meaning "no opinion", so you can say
+"always on workspace 3" without touching position, or "always on the
+right" without touching the workspace. It opens showing the rule already
+saved for this application (if any); **Save** writes it, **Cancel**
+changes nothing, **Reset rule** deletes it - after which that application
+is back to Kohiko's default placement. Keyboard: Up/Down (or `k`/`j`)
+pick a row, Left/Right (or `h`/`l`) change the choice, `1`-`9` pick a
+workspace directly, Enter saves, Delete resets, Escape cancels. A rule
+applies to windows opened *afterwards*; saving never moves a window
+that's already open. Only the dialog's `Save`/`Reset` write anything:
+`kohiko-choose-window` is a separate program (it needs nothing but X11
+and Xft) that edits one `windowrule=` line and tells Kohiko to reload.
 
-The selector after the action is one or more of `class:`, `instance:`,
-`title:` (case-insensitive substring match against `WM_CLASS`'s
-class/instance and the window title, space-separated - a window has to
-match every one given to match the rule at all). `xprop` (click the
-window after running it) shows you the actual class/instance/title to
-match on if you're not sure.
+Scripting uses the same code, without a window:
+
+```sh
+kohiko-choose-window --list
+kohiko-choose-window --app firefox --show
+kohiko-choose-window --app firefox --set "workspace:3 horizontal:right vertical:top mode:tiled"
+kohiko-choose-window --app firefox --delete
+```
+
+### The rule format
+
+```ini
+windowrule=app:firefox workspace:3 horizontal:right vertical:top mode:tiled
+windowrule=app:telegram-desktop workspace:2 horizontal:right vertical:bottom mode:floating
+windowrule=app:kitty workspace:1 mode:fullscreen
+windowrule=app:feather workspace:1 mode:floating        # no position: that part stays automatic
+```
+
+A rule is whitespace-separated `key:value` tokens in any order: at
+least one **selector** and at least one **property**.
+
+| Selector | Matches |
+|---|---|
+| `app:<key>` | the application: **exact**, case-insensitive match on the window's `WM_CLASS` class, falling back to its `WM_CLASS` instance only if the class is empty. This is what the dialog writes. Never the title, PID or window id (X11 window ids are recycled). |
+| `class:<text>` | case-insensitive substring of `WM_CLASS` class |
+| `instance:<text>` | case-insensitive substring of `WM_CLASS` instance |
+| `title:<text>` | case-insensitive substring of the window title |
+
+All selectors given must match. Spaces and `%` in a value are written
+`%20`/`%25` (`app:My%20App`). `xprop` (click the window) shows a
+window's real class/instance/title.
+
+| Property | Meaning |
+|---|---|
+| `workspace:<N>` | open on workspace N (1-based), whichever is current |
+| `horizontal:left\|right` | open on that side of the layout |
+| `vertical:top\|bottom` | open at the top/bottom of the layout |
+| `mode:tiled\|floating\|fullscreen` | always tile it (even if it's a kind of window Kohiko would float), always float it (centred, at its own natural size), or open it fullscreen |
+
+A property you leave out is not part of the rule: Kohiko's normal
+behaviour applies to it. The old single-word forms still work anywhere in
+a rule - `tile`, `float`, `fullscreen` (same as the `mode:` values) and
+`nofullscreen` (never allow real fullscreen for this application,
+whether it asks itself or `Super+F` does; it stays tiled/floating) - so
+every `windowrule=float class:pavucontrol`-style line from earlier
+versions keeps working unchanged.
+
+**Position.** For a *tiled* window, `horizontal`/`vertical` walk the new
+window toward that edge by trading places with its neighbours, exactly
+like pressing `Super+Shift+h/j/k/l` repeatedly - so other windows shift
+to make room, and with a lone window there is nothing to move. For a
+*floating* window it is placed flush to that edge of the screen (inset
+by `general.outer_gap`). Horizontal is applied before vertical.
+Position is ignored for fullscreen.
+
+**Several rules match one window?** They are applied from the least to
+the most specific (the number of selectors), and equally specific rules
+in file order - so for each property the most specific rule wins, and a
+later line beats an earlier one of equal specificity. `app:telegram
+workspace:2` plus `class:telegram title:photo workspace:8` therefore sends
+only the media viewer to workspace 8. If two matching rules disagree on
+the mode, only one mode ever applies (the later/more specific one).
+
+**Typos are loud, not silent.** A line Kohiko can't apply exactly as
+written - an unknown key, a bad value, no selector (it would match
+every window) or no property - is skipped and logged as a warning, never
+half-applied. The Settings editor shows the same error beside the row.
+
+**Priority.** For a new window's workspace: a restored session (only if
+you set `session.restore_priority=session`, and only for windows already
+open when Kohiko started) > a window rule > a restored session > a
+`workspace<N>=` autostart > its transient parent > the current workspace.
+`session.restore_priority` defaults to `config`, which keeps your rules
+authoritative.
+
+### What happens with no rule
 
 Every window still gets sensible behaviour with **no** rule at all:
 transient windows (anything with `WM_TRANSIENT_FOR` set) and every
@@ -702,12 +795,29 @@ picker, an IntelliJ/Android Studio dialog, a file picker, a
 confirmation prompt, or TLauncher's own update/login prompts always
 show up attached to the window that spawned them instead of floating
 in the wrong place or getting silently left behind on another
-workspace. Any floating window - automatic or `float` above - opens
+workspace. Any floating window - automatic or `mode:floating` - opens
 sized at whatever it actually asked for (its `WM_NORMAL_HINTS`, or
 failing that its own size at the moment it asked to be mapped) rather
 than a flat fraction of the screen, so it doesn't get squashed or
-stretched into a size it was never designed for. `windowrule=` exists
-for the apps that don't play along with that on their own.
+stretched into a size it was never designed for. A newly opened
+floating window - the rule dialog included - always comes to the top,
+and the focused floating window is never left hidden behind another.
+
+### Adaptive placement has been removed
+
+Earlier versions (0.20.x-0.21.x) tried to *learn* a workspace or side
+for an application from how often you moved it by hand. That is gone
+entirely - it could turn a one-off, temporary move into a permanent
+placement, and "why did it open there?" had no answer you could read or
+change. Nothing replaces it automatically: use the dialog above (or
+Settings > Window Rules) to say what you want, once, explicitly.
+
+On the first start after upgrading Kohiko deletes the old
+`$XDG_DATA_HOME/kohiko/placement_habits` file and removes
+`general.adaptive_placement` from `kohiko.conf` (the previous config is
+saved to `kohiko.conf.bak` first, and both removals are logged). The old
+data is deliberately **not** converted into rules - it recorded
+accidents as much as intentions.
 
 ## Multi-monitor
 
@@ -901,15 +1011,30 @@ at all.
 
 ## Autostart
 
-`auto_start_programs=` takes a space-separated list of commands, each
-launched once, right after the bar/tray/launcher finish starting up -
-no keybind needed:
+Autostart does one thing: **launch programs**, once per login session.
+It never decides where a window goes - that is a [window
+rule](#window-rules)'s job (the one exception, `workspace<N>=` below, is
+launch-and-place shorthand). In Kohiko Settings it is the **Autostart**
+tab; nothing launches a program anywhere else.
+
+Three mechanisms can name a program to start:
+
+| Mechanism | Does |
+|---|---|
+| `workspace<N>=` | launch it, **and** put its window on workspace N |
+| `auto_start_programs=` | launch it |
+| XDG autostart `.desktop` entries | launch it (entries apps and packages install themselves) |
+
+### `auto_start_programs=`
+
+A space-separated list of commands, each launched once, right after the
+bar/tray/launcher finish starting up - no keybind needed:
 
 ```ini
-auto_start_programs=telegram-desktop discord zen-browser
+auto_start_programs=flameshot
 ```
 
-Each entry runs exactly the way `exec.<name>=` does (through `/bin/sh -c`,
+Each entry runs exactly the way `exec.<n>=` does (through `/bin/sh -c`,
 forced onto this session's `DISPLAY`), so anything you could put after
 `exec.terminal=` works here too. Leave it empty, or delete the line, to
 autostart nothing.
@@ -927,12 +1052,6 @@ workspace2=discord telegram-desktop
 workspace3=steam
 ```
 
-List a program under `workspace<N>=` instead of `auto_start_programs=`,
-not in addition to it - either one launches it, and `workspace<N>=` is
-just `auto_start_programs=` with a destination attached. Same
-space-separated, `/bin/sh -c`-through-DISPLAY syntax either way, and a
-program can only be pinned to one workspace at a time.
-
 Kohiko places it by matching the window's own `_NET_WM_PID` back to the
 process it just spawned for that line, walking up the process tree to
 find it (`/bin/sh -c` itself already forks one extra level before ever
@@ -941,25 +1060,70 @@ Steam - adds more on top of that), which is also why this only ever
 affects a window that shows up within a minute or so of Kohiko
 starting - long enough to cover even a slow starter, but not so long
 that the same program opening some unrelated window an hour into the
-session gets redirected too. A `windowrule=workspace:N` for the same
-window (see [Window rules](#window-rules)) always wins over this if both
-apply, since that's a more specific, deliberate override.
+session gets redirected too. A `windowrule=` with a `workspace:` for the
+same window (see [Window rules](#window-rules)) always wins over this if
+both apply, since that's a more specific, deliberate override.
 
 Landing on a workspace nothing is currently showing is deliberate:
 the window opens quietly, in the background, without stealing focus
-from whatever you're doing right now - exactly like `windowrule=
-workspace:N` and a learned adaptive-placement habit both already do
-for the same reason. Since 0.20.4, that's paired with a one-line
+from whatever you're doing right now - exactly like a window rule's
+`workspace:N` does for the same reason. That's paired with a one-line
 notification on whichever monitor you're actually looking at ("Discord
 opened on workspace 2") specifically so "quiet" doesn't also mean
 "indistinguishable from the application having failed to open at
 all" - switching to workspace N is still how you actually get to it,
 this just tells you it's there.
 
+### One program, one launch
+
+A program named by more than one mechanism is **launched once, by the
+most explicit one**: `workspace<N>=` beats `auto_start_programs=`, which
+beats an XDG entry (a workspace line also says where the window goes; an
+XDG entry is something a package dropped in, not something you wrote).
+Kohiko logs each duplicate it skipped and why:
+
+```
+[INFO] not launching auto_start_programs entry Telegram - also listed under a workspace<N>= line, which launches it
+```
+
+"The same program" means the same executable name - path and case
+ignored, leading `env`/`VAR=value` words skipped - so `Firefox`,
+`/usr/bin/firefox` and `env MOZ_X11_EGL=1 firefox` are one program,
+while `firefox` and `firefox-esr` are two. Two differently *named*
+launchers for one application (`Telegram` and `telegram-desktop`) are
+not recognised as the same; list an application in one place.
+
+Listing a program more than once **within one mechanism** is an explicit
+request for several instances and is honoured exactly as written
+(`auto_start_programs=xterm xterm` opens two). There is deliberately no
+global "deduplicate by executable name".
+
+(0.21.x could start `Telegram`, `discord` and `zen-browser` twice: the
+config migration appended the built-in `auto_start_programs` default - a
+list that overlapped the shipped `workspace1=`/`workspace2=` lines - to
+any config that lacked the key. That default is now just `flameshot`, the
+same as `config/default.conf`, and the launch plan above removes any
+remaining overlap in configs migrated earlier.)
+
+### Once per login session
+
+Autostart is a property of the login session, not of the Kohiko
+process. `kohiko-session` restarts `kohiko` after a crash within the
+same session, with every autostarted application still running - so the
+first start of a session launches the startup programs and records that
+on the X root window, and later starts in the same session leave them
+alone (`autostart already ran in this login session`). The record is
+tied to the login (`$XDG_SESSION_ID` where logind provides one), so a
+display manager that reuses one X server for the next login still
+launches that user's autostart, and it disappears with the X server. It
+is also why `kohikoctl reload` never relaunches anything. To run the
+list again inside a live session, start the programs yourself.
+
 ### XDG autostart (`.desktop` entries)
 
 Alongside the two config-driven mechanisms above, Kohiko also runs
-every `.desktop` entry it finds under `~/.config/autostart/` and
+every `.desktop` entry it finds (unless the program is already launched by
+one of them - see [One program, one launch](#one-program-one-launch)) under `~/.config/autostart/` and
 `/etc/xdg/autostart/`, per the [freedesktop Desktop Application
 Autostart Specification](https://specifications.freedesktop.org/autostart-spec/latest/) -
 this is what actually launches the audio/network/Bluetooth tray
@@ -978,9 +1142,9 @@ see below). A `~/.config/autostart/foo.desktop` completely overrides
 (not merges with) a `/etc/xdg/autostart/foo.desktop` of the same
 name, so copying one there and adding `Hidden=true` is the standard
 way to turn off a single system-wide entry without touching the
-original file. Like the two mechanisms above, this runs exactly once,
-right after the bar/tray/launcher finish starting up, and never again
-on `kohikoctl reload`.
+original file. Like the two mechanisms above, this runs once per login
+session, right after the bar/tray/launcher finish starting up, and never
+again on `kohikoctl reload`.
 
 This is also the one place `$XDG_CURRENT_DESKTOP` matters to Kohiko:
 a display manager that honours `desktop/kohiko.desktop`'s
@@ -1032,8 +1196,13 @@ only what other programs see you type changes.
 | `Super+H/J/K/L`        | move focus left/down/up/right             |
 | `Super+1..0`           | switch to workspace 1-10                  |
 | `Super+Shift+1..0`     | send the focused window to workspace 1-10 |
+| `Super+Shift+W`        | set the window rule for the focused window's application (`kohiko-choose-window`) - see [Window rules](#window-rules) |
 | `Super+Shift+C`        | reload the config                         |
 | `Super+Shift+Q`        | quit Kohiko                               |
+
+A config you created before 0.22.0 won't have the `Super+Shift+W` bind
+(the config migration adds missing *settings*, never keybindings).
+Add `bind=SUPER+SHIFT+W choose_window` to `kohiko.conf` to get it.
 
 Which *monitor* is focused isn't a keybind at all - it just follows
 the mouse pointer (see [Multi-monitor](#multi-monitor)); `Super+LMB`
@@ -1598,6 +1767,7 @@ line-based commands, in the spirit of `hyprctl`:
 kohikoctl dispatch workspace 3        # anything you could put after `bind=... `
 kohikoctl dispatch close
 kohikoctl dispatch focusmonitor right # see Multi-monitor above
+kohikoctl dispatch choose_window       # the window-rule dialog for the focused window - see Window rules
 kohikoctl clients                      # JSON: every managed window
 kohikoctl monitors                     # JSON: detected monitors
 kohikoctl activewindow                 # JSON: the focused window, or null
@@ -1738,8 +1908,8 @@ relative proportions, just applied to whichever axis now applies.
 - **`kohikoctl` / IPC**: `reload`, `workspace <N>`, `movetoworkspace <N>`,
   `launcher`, `notepad`, `scratchpad`, `close`, `focus <left|right|up|down|next|prev>`,
   `move <left|right|up|down>`, `rotate`, `flip`, `focusmonitor`/
-  `movetomonitor <left|right|up|down|N>`, `exec`, `quit` - see
-  [kohikoctl / IPC](#kohikoctl--ipc).
+  `movetomonitor <left|right|up|down|N>`, `exec`, `choose_window`,
+  `quit` - see [kohikoctl / IPC](#kohikoctl--ipc).
 - **EWMH support**, the system tray, autostart, per-window rules
   (`windowrule=`), per-monitor rules (`monitor=...,workspace=N`), and
   keyboard layout switching - see their own sections above.
@@ -1750,28 +1920,27 @@ relative proportions, just applied to whichever axis now applies.
   when it comes back up, so the layout you see right after logging
   back in closely resembles what you actually had before logging out.
   Keyed off the window's own X11 ID (stable across a Kohiko-only
-  restart - see `session.restore_priority` in `config/default.conf`
-  for how a conflicting `windowrule=` and saved session are
-  reconciled). Restoring a tiled window's exact former position is
+  restart), so it applies only to windows that were already open when
+  Kohiko started - and only once - because X11 recycles window IDs and a
+  brand-new window must never inherit a dead one's state. See
+  `session.restore_priority` in `config/default.conf` for how a
+  conflicting window rule and saved session are reconciled (default:
+  the rule wins). Restoring a tiled window's exact former position is
   necessarily best-effort: if the window it was next to hasn't
   reopened yet this session, it's placed the ordinary way instead,
   same as any other new window. Also covers being stopped via
   `SIGTERM`/`SIGINT` (a session manager restarting it, or a plain
   `pkill kohiko`), not just a clean `kohikoctl quit`.
-- **Adaptive placement** - learns, per application, which workspace
-  and which side of the tiling layout you repeatedly move its windows
-  to by hand (Super+Shift+`<N>`, a Super+LMB drag, or
-  Super+Shift+`h`/`j`/`k`/`l`), and starts placing new windows of that
-  application there automatically once the pattern is clear and
-  consistent - during an ordinary session, not just after a restart.
-  A one-off manual move never immediately becomes a habit; it takes a
-  genuinely repeated, consistent pattern (see `general.
-  adaptive_placement` in `config/default.conf`) before Kohiko starts
-  predicting anything, and it only ever fills in when neither an
-  explicit `windowrule=` nor a precise Session Restore match already
-  has an opinion. Turn off with `general.adaptive_placement=false` to
-  place every new window using only the ordinary rules, with no
-  learned habits at all.
+- **Explicit window rules** (`windowrule=`) - you decide, per
+  application, which workspace it opens on, which side of the layout,
+  and whether it is tiled, floating or fullscreen, with
+  `Super+Shift+W` (`kohiko-choose-window`), the Settings Window Rules
+  tab, or by hand. Every aspect is independent and optional, matching
+  is by the application's `WM_CLASS`, and Kohiko never learns any of
+  it from what you do: moving, dragging, resizing or swapping windows
+  never creates or changes a rule. (This replaced the "adaptive
+  placement" of 0.20.x-0.21.x, which is gone - see
+  [Window rules](#window-rules).)
 - **A power menu on every bar** - shutdown/restart/suspend, nothing
   else - see [The power menu](#the-power-menu).
 - **A native lock screen** - PAM-authenticated, no `i3lock`/
@@ -1793,10 +1962,10 @@ relative proportions, just applied to whichever axis now applies.
   setting, or a structured row below - places the caret exactly where
   you click, not just at the start or end.
 - **Structured `windowrule=`/`monitor=` editors in Kohiko Settings** -
-  each rule is its own row (an action button you click to cycle
-  through float/tile/fullscreen/no-fullscreen/workspace, plus
-  `class:`/`instance:`/`title:` text fields for a window rule, or an
-  output-name field and a workspace number for a monitor rule), with
+  each rule is its own row (for a window rule: the application plus
+  optional `instance:`/`title:` fields, then Workspace and click-to-cycle
+  Horizontal/Vertical/Mode buttons that each have an explicit Default;
+  for a monitor rule an output-name field and a workspace number), with
   its own "+ Add rule" button and a `x` to remove a row - no need to
   remember the underlying syntax by hand, even though what actually
   gets saved to `kohiko.conf` is exactly that same syntax.

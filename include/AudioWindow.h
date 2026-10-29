@@ -7,6 +7,8 @@
 #include "UiScrollView.h"
 #include "UiWindow.h"
 
+#include <optional>
+
 namespace Kohiko
 {
 
@@ -74,6 +76,10 @@ private:
     // Kohiko-native notification, not two different mechanisms
     // depending on which app happens to notice the change first.
     NotificationCenter m_notifications;
+
+    // Runs only while a toast is on screen (see EnsureNotificationTick()).
+    std::optional<UiWindow::TimerId> m_notificationTimer;
+    void EnsureNotificationTick();
 
     Page m_page = Page::Main;
     ScrollView* m_scrollView = nullptr;

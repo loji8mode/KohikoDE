@@ -1,4 +1,5 @@
 #include "SettingsWindow.h"
+#include "WindowRule.h"
 
 #include "Config.h"
 #include "Process.h"
@@ -49,22 +50,22 @@ constexpr int kStructuredRowGap      = 6;
 constexpr int kStructuredActionW     = 108; // WindowRule's click-to-cycle action button
 constexpr int kStructuredRemoveW     = 24;  // the "x" remove button, every row
 constexpr int kStructuredWorkspaceW  = 56;  // narrow - just a couple of digits
+constexpr int kStructuredWorkspaceLabelW = 104; // a window rule's "Workspace" cell: wide enough for its own placeholder
+constexpr int kStructuredChoiceW     = 172; // a window rule's Horizontal/Vertical click-to-cycle buttons
 constexpr int kStructuredFieldGap    = 6;
 constexpr int kStructuredAddButtonW  = 140;
 constexpr int kStructuredAddButtonH  = 26;
 
-// index into both arrays below; also SettingsWindow::WindowRuleDraft::
-// actionIndex's own valid range is 0..kWindowRuleActionCount (that
-// last one, kWindowRuleActionCount itself, is the sentinel "action is
-// workspace:<N>" state - it has no *fixed* token of its own, hence
-// living just past the end of these two arrays rather than in them).
-constexpr int kWindowRuleActionCount = 4;
-constexpr int kWindowRuleWorkspaceAction = kWindowRuleActionCount;
-
-const std::array<const char*, kWindowRuleActionCount> kWindowRuleActionTokens =
-    {"float", "tile", "fullscreen", "nofullscreen"};
-const std::array<const char*, kWindowRuleActionCount> kWindowRuleActionLabels =
-    {"Float", "Tile", "Fullscreen", "No Fullscreen"};
+// A window rule's click-to-cycle choices, in the order they cycle
+// (index 0 is always "Default" = no opinion). The order matches
+// WindowRule::Horizontal/Vertical/Mode exactly, so a draft's index IS
+// the enum value.
+const std::array<const char*, 3> kHorizontalLabels = {"Default", "Left", "Right"};
+const std::array<const char*, 3> kHorizontalTokens = {"", "left", "right"};
+const std::array<const char*, 3> kVerticalLabels   = {"Default", "Top", "Bottom"};
+const std::array<const char*, 3> kVerticalTokens   = {"", "top", "bottom"};
+const std::array<const char*, 4> kModeLabels       = {"Default", "Tiled", "Floating", "Fullscreen"};
+const std::array<const char*, 4> kModeTokens       = {"", "tiled", "floating", "fullscreen"};
 
 unsigned long ParseColorLiteral(
     const std::string& text,
@@ -325,6 +326,7 @@ void SettingsWindow::BuildFields()
         {"Input", true},
         {"Monitors", true},
         {"Workspaces", false},
+        {"Autostart", false},
         {"Window Rules", true},
         {"Power", false},
         {"Notepad", false},
@@ -395,17 +397,19 @@ void SettingsWindow::BuildWorkspaceFields()
     for (int n = 1; n <= count; ++n)
     {
         ConfigOption option;
-        option.category = "Workspaces";
-        option.group = "Per-workspace autostart";
+        option.category = "Autostart";
+        option.group = "Launch on a workspace";
         option.key = "workspace" + std::to_string(n);
         option.type = ConfigValueType::String;
         option.defaultValue = "";
         option.description =
-            "Space-separated programs launched once, automatically, that land "
-            "specifically on workspace " + std::to_string(n) + " once their window "
-            "actually shows up - same mechanism as General's auto_start_programs, "
-            "just pinned to this workspace instead of wherever's current. Leave "
-            "empty to autostart nothing here.";
+            "Space-separated programs launched once per login session, like "
+            "the list above, whose window then opens on workspace " +
+            std::to_string(n) + " (once it actually shows up - however long "
+            "that takes). A Window Rule for the same application takes "
+            "precedence over this. If a program is also in the list above "
+            "or has its own ~/.config/autostart entry, it is started only "
+            "once, here. Leave empty to launch nothing on this workspace.";
 
         m_workspaceOptionStorage.push_back(std::move(option));
     }
@@ -436,10 +440,18 @@ void SettingsWindow::BuildRawBlocks()
     {
         {
             "windowrule", "Window Rules", "Window rules", "windowrule=",
-            "One rule per row: an action, plus whichever of class:/instance:/"
-            "title: you want it to match on (any combination - a blank field "
-            "is left out entirely). `kohikoctl dispatch client` shows a "
-            "window's actual class/instance/title to match against.",
+            "You decide where an application's windows go - Kohiko never "
+            "learns it from moving windows around. One rule per row: the "
+            "application (its WM_CLASS, matched exactly - press Super+Shift+W "
+            "on a window to fill one in), then any of Workspace, Horizontal "
+            "(Left/Right), Vertical (Top/Bottom) and Mode (Tiled/Floating/"
+            "Fullscreen); Default means \"no opinion\" for that choice. "
+            "Position moves a newly opened window toward that edge of the "
+            "layout (or of the screen, if floating). instance:/title: "
+            "narrow a rule to one window of an application; the more "
+            "specific rule wins. Rules apply to windows opened afterwards, "
+            "and only changing them here, in the Super+Shift+W dialog or "
+            "in kohiko.conf ever changes one.",
             RawBlockPanel::Kind::WindowRule
         },
         {
@@ -913,10 +925,17 @@ bool SettingsWindow::HandleStructuredBlockClick(
             return true;
         }
 
-        if (panel.kind == RawBlockPanel::Kind::WindowRule && row.actionRect.Contains(click))
+        if (panel.kind == RawBlockPanel::Kind::WindowRule)
         {
-            CycleStructuredAction(panel, i);
-            return true;
+            int which = row.horizontalRect.Contains(click) ? 0
+                      : row.verticalRect.Contains(click)   ? 1
+                      : row.modeRect.Contains(click)       ? 2 : -1;
+
+            if (which >= 0)
+            {
+                CycleStructuredChoice(panel, i, which);
+                return true;
+            }
         }
 
         struct CellHit { Rect rect; StructuredCell cell; };
@@ -928,9 +947,7 @@ bool SettingsWindow::HandleStructuredBlockClick(
             cellHits.push_back({row.classRect, StructuredCell::Class});
             cellHits.push_back({row.instanceRect, StructuredCell::Instance});
             cellHits.push_back({row.titleRect, StructuredCell::Title});
-
-            if (ParseWindowRuleDraft(panel.lines[i]).actionIndex == kWindowRuleWorkspaceAction)
-                cellHits.push_back({row.workspaceRect, StructuredCell::Workspace});
+            cellHits.push_back({row.workspaceRect, StructuredCell::Workspace});
         }
         else
         {
@@ -1527,31 +1544,15 @@ void SettingsWindow::ValidateRawBlockLine(
 
     if (panel.id == "windowrule")
     {
-        std::istringstream stream(line);
-        std::string action;
-        stream >> action;
+        // The window manager's own parser decides: whatever it would
+        // refuse to load (and log a warning for) is flagged right here,
+        // with its own wording, so this editor and Kohiko can never
+        // disagree about what a rule means.
+        WindowRule parsed;
+        std::string error;
 
-        static const std::vector<std::string> kActions = {"float", "tile", "fullscreen", "nofullscreen"};
-        bool validAction = std::find(kActions.begin(), kActions.end(), action) != kActions.end();
-
-        if (!validAction && action.rfind("workspace:", 0) == 0)
-        {
-            std::string number = action.substr(std::strlen("workspace:"));
-            validAction = !number.empty() && std::all_of(number.begin(), number.end(), ::isdigit);
-        }
-
-        if (!validAction)
-        {
-            outError = "Unknown action \"" + action + "\"";
-            return;
-        }
-
-        if (line.find("class:") == std::string::npos &&
-            line.find("instance:") == std::string::npos &&
-            line.find("title:") == std::string::npos)
-        {
-            outError = "Needs at least one of class:/instance:/title:";
-        }
+        if (!WindowRule::Parse(line, parsed, &error))
+            outError = error.empty() ? std::string("Not a valid rule") : error;
     }
     else if (panel.id == "monitor")
     {
@@ -1581,48 +1582,55 @@ SettingsWindow::WindowRuleDraft SettingsWindow::ParseWindowRuleDraft(
 {
     WindowRuleDraft draft;
 
-    std::vector<std::string> tokens = Utils::SplitWhitespace(line);
-
-    if (!tokens.empty())
+    for (const std::string& token : Utils::SplitWhitespace(line))
     {
-        std::string actionLower = Utils::Lower(tokens[0]);
+        if (token[0] == '#')
+            break; // inline comment, same as WindowRule::Parse()
 
-        if (actionLower.rfind("workspace:", 0) == 0)
-        {
-            draft.actionIndex = kWindowRuleWorkspaceAction;
-            draft.workspaceText = tokens[0].substr(std::strlen("workspace:"));
-        }
-        else
-        {
-            for (int i = 0; i < kWindowRuleActionCount; ++i)
-            {
-                if (actionLower == kWindowRuleActionTokens[i])
-                {
-                    draft.actionIndex = i;
-                    break;
-                }
-            }
-            // An unrecognized first token (mid-edit, or a hand-typed
-            // line this editor's never seen before) just keeps the
-            // default (Tile) rather than rejecting anything - this is
-            // a lenient *editing* parser, not the strict one
-            // ValidateRawBlockLine() already runs separately.
-        }
-    }
+        std::string lower = Utils::Lower(token);
 
-    for (std::size_t i = 1; i < tokens.size(); ++i)
-    {
-        std::size_t colon = tokens[i].find(':');
+        // Legacy bare words.
+        if (lower == "tile")         { draft.modeIndex = 1; continue; }
+        if (lower == "float")        { draft.modeIndex = 2; continue; }
+        if (lower == "fullscreen")   { draft.modeIndex = 3; continue; }
+        if (lower == "nofullscreen") { draft.denyFullscreen = true; continue; }
 
+        std::size_t colon = token.find(':');
+
+        // Anything else this lenient *editing* parser doesn't recognise
+        // (mid-edit, or a hand-typed line this editor's never seen)
+        // is simply not modelled - strictness is
+        // ValidateRawBlockLine()'s job, via WindowRule::Parse().
         if (colon == std::string::npos || colon == 0)
             continue;
 
-        std::string key = Utils::Lower(tokens[i].substr(0, colon));
-        std::string value = tokens[i].substr(colon + 1); // case preserved - see WindowRuleDraft's comment
+        std::string key = Utils::Lower(token.substr(0, colon));
+        std::string raw = token.substr(colon + 1);
 
-        if (key == "class")         draft.classText = value;
-        else if (key == "instance") draft.instanceText = value;
-        else if (key == "title")    draft.titleText = value;
+        // Selector text keeps the case it was typed in (see
+        // WindowRuleDraft's comment) and shows %XX escapes decoded.
+        if (key == "app")                draft.appText = WindowRule::DecodeValue(raw);
+        else if (key == "class")         draft.classText = WindowRule::DecodeValue(raw);
+        else if (key == "instance")      draft.instanceText = WindowRule::DecodeValue(raw);
+        else if (key == "title")         draft.titleText = WindowRule::DecodeValue(raw);
+        else if (key == "role")          draft.roleText = WindowRule::DecodeValue(raw);
+        else if (key == "type")          draft.typeText = raw;
+        else if (key == "workspace")     draft.workspaceText = raw;
+        else if (key == "horizontal")
+        {
+            std::string v = Utils::Lower(raw);
+            for (int i = 1; i < 3; ++i) if (v == kHorizontalTokens[i]) draft.horizontalIndex = i;
+        }
+        else if (key == "vertical")
+        {
+            std::string v = Utils::Lower(raw);
+            for (int i = 1; i < 3; ++i) if (v == kVerticalTokens[i]) draft.verticalIndex = i;
+        }
+        else if (key == "mode")
+        {
+            std::string v = Utils::Lower(raw);
+            for (int i = 1; i < 4; ++i) if (v == kModeTokens[i]) draft.modeIndex = i;
+        }
     }
 
     return draft;
@@ -1631,13 +1639,32 @@ SettingsWindow::WindowRuleDraft SettingsWindow::ParseWindowRuleDraft(
 std::string SettingsWindow::SerializeWindowRuleDraft(
     const WindowRuleDraft& draft) const
 {
-    std::string line = (draft.actionIndex == kWindowRuleWorkspaceAction)
-        ? ("workspace:" + draft.workspaceText)
-        : std::string(kWindowRuleActionTokens[draft.actionIndex]);
+    std::string line;
 
-    if (!draft.classText.empty())    line += " class:" + draft.classText;
-    if (!draft.instanceText.empty()) line += " instance:" + draft.instanceText;
-    if (!draft.titleText.empty())    line += " title:" + draft.titleText;
+    auto add = [&](const std::string& token)
+    {
+        if (!line.empty())
+            line += ' ';
+
+        line += token;
+    };
+
+    // Canonical order, identical to WindowRule::Serialize(): selectors,
+    // then workspace, horizontal, vertical, mode. Unlike that function
+    // this never refuses a half-finished row - it writes whatever is
+    // there, and ValidateRawBlockLine() reports what's missing.
+    if (!draft.appText.empty())      add("app:" + WindowRule::EncodeValue(draft.appText));
+    if (!draft.classText.empty())    add("class:" + WindowRule::EncodeValue(draft.classText));
+    if (!draft.instanceText.empty()) add("instance:" + WindowRule::EncodeValue(draft.instanceText));
+    if (!draft.roleText.empty())     add("role:" + WindowRule::EncodeValue(draft.roleText));
+    if (!draft.typeText.empty())     add("type:" + draft.typeText);
+    if (!draft.titleText.empty())    add("title:" + WindowRule::EncodeValue(draft.titleText));
+
+    if (!draft.workspaceText.empty()) add("workspace:" + draft.workspaceText);
+    if (draft.horizontalIndex > 0)    add(std::string("horizontal:") + kHorizontalTokens[draft.horizontalIndex]);
+    if (draft.verticalIndex > 0)      add(std::string("vertical:") + kVerticalTokens[draft.verticalIndex]);
+    if (draft.modeIndex > 0)          add(std::string("mode:") + kModeTokens[draft.modeIndex]);
+    if (draft.denyFullscreen)         add("nofullscreen");
 
     return line;
 }
@@ -1687,7 +1714,7 @@ std::string SettingsWindow::StructuredCellText(
 
     switch (cell)
     {
-        case StructuredCell::Class:     return draft.classText;
+        case StructuredCell::Class:     return draft.firstCellIsClass() ? draft.classText : draft.appText;
         case StructuredCell::Instance:  return draft.instanceText;
         case StructuredCell::Title:     return draft.titleText;
         case StructuredCell::Workspace: return draft.workspaceText;
@@ -1719,7 +1746,13 @@ void SettingsWindow::SetStructuredCellText(
 
     switch (cell)
     {
-        case StructuredCell::Class:     draft.classText = value;     break;
+        case StructuredCell::Class:
+            // The first cell edits whichever selector this row already
+            // uses: the exact `app:` key (the default, and what new rows
+            // get) or - only for a hand-written legacy rule - `class:`.
+            if (draft.firstCellIsClass()) draft.classText = value;
+            else                          draft.appText = value;
+            break;
         case StructuredCell::Instance:  draft.instanceText = value;  break;
         case StructuredCell::Title:     draft.titleText = value;     break;
         case StructuredCell::Workspace: draft.workspaceText = value; break;
@@ -1736,13 +1769,9 @@ std::vector<SettingsWindow::StructuredCell> SettingsWindow::StructuredCellOrder(
     if (panel.kind == RawBlockPanel::Kind::Monitor)
         return {StructuredCell::Output, StructuredCell::Workspace};
 
-    std::vector<StructuredCell> order = {StructuredCell::Class, StructuredCell::Instance, StructuredCell::Title};
+    (void)row;
 
-    if (row < panel.lines.size() &&
-        ParseWindowRuleDraft(panel.lines[row]).actionIndex == kWindowRuleWorkspaceAction)
-        order.push_back(StructuredCell::Workspace);
-
-    return order;
+    return {StructuredCell::Class, StructuredCell::Instance, StructuredCell::Title, StructuredCell::Workspace};
 }
 
 void SettingsWindow::MoveStructuredFocus(
@@ -1787,22 +1816,19 @@ void SettingsWindow::MoveStructuredFocus(
     }
 }
 
-void SettingsWindow::CycleStructuredAction(
+void SettingsWindow::CycleStructuredChoice(
     RawBlockPanel& panel,
-    std::size_t row)
+    std::size_t row,
+    int which)
 {
     if (row >= panel.lines.size())
         return;
 
     WindowRuleDraft draft = ParseWindowRuleDraft(panel.lines[row]);
-    draft.actionIndex = (draft.actionIndex + 1) % (kWindowRuleActionCount + 1);
 
-    // Cycling off of Workspace clears its now-hidden text so it
-    // doesn't silently reappear, stale, if the user cycles back to
-    // Workspace later - a fresh field is less surprising than a
-    // number they don't remember typing.
-    if (draft.actionIndex != kWindowRuleWorkspaceAction)
-        draft.workspaceText.clear();
+    if (which == 0)      draft.horizontalIndex = (draft.horizontalIndex + 1) % 3;
+    else if (which == 1) draft.verticalIndex   = (draft.verticalIndex + 1) % 3;
+    else                 draft.modeIndex       = (draft.modeIndex + 1) % 4;
 
     panel.lines[row] = SerializeWindowRuleDraft(draft);
 
@@ -1815,7 +1841,11 @@ void SettingsWindow::CycleStructuredAction(
 std::string SettingsWindow::DefaultStructuredLine(
     RawBlockPanel::Kind kind) const
 {
-    return (kind == RawBlockPanel::Kind::Monitor) ? std::string(",workspace=1") : std::string("tile");
+    // A new window rule starts with every choice at Default and no
+    // application yet - an empty line. (Blank lines are just spacing
+    // as far as validation and saving go, so an untouched new row
+    // neither errors nor gets written.)
+    return (kind == RawBlockPanel::Kind::Monitor) ? std::string(",workspace=1") : std::string();
 }
 
 bool SettingsWindow::FieldDirty(
@@ -2610,38 +2640,55 @@ void SettingsWindow::LayoutAndDrawStructuredBlock(
         if (panel.kind == RawBlockPanel::Kind::WindowRule)
         {
             WindowRuleDraft draft = ParseWindowRuleDraft(panel.lines[i]);
-            bool showsWorkspace = (draft.actionIndex == kWindowRuleWorkspaceAction);
 
-            rowRects.actionRect = Rect{rx, rowY, kStructuredActionW, kStructuredRowH};
-            std::string actionLabel = showsWorkspace ? "Workspace" : kWindowRuleActionLabels[draft.actionIndex];
-            DrawButton(rowRects.actionRect, actionLabel, true, false);
-            rx += kStructuredActionW + kStructuredFieldGap;
-
-            if (showsWorkspace)
-            {
-                rowRects.workspaceRect = Rect{rx, rowY, kStructuredWorkspaceW, kStructuredRowH};
-                drawCell(rowRects.workspaceRect, "N", draft.workspaceText, i, StructuredCell::Workspace);
-                rx += kStructuredWorkspaceW + kStructuredFieldGap;
-            }
-
+            // Line 1: WHICH windows - the application (exact `app:` key,
+            // or a legacy `class:` substring), plus the optional
+            // instance/title selectors.
             rowRects.removeRect = Rect{x + width - kStructuredRemoveW, rowY, kStructuredRemoveW, kStructuredRowH};
 
             int fieldsRight = rowRects.removeRect.x - kStructuredFieldGap;
             int fieldsTotalW = std::max(0, fieldsRight - rx);
-            int perFieldW = std::max(60, (fieldsTotalW - 2 * kStructuredFieldGap) / 3);
+            int firstW = std::max(100, fieldsTotalW / 2);
+            int smallW = std::max(60, (fieldsTotalW - firstW - 2 * kStructuredFieldGap) / 2);
 
-            rowRects.classRect = Rect{rx, rowY, perFieldW, kStructuredRowH};
-            drawCell(rowRects.classRect, "class:", draft.classText, i, StructuredCell::Class);
-            rx += perFieldW + kStructuredFieldGap;
+            rowRects.classRect = Rect{rx, rowY, firstW, kStructuredRowH};
+            drawCell(rowRects.classRect,
+                     draft.firstCellIsClass() ? "class:" : "application, e.g. firefox",
+                     draft.firstCellIsClass() ? draft.classText : draft.appText,
+                     i, StructuredCell::Class);
+            rx += firstW + kStructuredFieldGap;
 
-            rowRects.instanceRect = Rect{rx, rowY, perFieldW, kStructuredRowH};
+            rowRects.instanceRect = Rect{rx, rowY, smallW, kStructuredRowH};
             drawCell(rowRects.instanceRect, "instance:", draft.instanceText, i, StructuredCell::Instance);
-            rx += perFieldW + kStructuredFieldGap;
+            rx += smallW + kStructuredFieldGap;
 
             rowRects.titleRect = Rect{rx, rowY, std::max(60, fieldsRight - rx), kStructuredRowH};
             drawCell(rowRects.titleRect, "title:", draft.titleText, i, StructuredCell::Title);
 
             DrawButton(rowRects.removeRect, "x", true, false);
+
+            // Line 2: WHAT to do with them - every choice has an
+            // explicit Default meaning "no opinion". Indented to line up
+            // under the application cell.
+            int line2Y = rowY + kStructuredRowH + 4;
+            int bx = x;
+
+            rowRects.workspaceRect = Rect{bx, line2Y, kStructuredWorkspaceLabelW, kStructuredRowH};
+            drawCell(rowRects.workspaceRect, "Workspace", draft.workspaceText, i, StructuredCell::Workspace);
+            bx += kStructuredWorkspaceLabelW + kStructuredFieldGap;
+
+            rowRects.horizontalRect = Rect{bx, line2Y, kStructuredChoiceW, kStructuredRowH};
+            DrawButton(rowRects.horizontalRect, std::string("Horizontal: ") + kHorizontalLabels[static_cast<std::size_t>(draft.horizontalIndex)], true, false);
+            bx += kStructuredChoiceW + kStructuredFieldGap;
+
+            rowRects.verticalRect = Rect{bx, line2Y, kStructuredChoiceW, kStructuredRowH};
+            DrawButton(rowRects.verticalRect, std::string("Vertical: ") + kVerticalLabels[static_cast<std::size_t>(draft.verticalIndex)], true, false);
+            bx += kStructuredChoiceW + kStructuredFieldGap;
+
+            rowRects.modeRect = Rect{bx, line2Y, kStructuredChoiceW + 20, kStructuredRowH};
+            DrawButton(rowRects.modeRect, std::string("Mode: ") + kModeLabels[static_cast<std::size_t>(draft.modeIndex)], true, false);
+
+            rowY += kStructuredRowH + 4; // the second line (the common bottom of the loop adds the first)
         }
         else // Monitor
         {
@@ -2671,7 +2718,10 @@ void SettingsWindow::LayoutAndDrawStructuredBlock(
             rowY += 20;
         }
 
-        rowY += kStructuredRowGap;
+        // A window rule is two lines tall, so leave a clearly bigger gap
+        // BETWEEN rules than between a rule's own two lines - otherwise
+        // it's impossible to tell which pair of lines belongs together.
+        rowY += kStructuredRowGap + (panel.kind == RawBlockPanel::Kind::WindowRule ? 12 : 0);
     }
 
     panel.addRowButtonRect = Rect{x, rowY, kStructuredAddButtonW, kStructuredAddButtonH};

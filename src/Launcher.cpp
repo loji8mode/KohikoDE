@@ -539,6 +539,28 @@ std::string Launcher::SelectedPath()
     return match.path;
 }
 
+LaunchRequest Launcher::TakeLaunchRequest()
+{
+    LaunchRequest request;
+
+    if (SelectedIsFile())
+    {
+        request.kind = LaunchRequest::Kind::OpenFolder;
+        request.path = SelectedPath();
+        return request;
+    }
+
+    std::string command = SelectedCommand();
+
+    if (!command.empty())
+    {
+        request.kind = LaunchRequest::Kind::Command;
+        request.command = std::move(command);
+    }
+
+    return request;
+}
+
 LauncherResult Launcher::HandleKeyPress(
     const XKeyEvent& event)
 {

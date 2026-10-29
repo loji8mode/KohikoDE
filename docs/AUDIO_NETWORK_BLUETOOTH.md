@@ -725,3 +725,47 @@ layer underneath them are exactly as they were.
    (`DrawIcon()`), which still goes through Imlib2 for SVGs and was
    deliberately left untouched (unrelated WM functionality, not part
    of what was reported) - checking that one is still open.
+
+## Tray mouse contract and slow operations
+
+**One contract for every native tray icon** (`include/TrayInteraction.h`):
+left click opens - or raises, with its state unchanged - the application's
+main window; right click opens the compact quick-action menu, whose last
+item is "Open ...". The three tray tools each describe only their own menu
+and install the same pair of handlers, so they cannot drift apart again.
+Third-party tray icons are plain XEmbed clients and receive their clicks
+straight from the X server; nothing in this contract is in their path.
+Opening the window goes through `AppInstanceLock::LaunchOrRaise()`: the
+instance lock is an `flock()`, a running window is raised, and an
+application that is still starting is not started a second time.
+
+**Nothing slow runs on a window's event loop.** `DBusClient::Call()` and
+friends block the calling thread until the reply or the timeout (a BlueZ
+`Connect` is allowed 15 s, `Pair` 30 s; NetworkManager's connect reads
+every saved profile one call at a time and may wait on a keyring prompt).
+That is fine for a handful of reads at startup and wrong anywhere a user is
+waiting on a window, so the Bluetooth and NetworkManager clients have
+`*Async` operations that:
+
+- run on an `OperationWorker` thread ("lane"), each lane with its own
+  *private* D-Bus connection (`DBusOperationQueue`) - the window's own
+  connection, whose fd the event loop watches for signals, is never used
+  from another thread;
+- return immediately and deliver `OperationResult{ok, message}` to a
+  completion callback on the window's thread, from `DispatchOperations()`,
+  woken by an `eventfd` the loop polls - there is no timer and no polling;
+- refuse a second copy of an operation that is still pending (keyed by
+  device / connection / "radio" / "scan");
+- keep independent work on separate lanes (a device connect does not delay
+  the adapter's power toggle, and the secrets lookup - which can wait on
+  the user - never blocks a connect);
+- cannot be cancelled once running (it is a blocking call in another
+  thread), only while still queued (`CancelQueued()`); closing the window
+  never waits for a running operation.
+
+A job body may touch only its own D-Bus connection and the values it was
+given by copy; X11, the widget tree and the window's members stay on the
+window's thread. The UI shows "Working..." and disables the control while
+an operation is pending and reports a failure on the device/network and as
+a desktop notification. PipeWire needs none of this: its operations are
+asynchronous protocol messages dispatched from the loop's fd.

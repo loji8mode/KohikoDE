@@ -15,7 +15,6 @@
 #include "MouseManager.h"
 #include "NotificationCenter.h"
 #include "Notepad.h"
-#include "PlacementHabitStore.h"
 #include "PowerMenu.h"
 #include "Scratchpad.h"
 #include "ScreenSaverInhibitor.h"
@@ -25,6 +24,7 @@
 #include "Types.h"
 #include "WallpaperManager.h"
 #include "WindowRepository.h"
+#include "AutostartPlan.h"
 #include "WindowRule.h"
 #include "WorkspaceManager.h"
 #include "XAtoms.h"
@@ -32,6 +32,8 @@
 #include <X11/Xlib.h>
 
 #include <chrono>
+#include <optional>
+#include <unordered_set>
 #include <map>
 #include <memory>
 #include <string>
@@ -140,6 +142,21 @@ public:
     // played back smoothly frame-by-frame - see EventLoop.cpp's own
     // comment for the exact rate chosen and why).
     bool HasActiveNotification() const;
+
+    // The earliest deadline among windows Manage() is still holding
+    // back as possible tray icons (see m_pendingXEmbedWindows), or
+    // nullopt when there are none. EventLoop::Run() folds this into
+    // its select() timeout so the hold ends at the deadline itself
+    // rather than at the next ~1 Hz Tick() after it - a one-shot,
+    // bounded wakeup that exists only while such a window is
+    // actually pending, not a polling loop.
+    std::optional<std::chrono::steady_clock::time_point> NextXEmbedDeadline() const;
+
+    // Manages every pending _XEMBED_INFO window whose deadline has
+    // passed (and forgets any that were docked in the meantime).
+    // Cheap no-op when nothing is pending - EventLoop::Run() calls it
+    // every iteration.
+    void CheckPendingXEmbedWindows();
 
     // Posts a native toast notification (see NotificationCenter.h) on
     // FocusedMonitor(), bottom-right, for the spec's default 2.5s
@@ -294,6 +311,12 @@ private:
     // startup does.
     void AdoptExistingWindows();
 
+    // The saved session record for `id`, or nullptr. Returns a record
+    // at most once per window, and only for a window that existed when
+    // Kohiko started (see m_sessionRestoreIds) - never for a window
+    // created later that happens to reuse a dead window's X11 ID.
+    const SessionWindowState* ConsumeSessionRecord(WindowID id);
+
     // Interprets lockscreen.after (never/manual/suspend/always - see
     // ConfigSchema and the README's "Suspend integration" section):
     // whether the *manual* `lock` command (bind=/`kohikoctl dispatch
@@ -332,22 +355,26 @@ private:
 
     // Windows Manage() left unmapped because IsXEmbedWindow() found
     // _XEMBED_INFO on them (see Manage()'s own comment, and
-    // CHANGELOG.md's 0.20.4 entry for the full investigation) -
-    // provisionally treated as a soon-to-be-docked tray icon, with a
-    // deadline to actually get claimed via a real
-    // SYSTEM_TRAY_REQUEST_DOCK before CheckPendingXEmbedWindows()
-    // (called once per Tick()) gives up on that and manages the
-    // window normally instead. Removed from this list the instant a
-    // dock request actually arrives too (HandleClientMessage()) - the
-    // Tick()-driven sweep is the fallback for "never arrived", not
-    // the primary way a successful, fast dock gets noticed.
+    // CHANGELOG.md's 0.20.4 and 0.22.0 entries for the investigations)
+    // - provisionally treated as a soon-to-be-docked tray icon, with a
+    // *short* deadline (kXEmbedDockGrace in Manage()) to get claimed by
+    // a real SYSTEM_TRAY_REQUEST_DOCK before CheckPendingXEmbedWindows()
+    // gives up and manages the window normally instead. Removed from
+    // this list the instant a dock request actually arrives too
+    // (HandleClientMessage()) - the deadline sweep is the fallback for
+    // "never arrived", not the primary way a fast dock gets noticed.
+    //
+    // The deadline is serviced by EventLoop::Run() directly (see
+    // NextXEmbedDeadline()), NOT by the ~1 Hz Tick(): every Qt
+    // top-level window carries _XEMBED_INFO whether or not it will
+    // ever dock, so anything that quantizes this deadline to a tick
+    // boundary delays every Qt application's first appearance.
     struct PendingXEmbedWindow
     {
         WindowID id;
         std::chrono::steady_clock::time_point deadline;
     };
     std::vector<PendingXEmbedWindow> m_pendingXEmbedWindows;
-    void CheckPendingXEmbedWindows();
 
     // Whether any window that's actually being displayed right now
     // (not just marked fullscreen on some other, currently-hidden
@@ -513,8 +540,29 @@ private:
     // those resolves to anything.
     Monitor& MonitorForModal() const;
 
+    // Runs kohiko-choose-window for the focused window (the
+    // `choose_window` command): the dialog that creates, edits or
+    // deletes that application's explicit window rule. Takes effect on
+    // windows opened afterwards (after the dialog's own `kohikoctl
+    // reload`); never moves a window that is already open.
+    void ChooseWindowRuleForFocused(const std::string& scope = std::string());
+
     void ToggleLauncher();
     void CloseLauncher(bool run);
+
+    // Runs one LaunchRequest the Launcher produced when Enter was
+    // accepted. Takes it by const reference to the immutable snapshot -
+    // there is no way to reach the Launcher's (mutable) selection from
+    // here - and starts the process exactly once.
+    void SubmitLaunch(const LaunchRequest& request);
+
+    // Called after any workspace/monitor-focus transition, whichever
+    // way it was triggered (keyboard shortcut, taskbar click, IPC):
+    // keeps an open Launcher/Notepad attached to where the user now is
+    // instead of where it was opened. See the definition.
+    void ReconcileModalsAfterWorkspaceChange();
+
+    std::string DumpLauncherJson() const;
     void ToggleNotepad();
     void CloseNotepad();
     void RestoreFocusAfterModal();
@@ -526,18 +574,24 @@ private:
     // on `reload` (setxkbmap is idempotent), unlike RunAutostart().
     void ApplyKeyboardLayouts();
 
-    // Launches every program listed in `auto_start_programs`, plus
-    // every `workspace<N>=` line (N from 1 to workspace.count) - the
-    // same idea, except each program listed there also gets recorded
-    // in m_pendingWorkspaceAutostarts so Manage() can land its
-    // window(s) on workspace N once they actually show up - and every
-    // freedesktop XDG autostart .desktop entry found by
-    // RunXdgAutostartEntries() below, which is how the audio/network/
-    // Bluetooth tray widgets (desktop/kohiko-*-tray.desktop) actually
+    // Launches the startup programs - the ONE place anything is
+    // launched at startup. Three mechanisms can ask for a program:
+    // `auto_start_programs`, every `workspace<N>=` line (N from 1 to
+    // workspace.count), and freedesktop XDG autostart .desktop entries
+    // (CollectXdgAutostartEntries() below - how the audio/network/
+    // Bluetooth tray widgets, desktop/kohiko-*-tray.desktop, actually
     // get started; Kohiko has no session manager of its own to do this
-    // otherwise. All of it runs exactly once, right after startup -
-    // see Initialize(). Deliberately never called from ReloadConfig(),
-    // or `kohikoctl reload` would relaunch every autostart program (a
+    // otherwise). They are merged into a single plan by PlanAutostart()
+    // (AutostartPlan.h) so a program that two of them mention is
+    // launched once, by the more explicit one. Each `workspace<N>=`
+    // program is also recorded in m_pendingWorkspaceAutostarts so
+    // Manage() can land its window(s) on workspace N once they show up.
+    //
+    // Runs at most once per login SESSION, not once per process: a
+    // marker on the root window makes a restarted Kohiko (crash
+    // recovery) leave the already-running programs alone - see the
+    // function body. Deliberately never called from ReloadConfig(), or
+    // `kohikoctl reload` would relaunch every autostart program (a
     // second Telegram, a second Discord, a second tray icon...) every
     // time someone reloads the config.
     void RunAutostart();
@@ -546,12 +600,12 @@ private:
     // every directory Xdg::AutostartDirs() returns, in priority order,
     // parses each ".desktop" file found (skipping any desktop ID
     // already seen in a higher-priority directory, exactly as the spec
-    // requires - see AutostartDirs()'s own comment), and spawns
-    // whichever ones ShouldAutostart() accepts. Broken out on its own
-    // only because RunAutostart() was already doing something
-    // different (config-string parsing) for its other two sources;
-    // never called on its own from anywhere else.
-    void RunXdgAutostartEntries();
+    // requires - see AutostartDirs()'s own comment), and returns
+    // (desktop id, Exec command) for whichever ones ShouldAutostart()
+    // accepts. It only gathers: whether an entry is actually launched
+    // is decided by PlanAutostart(), which knows about the other two
+    // mechanisms.
+    std::vector<std::pair<std::string, std::string>> CollectXdgAutostartEntries();
 
     // 0 if nothing pending matches `pid` (or it's <= 0); otherwise the
     // workspace a `workspace<N>=` autostart line asked this window's
@@ -657,44 +711,30 @@ private:
         const SessionWindowState* session,
         Monitor& referenceMonitor);
 
-    // Adaptive placement's position half (see PlacementHabitStore's
-    // header comment): if `window`'s app class has a confident,
-    // repeatedly-observed habit of landing on one side of the tiling
-    // layout, walks it toward that edge - one FindNeighbor()/Swap()
-    // trade at a time, exactly what a manual Super+Shift+h/j/k/l move
-    // would do - until it's flush against that edge or there's simply
-    // nothing left to trade with. A no-op for a floating window, or
-    // one whose class has no confident habit on either axis yet.
-    // Never called for a window TryRestoreSessionPosition() already
-    // placed precisely - see Manage()'s call site.
-    void ApplyAdaptivePlacementNudge(ManagedWindow* window);
+    // The position half of an explicit window rule (see WindowRule.h):
+    // if `horizontal`/`vertical` name a side, walks `window` toward
+    // that edge of the tiling layout - one FindNeighbor()/Swap() trade
+    // at a time, exactly what a manual Super+Shift+h/j/k/l move would
+    // do - until it's flush against that edge or there's simply
+    // nothing left to trade with. Horizontal first, then vertical. A
+    // no-op for a floating window or when both are Default. Never
+    // called for a window TryRestoreSessionPosition() already placed
+    // precisely - see Manage()'s call site.
+    void ApplyRulePlacementNudge(
+        ManagedWindow* window,
+        WindowRule::Horizontal horizontal,
+        WindowRule::Vertical vertical);
 
-    // The identity a habit is learned/predicted against: `window`'s
-    // WM_CLASS class string, falling back to its instance string if
-    // the class is blank, or "" (meaning "can't learn anything about
-    // this window") if both are - mirrors windowrule='s own class:/
-    // instance: fallback preference.
-    static std::string AppClassKey(ManagedWindow* window);
-
-    // The workspace half of Manage()'s adaptive-placement fallback
-    // (see PlacementHabitStore's header comment): general.
-    // adaptive_placement's own value, and PlacementHabitStore::
-    // PredictWorkspace() otherwise - 0 either way means "no opinion",
-    // matching every other entry in that same if/else-if chain.
-    int AdaptiveWorkspaceHabit(const std::string& appClass) const;
-
-    // Records one manual "sent to workspace `workspace`" observation
-    // for `window`'s app class - called from MoveFocusedToWorkspace().
-    // A no-op (never even touches PlacementHabitStore) if adaptive
-    // placement is turned off or `window` has no usable class/
-    // instance identity.
-    void RecordAdaptiveWorkspaceHabit(ManagedWindow* window, int workspace);
-
-    // Records one manual reposition observation for `window`'s app
-    // class from its current (post-Arrange()) geometry - called from
-    // SwapWindows() for both windows involved in a swap. Same no-op
-    // conditions as RecordAdaptiveWorkspaceHabit() above.
-    void RecordAdaptivePositionHabit(ManagedWindow* window);
+    // The same rule fields for a FLOATING window: moves `rect` flush
+    // to the requested edge(s) of `monitor`'s work area (inset by
+    // general.outer_gap) on the axis each names, leaving the other
+    // axis exactly as given. Returns `rect` unchanged when both are
+    // Default.
+    Rect FloatingRectAtRuleEdges(
+        Rect rect,
+        const Monitor& monitor,
+        WindowRule::Horizontal horizontal,
+        WindowRule::Vertical vertical) const;
 
     // `new_workspace` fallback destination: whichever *other*
     // workspace currently has the fewest windows on it (ties broken
@@ -839,9 +879,11 @@ private:
     // Every `windowrule=` line whose selector matches this window,
     // collapsed into one effect - see WindowRule.h.
     WindowRuleEffect ResolveWindowRules(
-        const std::string& className,
-        const std::string& instanceName,
-        const std::string& title) const;
+        const WindowIdentity& window) const;
+
+    // Everything a rule can select on, read off a managed window.
+    static WindowIdentity RuleIdentityOf(
+        const ManagedWindow& window);
 
     // Re-raises the Launcher/Notepad above whatever Arrange() (or a
     // manual Raise() elsewhere, e.g. the Scratchpad or a Swap drag)
@@ -853,6 +895,18 @@ private:
     // that is exactly what made it look "stuck behind" the new window.
     // A no-op when neither is open.
     void RaiseModalWindows();
+
+    // Floating-tier stacking (see ManagedWindow::SetRaiseSerial()).
+    // NoteRaised() gives a floating window the next "last raised"
+    // ticket; it is called wherever a floating window is deliberately
+    // brought to the front (focus, a drag/resize starting, it opening).
+    // RestackTileBelowFloating() puts a tiled window that was raised
+    // only to be carried across the screen back *under* the lowest
+    // window of the floating/fullscreen/scratchpad tier on its
+    // workspace - one StackBelow, no round trip, and no floating
+    // window is touched.
+    void NoteRaised(ManagedWindow* window);
+    void RestackTileBelowFloating(ManagedWindow* tile);
 
     std::string DumpClientsJson() const;
     std::string DumpMonitorsJson() const;
@@ -905,7 +959,11 @@ private:
     LayoutEngine m_layout;
     Scratchpad m_scratchpad;
     SessionStore m_session;
-    PlacementHabitStore m_placementHabits;
+
+    // IDs of windows that already existed when Kohiko started and have
+    // a saved session record that hasn't been applied yet - the only
+    // windows Session Restore may touch. See ConsumeSessionRecord().
+    std::unordered_set<WindowID> m_sessionRestoreIds;
 
     KeyboardManager m_keyboard;
     MouseManager m_mouse;
@@ -957,6 +1015,8 @@ private:
     // Arrange() skips repositioning this one window so an unrelated
     // relayout mid-drag can't yank it back to its old tiled slot out
     // from under the cursor.
+    unsigned long m_raiseCounter = 0;
+
     ManagedWindow* m_activeDragWindow = nullptr;
     ManagedWindow* m_dragHoverTarget = nullptr;
     int m_dragOffsetX = 0;

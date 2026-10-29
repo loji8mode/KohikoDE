@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DBusClient.h"
+#include "DBusOperationQueue.h"
 
 #include <cstdint>
 #include <functional>
@@ -196,12 +197,51 @@ public:
 
     void DisconnectDevice(const std::string& devicePath);
 
+    // --- Asynchronous versions ---------------------------------------
+    //
+    // The methods above run on the calling thread and block it for every
+    // D-Bus round trip they make: ConnectToAccessPoint() alone reads the
+    // settings of EVERY saved Wi-Fi profile one call at a time and can
+    // wait on a secret-agent prompt - seconds, during which a window
+    // cannot be moved or closed - and none of them reports a failure.
+    // These run the same logic on a worker thread with its own private
+    // D-Bus connection and a snapshot of the saved connections taken
+    // now, return at once, and hand the outcome (with NetworkManager's
+    // own error text on failure) to `done`, which runs on the CALLING
+    // thread from DispatchOperations(). Each returns false, running
+    // nothing, if the same target already has an operation pending.
+    //
+    // Wiring: WatchFd(OperationFd(), [&]{ DispatchOperations(); }).
+    using Completion = OperationWorker::Completion;
+
+    bool SetAirplaneModeAsync(bool enabled, Completion done);
+    bool SetWirelessEnabledAsync(bool enabled, Completion done);
+    bool RequestWiFiScanAsync(Completion done);
+    bool HasUsableSavedSecretAsync(const std::string& ssid, std::function<void(bool usable)> done);
+    bool ConnectToAccessPointAsync(const std::string& devicePath, const std::string& apPath, const std::string& ssid, const std::string& password, Completion done);
+    bool ActivateSavedConnectionAsync(const std::string& connectionPath, const std::string& devicePath, Completion done);
+    bool DeactivateConnectionAsync(const std::string& connectionPath, Completion done);
+    bool ForgetConnectionAsync(const std::string& connectionPath, Completion done);
+    bool DisconnectDeviceAsync(const std::string& devicePath, Completion done);
+
+    int OperationFd() const;
+    void DispatchOperations();
+
+    static std::string DeviceKey(const std::string& devicePath);
+    static std::string ConnectionKey(const std::string& connectionPath);
+    static std::string RadioKey();
+    static std::string ScanKey();
+
+    bool IsBusy(const std::string& key) const;
+    bool AnyOperationPending() const;
+
     using ChangeHandler = std::function<void()>;
     void SetChangeHandler(ChangeHandler handler);
 
 private:
 
     DBusClient m_bus;
+    DBusOperationQueue m_ops{ DBusClient::Bus::System };
     std::vector<NetworkDevice> m_devices;
     std::vector<SavedConnection> m_savedConnections;
     bool m_networkingEnabled = true;

@@ -103,6 +103,15 @@ public:
 
     void Lower(::Window window);
 
+    // Puts `window` directly below `sibling` in the X stacking order -
+    // one ConfigureWindow request, no round trip, and every other
+    // window keeps its relative position. This is how a tile that was
+    // raised only so it could be carried over other windows (see
+    // WindowManager::BeginSwapDrag()) is put back under the floating
+    // tier afterwards without touching - or reordering - any floating
+    // window.
+    void StackBelow(::Window window, ::Window sibling);
+
     void SetInputFocus(::Window window);
 
     void SelectInputFor(::Window window, long mask);
@@ -134,6 +143,16 @@ public:
     // to do anything else with it, but keeps it around for the
     // lifetime of the connection rather than leaking an anonymous X
     // window). Called once, from WindowManager::Initialize().
+    // A small named CARDINAL property on the root window. Root-window
+    // properties belong to the X server, not to this process, so they
+    // survive a window manager restart (crash recovery, `kohiko`
+    // relaunched by kohiko-session) and vanish with the server -
+    // exactly the lifetime "once per login session" needs. Used to
+    // remember that startup programs were already launched (see
+    // WindowManager::RunAutostart()).
+    bool RootMarkerEquals(const char* name, unsigned long value);
+    void SetRootMarker(const char* name, unsigned long value);
+
     ::Window InitializeEwmhSupport(const XAtoms& atoms, const std::string& wmName);
 
     // Kept in sync with WindowRepository by Manage()/Unmanage() every
@@ -235,6 +254,13 @@ public:
     // still need to float purely because it's transient-for another
     // window) rather than either check alone deciding it.
     bool IsFloatingWindowType(::Window window, const XAtoms& atoms);
+
+    // The window's primary (first listed) _NET_WM_WINDOW_TYPE, as the
+    // lower-case name a window rule's `type:` selector uses ("normal",
+    // "utility", ...). Empty when the window declares no type, or one
+    // this doesn't recognise - the type is only ever what the window
+    // said, never inferred from other hints.
+    std::string GetWindowTypeName(::Window window, const XAtoms& atoms);
 
     // True if _NET_WM_WINDOW_TYPE declares this window a DOCK - a
     // taskbar/panel/status-bar-style window. Kohiko is its own bar

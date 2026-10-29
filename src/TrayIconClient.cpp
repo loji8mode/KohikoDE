@@ -212,6 +212,20 @@ void TrayIconClient::Redraw()
     if (m_drawCallback)
         m_drawCallback(m_display, m_window, m_gc, m_visual, m_colormap, m_iconSize);
 
+    // Xlib only *queues* the requests above in its client-side output
+    // buffer; nothing reaches the X server until something flushes
+    // that buffer. Run() goes straight from here into a blocking
+    // poll() on the raw socket - which does not flush Xlib's buffer -
+    // so without this the redraw sat unsent until the next unrelated
+    // wakeup made XPending() flush it as a side effect (for
+    // kohiko-audio-tray, the always-registered 2 s PipeWire
+    // reconnect timer: the "icon stays stale for 1-2+ seconds" bug,
+    // see CHANGELOG.md 0.22.0). Flushing here is the event-driven
+    // fix: real event -> state change -> redraw -> on the wire, no
+    // timer involved. XFlush (not XSync) on purpose - nothing here
+    // needs to wait for the server.
+    XFlush(m_display);
+
     m_dirty = false;
 }
 
@@ -262,6 +276,28 @@ void TrayIconClient::Run()
             }
         }
 
+        // Drain what Xlib has already queued BEFORE deciding whether to
+        // redraw and before blocking. A timer or fd callback that ran
+        // earlier in this iteration may have made an X round trip
+        // (XQueryPointer, XGetWindowAttributes, ... - the real tray tools
+        // do, and so does anything that reads a pointer position), and
+        // such a call parks every event that arrived meanwhile in Xlib's
+        // own queue, where poll() on the raw socket cannot see it. The
+        // drain after poll() below only helps once poll() has returned;
+        // an Expose parked after it - the icon's repaint right after a
+        // popup menu closed - waited for the NEXT wake-up, up to a whole
+        // timer interval (~100 ms of blank icon). Checking here makes the
+        // order "drain, redraw, sleep" regardless of what ran before.
+        while (XPending(m_display))
+        {
+            XEvent event;
+            XNextEvent(m_display, &event);
+            HandleEvent(event);
+
+            if (m_extraEventHandler)
+                m_extraEventHandler(event);
+        }
+
         if (m_dirty)
             Redraw();
 
@@ -292,8 +328,11 @@ void TrayIconClient::Run()
 
         auto considerDeadline = [&](std::chrono::steady_clock::time_point when)
         {
+            // Rounded UP to a whole millisecond: truncating 0.7 ms to 0
+            // made poll() return at once and the loop spin - up to a
+            // millisecond of 100% CPU before every timer.
             int remaining = std::max<int>(0,
-                static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(when - now).count()));
+                static_cast<int>(std::chrono::ceil<std::chrono::milliseconds>(when - now).count()));
 
             timeoutMs = haveDeadline ? std::min(timeoutMs, remaining) : remaining;
             haveDeadline = true;

@@ -4,8 +4,8 @@
 // writes session files by hand, in exactly the format Save() produces,
 // and checks that Load() parses them correctly), and no real
 // XDG_DATA_HOME either: this redirects XDG_DATA_HOME to a throwaway
-// temp directory before touching SessionStore, same as
-// test_placementhabits.cpp does for PlacementHabitStore.
+// temp directory before touching SessionStore, so a test run can never
+// read or clobber a real user's saved session.
 //
 // Build & run: see the "test-sessionstore" target in the Makefile.
 

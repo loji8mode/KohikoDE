@@ -23,7 +23,11 @@ bool IPCServer::Start(
 
     ::unlink(path.c_str()); // clear a stale socket from a previous run
 
-    m_listenFd = socket(AF_UNIX, SOCK_STREAM, 0);
+    // SOCK_CLOEXEC: Process::Spawn() is a bare fork+exec, so without it
+    // every program Kohiko launches would inherit this listening
+    // socket - and, worse, see "accept" below do the same for each
+    // client connection.
+    m_listenFd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
 
     if (m_listenFd < 0)
         return false;
@@ -74,7 +78,13 @@ void IPCServer::Poll()
     if (m_listenFd < 0)
         return;
 
-    int client = accept(m_listenFd, nullptr, nullptr);
+    // SOCK_CLOEXEC matters here more than anywhere: `kohikoctl
+    // dispatch exec ...` (or choose_window) makes the handler below
+    // spawn a program while `client` is still open. If that program
+    // inherited the descriptor, closing our end after the reply would
+    // never deliver EOF to kohikoctl - it would sit there until the
+    // spawned program exited (a terminal: until you closed it).
+    int client = accept4(m_listenFd, nullptr, nullptr, SOCK_CLOEXEC);
 
     if (client < 0)
         return;

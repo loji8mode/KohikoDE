@@ -1,5 +1,7 @@
 #include "XConnection.h"
 
+#include <cctype>
+
 #include "XAtoms.h"
 
 #include <X11/Xatom.h>
@@ -264,6 +266,15 @@ void XConnection::Lower(::Window window)
     XLowerWindow(m_display, window);
 }
 
+void XConnection::StackBelow(::Window window, ::Window sibling)
+{
+    XWindowChanges changes{};
+    changes.sibling = sibling;
+    changes.stack_mode = Below;
+
+    XConfigureWindow(m_display, window, CWSibling | CWStackMode, &changes);
+}
+
 void XConnection::SetInputFocus(::Window window)
 {
     XSetInputFocus(m_display, window, RevertToPointerRoot, CurrentTime);
@@ -307,6 +318,42 @@ void XConnection::ConfigureWindowRaw(::Window window, XWindowChanges changes, un
 }
 
 // --- EWMH --------------------------------------------------------------------
+
+bool XConnection::RootMarkerEquals(const char* name, unsigned long value)
+{
+    Atom atom = XInternAtom(m_display, name, False);
+
+    Atom type = None;
+    int format = 0;
+    unsigned long count = 0, remaining = 0;
+    unsigned char* data = nullptr;
+
+    bool equal = false;
+
+    if (XGetWindowProperty(
+            m_display, m_root, atom, 0, 1, False, XA_CARDINAL,
+            &type, &format, &count, &remaining, &data) == Success &&
+        type == XA_CARDINAL && format == 32 && count == 1 && data)
+    {
+        equal = (*reinterpret_cast<unsigned long*>(data) == value);
+    }
+
+    if (data)
+        XFree(data);
+
+    return equal;
+}
+
+void XConnection::SetRootMarker(const char* name, unsigned long value)
+{
+    Atom atom = XInternAtom(m_display, name, False);
+
+    XChangeProperty(
+        m_display, m_root, atom, XA_CARDINAL, 32,
+        PropModeReplace, reinterpret_cast<unsigned char*>(&value), 1);
+
+    XFlush(m_display);
+}
 
 ::Window XConnection::InitializeEwmhSupport(const XAtoms& atoms, const std::string& wmName)
 {
@@ -679,6 +726,83 @@ std::string XConnection::GetWindowRole(::Window window, const XAtoms& atoms)
     }
 
     return role;
+}
+
+std::string XConnection::GetWindowTypeName(::Window window, const XAtoms& atoms)
+{
+    Atom actualType;
+    int actualFormat = 0;
+    unsigned long itemCount = 0;
+    unsigned long bytesLeft = 0;
+    unsigned char* data = nullptr;
+
+    std::string name;
+
+    if (XGetWindowProperty(
+            m_display, window, atoms.NET_WM_WINDOW_TYPE, 0, 16, False,
+            XA_ATOM, &actualType, &actualFormat, &itemCount, &bytesLeft, &data
+        ) == Success && data)
+    {
+        // Most specific first, per EWMH: only the first entry is the
+        // window's primary type.
+        if (itemCount > 0)
+        {
+            Atom first = reinterpret_cast<Atom*>(data)[0];
+
+            struct Known { Atom atom; const char* name; };
+            const Known known[] =
+            {
+                { atoms.NET_WM_WINDOW_TYPE_NORMAL,        "normal" },
+                { atoms.NET_WM_WINDOW_TYPE_DIALOG,        "dialog" },
+                { atoms.NET_WM_WINDOW_TYPE_UTILITY,       "utility" },
+                { atoms.NET_WM_WINDOW_TYPE_SPLASH,        "splash" },
+                { atoms.NET_WM_WINDOW_TYPE_TOOLBAR,       "toolbar" },
+                { atoms.NET_WM_WINDOW_TYPE_POPUP_MENU,    "popup_menu" },
+                { atoms.NET_WM_WINDOW_TYPE_DROPDOWN_MENU, "dropdown_menu" },
+                { atoms.NET_WM_WINDOW_TYPE_MENU,          "menu" },
+                { atoms.NET_WM_WINDOW_TYPE_DOCK,          "dock" },
+                { atoms.NET_WM_WINDOW_TYPE_NOTIFICATION,  "notification" },
+            };
+
+            for (const Known& k : known)
+            {
+                if (first == k.atom)
+                {
+                    name = k.name;
+                    break;
+                }
+            }
+
+            // The remaining standard types (desktop, tooltip, combo, dnd)
+            // have no cached atom; asking the server for the name costs a
+            // round trip, so it is only done for those.
+            if (name.empty() && first != None)
+            {
+                if (char* atomName = XGetAtomName(m_display, first))
+                {
+                    std::string lower;
+                    for (const char* c = atomName; *c; ++c)
+                        lower += static_cast<char>(std::tolower(static_cast<unsigned char>(*c)));
+
+                    static const std::string kPrefix = "_net_wm_window_type_";
+
+                    if (lower.rfind(kPrefix, 0) == 0)
+                    {
+                        std::string tail = lower.substr(kPrefix.size());
+
+                        if (tail == "desktop" || tail == "tooltip" || tail == "combo" || tail == "dnd")
+                            name = tail;
+                    }
+
+                    XFree(atomName);
+                }
+            }
+        }
+
+        XFree(data);
+    }
+
+    return name;
 }
 
 long XConnection::GetWindowPid(::Window window, const XAtoms& atoms)

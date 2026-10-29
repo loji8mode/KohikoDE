@@ -108,11 +108,16 @@ bool AudioWindow::Initialize()
     // connect/disconnect toasts (see that file's own comment) - Tick()
     // via SetInterval() rather than a new polling loop, Expose routed
     // via SetEventHandler() since this window's notification popups
-    // share its one X connection.
+    // share its one X connection. The Tick() timer is started only
+    // when a toast is actually posted and cancels itself when none is
+    // left (EnsureNotificationTick()); it used to be registered here
+    // for the life of the window, waking this process ten times a
+    // second whether or not there had ever been a notification - the
+    // same permanent 100 ms notification timer 0.21.x already removed
+    // from the tray utilities.
     Display* display = m_window.GetDisplay();
     int screen = DefaultScreen(display);
     m_notifications.Initialize(display, screen, RootWindow(display, screen), "monospace:pixelsize=14", m_window.Theme());
-    m_window.SetInterval(100, [this] { m_notifications.Tick(); });
     m_window.SetEventHandler([this](XEvent& event)
     {
         if (event.type == Expose)
@@ -485,6 +490,23 @@ int AudioWindow::RebuildAdvancedPage(Widget& content, int contentWidth)
     return y;
 }
 
+void AudioWindow::EnsureNotificationTick()
+{
+    if (m_notificationTimer)
+        return;
+
+    m_notificationTimer = m_window.SetInterval(100, [this]
+    {
+        m_notifications.Tick();
+
+        if (!m_notifications.HasActive() && m_notificationTimer)
+        {
+            m_window.CancelInterval(*m_notificationTimer);
+            m_notificationTimer.reset();
+        }
+    });
+}
+
 void AudioWindow::MaybeNotifyDefaultChanged()
 {
     if (!m_settings.GetBool("notify_default_change", false))
@@ -503,6 +525,7 @@ void AudioWindow::MaybeNotifyDefaultChanged()
         Rect screenRect{0, 0, DisplayWidth(display, screen), DisplayHeight(display, screen)};
 
         m_notifications.Post("Default output changed to " + currentName, screenRect);
+        EnsureNotificationTick();
     }
 
     m_lastDefaultOutputName = currentName;

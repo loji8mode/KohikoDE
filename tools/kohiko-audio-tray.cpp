@@ -3,6 +3,7 @@
 #include "NotificationCenter.h"
 #include "PipeWireClient.h"
 #include "TrayIconClient.h"
+#include "TrayInteraction.h"
 #include "UiIconCache.h"
 #include "UiPopupMenu.h"
 
@@ -275,11 +276,6 @@ int main()
         }
     });
 
-    tray.SetLeftClickHandler([]
-    {
-        AppInstanceLock::LaunchOrRaise("kohiko-audio", "kohiko-audio");
-    });
-
     tray.SetScrollHandler([&](int delta)
     {
         const AudioNode* node = FindDefaultOutput(pipewire);
@@ -287,41 +283,41 @@ int main()
             pipewire.AdjustVolume(node->id, delta * 0.05f);
     });
 
-    tray.SetRightClickHandler([&]
+    // The one mouse contract of Kohiko's native tray utilities (see
+    // TrayInteraction.h): left click = open/raise the Sound window,
+    // right click = this quick menu. PipeWire's own operations here
+    // are asynchronous protocol messages (pw_loop_iterate with no
+    // timeout, driven by the fd above), so nothing in this menu blocks.
+    TrayInteraction::Spec spec;
+    spec.appId = "kohiko-audio";
+    spec.executable = "kohiko-audio";
+    spec.openLabel = "Open Sound Settings";
+    spec.buildMenu = [&pipewire](PopupMenu& menu)
     {
         const AudioNode* node = FindDefaultOutput(pipewire);
 
-        PopupMenu menu;
+        if (!node)
+            return;
 
-        if (node)
+        std::uint32_t id = node->id;
+        bool muted = node->muted;
+        menu.AddItem(muted ? "Unmute" : "Mute", [&pipewire, id, muted] { pipewire.SetMute(id, !muted); });
+        menu.AddSeparator();
+
+        for (auto& other : pipewire.Nodes())
         {
-            std::uint32_t id = node->id;
-            bool muted = node->muted;
-            menu.AddItem(muted ? "Unmute" : "Mute", [&pipewire, id, muted] { pipewire.SetMute(id, !muted); });
-            menu.AddSeparator();
+            if (other.isSource)
+                continue;
 
-            for (auto& other : pipewire.Nodes())
-            {
-                if (other.isSource)
-                    continue;
-
-                std::uint32_t otherId = other.id;
-                std::string label = (other.isDefault ? "\u2713 " : "   ") + other.description;
-                menu.AddItem(label, [&pipewire, otherId] { pipewire.SetDefaultNode(otherId); });
-            }
-
-            menu.AddSeparator();
+            std::uint32_t otherId = other.id;
+            std::string label = (other.isDefault ? "\u2713 " : "   ") + other.description;
+            menu.AddItem(label, [&pipewire, otherId] { pipewire.SetDefaultNode(otherId); });
         }
 
-        menu.AddItem("Open Sound Settings", [] { AppInstanceLock::LaunchOrRaise("kohiko-audio", "kohiko-audio"); });
+        menu.AddSeparator();
+    };
 
-        Window rootReturn, childReturn;
-        int rootX, rootY, winX, winY;
-        unsigned int mask;
-        XQueryPointer(tray.GetDisplay(), tray.GetWindow(), &rootReturn, &childReturn, &rootX, &rootY, &winX, &winY, &mask);
-
-        menu.Show(tray.GetDisplay(), tray.GetScreen(), tray.GetVisual(), tray.GetColormap(), tray.GetFont(), tray.Theme(), rootX, rootY);
-    });
+    TrayInteraction::Install(tray, spec);
 
     tray.Run();
     return 0;
