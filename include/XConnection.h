@@ -35,6 +35,11 @@ public:
 
     ::Window Root() const;
 
+    // Restacks `window` to sit directly BELOW `sibling` (both children
+    // of the root). Touches only `window`'s own position: nothing
+    // else is raised, lowered or reordered.
+    void StackBelow(::Window window, ::Window sibling);
+
     // The pointer's current position in absolute (root) coordinates -
     // a plain XQueryPointer() wrapper. Exists for the handful of
     // moments nothing has generated a MotionNotify/EnterNotify to

@@ -226,6 +226,14 @@ int Bar::Height() const
     return m_height;
 }
 
+int Bar::WorkspaceAt(int x, int y) const
+{
+    if (y < 0 || y >= m_height)
+        return 0;
+
+    return WorkspaceAtX(x, m_workspaceCount);
+}
+
 const Rect& Bar::PowerButtonRect() const
 {
     return m_powerButtonRect;
@@ -344,16 +352,18 @@ void Bar::Redraw(bool forceFullRepaint)
         static_cast<unsigned int>(m_height));
 
     int baseline = m_height / 2 + 5;
-    int x = 10;
 
     for (int i = 1; i <= m_workspaceCount; ++i)
     {
         std::string label = std::to_string(i);
         unsigned long color = (i == m_currentWorkspace) ? m_activePixel : m_foregroundPixel;
 
-        DrawText(x, baseline, label, color);
-        x += 22;
+        DrawText(WorkspaceGlyphX(i), baseline, label, color);
     }
+
+    // First free x after the indicators (what `x` used to carry on
+    // through the loop).
+    int x = WorkspaceGlyphX(m_workspaceCount + 1);
 
     if (m_scratchpadActive)
     {

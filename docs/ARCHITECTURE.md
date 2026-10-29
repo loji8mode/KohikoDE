@@ -117,6 +117,40 @@ to the user-facing behavior the rest of the README documents (window
 rules, multi-monitor, session restore, ...), and duplicating it here
 would just create two copies to keep in sync.
 
+**Key routing while the launcher/notepad is open (0.21.6).**
+`EventDispatcher` offers every `KeyPress` to the keybinding table first
+(`KeyboardManager::HandleKeyPress()` returns whether a bound combination
+matched) and only an unmatched key goes on to
+`WindowManager::HandleModalKeyPress()` as text - except while the screen
+is locked, where the modal (the lock screen) gets every key. A bound
+combination is therefore always a shortcut and everything else, digits
+included, is text; there are no per-key exceptions. A workspace or
+monitor switch carries an open launcher/notepad along
+(`FollowModalsToWorkspaceContext()`) and retargets the focus it restores
+on close, and `RestoreFocusAfterModal()` refuses a window that is no
+longer on screen. `Launcher::HandleKeyPress()` turns `Enter` into an
+immutable `LaunchRequest` (the resolved command line or file) that
+`CloseLauncher()` launches from alone, and that carries no workspace: a
+new window lands wherever `FocusedWorkspaceId()` says when it actually
+appears.
+
+**Bar workspace clicks.** `Bar` draws and hit-tests the workspace numbers
+from one geometry definition (`WorkspaceGlyphX()`/`SlotLeft()`/
+`WorkspaceAtX()`: contiguous, non-overlapping boxes), and a left click
+ends in `SwitchWorkspaceOnMonitor()`, the same function the `workspace N`
+command ends in. `tests/test_barworkspaceclick.cpp` covers the geometry.
+
+**Floating-window stacking.** Floating windows sit above tiled ones, and
+`ArrangeMonitor()` re-raises them on every layout pass in ascending
+`ManagedWindow::StackSerial()`, stamped by `StampStacking()` whenever a
+window appears, becomes floating, or is raised by the user - not in hash-
+map order, which used to discard the user's raises. `BeginSwapDrag()`
+raises the dragged tiled window above everything; when the drag ends
+without a swap, `RestackBelowFloatingWindows()` puts it back directly
+below the lowest visible float (one `XQueryTree` per drag release, and no
+float is raised). `tests/test_floating_stacking_live.sh` drives this on a
+real window manager under Xvfb.
+
 `kohiko-settings` (`SettingsWindow`) is a separate ordinary
 application - not part of the `kohiko` process - with its own
 hand-rolled widget code, predating the shared UI toolkit described
@@ -334,6 +368,27 @@ holding keyboard focus. This is what stops an async backend event
 (PipeWire volume ticking, a new Wi-Fi network appearing) from yanking
 the widget tree out from under an in-progress slider drag or a
 half-typed search query.
+
+**Backend actions are asynchronous (0.21.6)**: `NetworkManagerClient`
+and `BluezClient` never block the window's single-threaded loop in a
+D-Bus call for an *action*. `DBusClient::CallAsync()`/
+`SetPropertyAsync()` send the message and return; the reply is
+delivered from `DBusClient::Dispatch()` (the window already watches the
+client's fd), so there is no thread, no lock and no timer.
+`CancelAsync()` stops *waiting* only - the request has already been sent
+and may still complete - which is why `BluezClient::CancelPending()` asks
+bluetoothd for a real `CancelPairing` when the operation is a Pair and
+otherwise records that the operation was not actually cancelled. Both
+clients track busy state per object path (a second action on a busy
+object is refused, not queued), keep failures in `LastError()` for the
+window to show, and fire their change handler after every completion.
+`BluezClient::PairAndConnectDevice()` chains Connect after Pair has
+finished (skipped if pairing failed). Reads (`Refresh()`, property
+fetches), `RefreshSavedConnections()` and the Wi-Fi password dialog are
+still synchronous by design. `PipeWireClient` is not affected: its
+actions only enqueue messages. `tests/test_native_responsive_live.sh`
+drives the real `BluetoothWindow` against a deliberately slow mock
+bluetoothd (`tests/mock_bluez.py`).
 
 **Responsive layout**: no generic layout system - every page computes
 pixel `Rect`s directly (see
@@ -627,7 +682,25 @@ binaries - the three full apps and their three tray widgets) is a
 single-instance-plus-raise mechanism, unrelated to `IPCServer`/
 `kohikoctl`: it lets a tray widget's "open the full app" action raise
 an already-running instance instead of launching a second one. See its
-own header comment for the listening-socket/fork mechanics.
+own header comment for the listening-socket/fork mechanics. Two things
+were added in 0.21.6 on top of that: which process *is* the instance is
+now decided by a non-blocking exclusive `flock()` on a `<socket>.lock`
+file (the old probe/unlink/bind sequence let two simultaneous starters
+both win; the kernel releases the lock on any exit, so it can never go
+stale), and `LaunchOrRaise()` remembers a launch that is still in flight
+so a second click while the app is starting does not fork it again.
+
+`NativeTrayContract.h`'s `InstallNativeTrayContract()` is the one place
+that wires a Kohiko tray icon's clicks: left click = `LaunchOrRaise()` of
+the matching main window, right click = the tool's quick-actions menu,
+followed by a redraw request so the icon is never left stale where the
+menu was. All three `kohiko-*-tray` tools use it (enforced by
+`tests/test_native_tray_tools_use_contract.sh`); before 0.21.6 each wired
+its own handlers and network/Bluetooth had the two clicks swapped
+relative to audio. `PopupMenu` now runs the chosen action only after its
+popup has been torn down, so the action never executes while the
+popup's pointer and keyboard grabs are still held. Third-party tray
+icons are never touched by this.
 
 ## Rendering pipeline
 

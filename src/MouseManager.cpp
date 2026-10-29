@@ -216,6 +216,26 @@ bool WindowManager::HandleBarOrPowerMenuButtonPress(
         if (bar->WindowId() != event.window)
             continue;
 
+        // A left click on a workspace number switches to that
+        // workspace - through SwitchWorkspaceOnMonitor(), the very
+        // function the keyboard's `workspace N` command ends up in,
+        // so a click and a shortcut cannot behave differently (an
+        // open Launcher follows either one). The bar belongs to
+        // `monitor`, so it is that monitor's workspace that changes.
+        if (event.button == Button1)
+        {
+            int clicked = bar->WorkspaceAt(event.x, event.y);
+
+            if (clicked > 0)
+            {
+                if (m_powerMenu.IsOpen())
+                    ClosePowerMenu();
+
+                SwitchWorkspaceOnMonitor(*monitor, clicked);
+                return true;
+            }
+        }
+
         if (bar->PowerButtonRect().Contains(Point{event.x, event.y}))
         {
             if (m_powerMenu.IsOpen())

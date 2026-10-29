@@ -131,7 +131,7 @@ fi
 echo "-- running the C++ harness against the mock --"
 DBUS_SYSTEM_BUS_ADDRESS="$DBUS_ADDR" "$HARNESS"
 HARNESS_EXIT=$?
-check "$HARNESS_EXIT" "0" "the C++ harness's own in-process checks (HasUsableSavedSecret) all passed"
+check "$HARNESS_EXIT" "0" "the C++ harness's own in-process checks (QueryUsableSavedSecret, async connects) all passed"
 
 echo
 echo "-- inspecting the mock's call log for what ConnectToAccessPoint() actually did --"

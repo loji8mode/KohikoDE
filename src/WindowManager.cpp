@@ -1,5 +1,6 @@
 #include "WindowManager.h"
 #include "StartupPlan.h"
+#include <unordered_set>
 
 #include "Command.h"
 #include "Config.h"
@@ -1066,6 +1067,11 @@ bool WindowManager::HandleModalKeyPress(const XKeyEvent& event)
     return false;
 }
 
+bool WindowManager::IsScreenLocked() const
+{
+    return m_lockScreen.IsLocked();
+}
+
 bool WindowManager::IsManaged(WindowID id) const
 {
     return m_repository.Contains(id);
@@ -1362,7 +1368,53 @@ void WindowManager::EndSwapDrag(ManagedWindow* window, const Point& cursor)
         // No valid drop target - snap back to exactly where it was.
         // The tree assignment was never touched during the drag, so
         // window->Geometry() still holds the original tiled rect.
+        //
+        // Stacking: BeginSwapDrag() raised this window above
+        // EVERYTHING so it would stay visible under the cursor -
+        // including above floating windows. Unlike the swap branch
+        // above, nothing here ends in Arrange(), which is what
+        // normally re-raises floating windows. So without the next
+        // line the tiled window stayed stacked over every floating
+        // window it had been dragged across, hiding them (their
+        // geometry unchanged - purely a stacking problem) until
+        // something else happened to raise them again.
+        RestackBelowFloatingWindows(window);
+
         m_animator.Start(window, fromRect, window->Geometry(), kSwapAnimationMs);
+    }
+}
+
+void WindowManager::StampStacking(ManagedWindow* window)
+{
+    if (window)
+        window->SetStackSerial(++m_stackCounter);
+}
+
+void WindowManager::RestackBelowFloatingWindows(ManagedWindow* tiled)
+{
+    if (!tiled)
+        return;
+
+    std::unordered_set<::Window> floating;
+
+    for (ManagedWindow* candidate : m_repository.Visible(tiled->Workspace()))
+    {
+        if (candidate != tiled && candidate->IsFloating())
+            floating.insert(candidate->Id());
+    }
+
+    if (floating.empty())
+        return; // nothing the tiled window could be covering
+
+    // XQueryTree lists children bottom-to-top: the first floating
+    // window found is the lowest one.
+    for (::Window child : m_connection.QueryChildren(m_connection.Root()))
+    {
+        if (floating.count(child))
+        {
+            m_connection.StackBelow(tiled->Id(), child);
+            return;
+        }
     }
 }
 
@@ -1379,6 +1431,7 @@ void WindowManager::BeginFloatingDrag(ManagedWindow* window, const Point& cursor
     m_dragCurrentRect = geometry;
 
     m_connection.Raise(window->Id());
+    StampStacking(window); // remember this raise: Arrange() re-raises floats in stamp order
     RaiseModalWindows();
     m_cursor.SetDragging(true);
 }
@@ -1479,6 +1532,7 @@ void WindowManager::BeginFloatingResize(ManagedWindow* window, const Point& curs
     m_resizeFromTop  = cursor.y < center.y;
 
     m_connection.Raise(window->Id());
+    StampStacking(window);
     RaiseModalWindows();
 }
 
@@ -1553,6 +1607,9 @@ std::string WindowManager::HandleIpcCommand(const std::string& request)
 
     if (verb == "activewindow")
         return DumpActiveWindowJson();
+
+    if (verb == "launcher")
+        return DumpLauncherJson();
 
     if (verb == "tree")
     {
@@ -1734,6 +1791,7 @@ void WindowManager::Manage(WindowID id, bool skipXEmbedCheck)
     // whichever monitor/workspace the user was actually looking at
     // when they opened it.
     window->SetWorkspace(FocusedWorkspaceId());
+    StampStacking(window); // a window that just appeared is the newest: topmost among floats
     window->SetMonitor(FocusedMonitor().Id());
     window->SetBorderWidth(m_config.GetInt("general.border_size", 2));
 
@@ -2443,6 +2501,14 @@ void WindowManager::ArrangeMonitor(Monitor& monitor)
 
     ManagedWindow* fullscreenWindow = nullptr;
 
+    // Floating windows always end up above tiled ones, so they are
+    // re-raised on every pass - but in the order the USER last put
+    // them in (ascending StackSerial), not in the arbitrary order
+    // Visible() iterates. Raising them in hash order used to throw
+    // away every manual raise: drag float C on top of float A and
+    // the Arrange() at the end of the drag put A back above it.
+    std::vector<ManagedWindow*> floatingToRaise;
+
     for (ManagedWindow* window : m_repository.Visible(workspace->Id()))
     {
         // Bookkeeping (IPC/`kohikoctl clients` reporting, and Focus()'s
@@ -2465,7 +2531,7 @@ void WindowManager::ArrangeMonitor(Monitor& monitor)
             m_connection.MoveResizeWindow(window->Id(), window->Geometry());
             m_connection.SetBorderWidth(window->Id(), window->BorderWidth());
             m_connection.MapWindow(window->Id());
-            m_connection.Raise(window->Id());
+            floatingToRaise.push_back(window);
             continue;
         }
 
@@ -2473,6 +2539,19 @@ void WindowManager::ArrangeMonitor(Monitor& monitor)
         m_connection.SetBorderWidth(window->Id(), window->BorderWidth());
         m_connection.MapWindow(window->Id());
     }
+
+    std::stable_sort(
+        floatingToRaise.begin(), floatingToRaise.end(),
+        [](const ManagedWindow* a, const ManagedWindow* b)
+        {
+            if (a->StackSerial() != b->StackSerial())
+                return a->StackSerial() < b->StackSerial();
+
+            return a->Id() < b->Id(); // never-stamped ties: deterministic
+        });
+
+    for (ManagedWindow* window : floatingToRaise)
+        m_connection.Raise(window->Id());
 
     if (fullscreenWindow)
     {
@@ -2600,6 +2679,10 @@ void WindowManager::SwitchWorkspaceOnMonitor(Monitor& monitor, int id)
     // reconcile the two on its own. See SyncFocusToPointer()'s own
     // comment.
     SyncFocusToPointer();
+
+    // The user's workspace context just changed: an open Launcher or
+    // Notepad follows them (and must not keep describing the old one).
+    FollowModalsToWorkspaceContext();
 }
 
 void WindowManager::ShowNotificationOnMonitor(Monitor& monitor, const std::string& text)
@@ -2708,6 +2791,10 @@ void WindowManager::FocusMonitorCommand(const std::string& arg)
         return;
 
     FocusMonitor(*target);
+
+    // An open Launcher/Notepad goes with the user to the monitor they
+    // just moved to (see FollowModalsToWorkspaceContext()).
+    FollowModalsToWorkspaceContext();
 
     // Without this, under focus_follows_mouse, the pointer is still
     // sitting exactly where it always was - almost certainly still
@@ -3003,6 +3090,10 @@ void WindowManager::ToggleFloating()
     if (!window || window->IsFullscreen())
         return;
 
+    // Whatever it becomes, it is the window the user just acted on: if it
+    // ends up floating it should appear on top of the other floats.
+    StampStacking(window);
+
     if (window->IsScratchpad())
     {
         // Release it from the scratchpad slot into an ordinary
@@ -3134,6 +3225,7 @@ void WindowManager::ToggleScratchpadForFocused()
         m_connection.SetBorderWidth(window->Id(), window->BorderWidth());
         m_connection.MapWindow(window->Id());
         m_connection.Raise(window->Id());
+        StampStacking(window); // the scratchpad appears on top of the other floats
         RaiseModalWindows();
 
         Focus(window->Id());
@@ -3526,41 +3618,83 @@ void WindowManager::CloseLauncher(bool run)
     if (!m_launcher.IsOpen())
         return;
 
-    bool isFile =
-        m_launcher.SelectedIsFile();
-
-    std::string command =
-        m_launcher.SelectedCommand();
-
-    std::string path =
-        m_launcher.SelectedPath();
+    // Take the immutable snapshot of what Enter submitted BEFORE
+    // closing, and launch from it alone. Nothing here reads the
+    // Launcher's live selection, so by construction nothing the user
+    // does afterwards (or that races this call) can change which
+    // application launches. There is deliberately no workspace in the
+    // request: the window's workspace is decided when it appears.
+    LaunchRequest request = m_launcher.TakeSubmitted();
 
     m_launcher.Close();
 
     if (run)
-    {
-        if (isFile)
-{
-    namespace fs = std::filesystem;
-
-    std::string folder =
-        fs::path(path)
-            .parent_path()
-            .string();
-
-    Process::Spawn(
-        m_fileManager + " \"" + folder + "\"",
-        m_connection.DisplayName());
-}
-        else if (!command.empty())
-        {
-            Process::Spawn(
-                command,
-                m_connection.DisplayName());
-        }
-    }
+        SubmitLaunch(request);
 
     RestoreFocusAfterModal();
+}
+
+void WindowManager::SubmitLaunch(const LaunchRequest& request)
+{
+    switch (request.kind)
+    {
+        case LaunchRequest::Kind::RevealFile:
+        {
+            namespace fs = std::filesystem;
+
+            std::string folder = fs::path(request.path).parent_path().string();
+
+            Process::Spawn(
+                m_fileManager + " \"" + folder + "\"",
+                m_connection.DisplayName());
+            break;
+        }
+
+        case LaunchRequest::Kind::Command:
+            Process::Spawn(request.command, m_connection.DisplayName());
+            break;
+
+        case LaunchRequest::Kind::Nothing:
+            break;
+    }
+}
+
+void WindowManager::FollowModalsToWorkspaceContext()
+{
+    const bool launcherOpen = m_launcher.IsOpen();
+    const bool notepadOpen = m_notepad.IsOpen();
+
+    if (!launcherOpen && !notepadOpen)
+        return;
+
+    // The window to give focus back to when the modal closes was
+    // captured when it OPENED, i.e. it belongs to the workspace the
+    // user has just left. Restoring it later would re-focus a window
+    // that may no longer even be on screen (observed live: Enter in the
+    // Launcher after switching workspaces made a hidden window on the
+    // OLD workspace "focused"; on a second monitor it also dragged
+    // monitor focus back to wherever that workspace is displayed).
+    // Retarget to whatever the user actually landed on.
+    ManagedWindow* landedOn = m_repository.Focused();
+    m_focusBeforeModal = landedOn ? landedOn->Id() : 0;
+
+    // Follow the user to the monitor they switched on. Only geometry
+    // changes - query, selection and scroll state belong to the
+    // modal and are untouched by Reposition().
+    const Rect geometry = FocusedMonitor().Geometry();
+
+    if (launcherOpen)
+        m_launcher.Reposition(geometry);
+    else
+        m_notepad.Reposition(geometry);
+
+    RaiseModalWindows();
+
+    // A workspace switch focuses a window on the new workspace;
+    // take keyboard focus straight back so the modal stays usable
+    // (HandleFocusIn() is the safety net for clients that grab it
+    // later by themselves).
+    m_connection.SetInputFocus(launcherOpen ? m_launcher.WindowId() : m_notepad.WindowId());
 }
 
 void WindowManager::ToggleNotepad()
@@ -3596,7 +3730,27 @@ void WindowManager::CloseNotepad()
 
 void WindowManager::RestoreFocusAfterModal()
 {
-    if (m_focusBeforeModal != 0 && m_repository.Contains(m_focusBeforeModal))
+    // Only hand focus back to the remembered window if it is STILL
+    // on screen. If the user changed workspace while the modal was
+    // open and nothing retargeted it (FollowModalsToWorkspaceContext()
+    // normally does), that window lives on a workspace that is no
+    // longer shown, and "focusing" it leaves the WM believing a hidden
+    // window has focus - wrong bar title, Super+Q aimed at something
+    // invisible, and on multi-monitor setups focus yanked to the
+    // monitor still showing the old workspace. Fall back to the
+    // focused monitor's own workspace instead.
+    ManagedWindow* remembered = m_focusBeforeModal != 0 ? m_repository.Get(m_focusBeforeModal) : nullptr;
+
+    bool stillOnScreen = false;
+
+    if (remembered)
+    {
+        stillOnScreen = remembered->IsScratchpad()
+            ? m_scratchpad.IsVisible() && m_scratchpad.Window() == remembered->Id()
+            : IsWorkspaceVisible(remembered->Workspace());
+    }
+
+    if (stillOnScreen)
         Focus(m_focusBeforeModal);
     else
         FocusNextAvailable();
@@ -4518,6 +4672,24 @@ std::string WindowManager::DumpActiveWindowJson() const
         << "\"title\":" << Json::String(window->Title()) << ","
         << "\"class\":" << Json::String(window->ClassName()) << ","
         << "\"workspace\":" << window->Workspace() << ","
+        << "\"x\":" << r.x << ",\"y\":" << r.y
+        << ",\"width\":" << r.width << ",\"height\":" << r.height
+        << "}";
+
+    return out.str();
+}
+
+std::string WindowManager::DumpLauncherJson() const
+{
+    const Rect& r = m_launcher.Geometry();
+    Monitor* monitor = m_monitors.Containing(Point(r.x + r.width / 2, r.y + r.height / 2));
+
+    std::ostringstream out;
+    out << "{"
+        << "\"open\":" << (m_launcher.IsOpen() ? "true" : "false") << ","
+        << "\"query\":" << Json::String(m_launcher.Query()) << ","
+        << "\"selected\":" << m_launcher.SelectedIndex() << ","
+        << "\"monitor\":" << (monitor ? monitor->Id() : 0) << ","
         << "\"x\":" << r.x << ",\"y\":" << r.y
         << ",\"width\":" << r.width << ",\"height\":" << r.height
         << "}";

@@ -95,6 +95,10 @@ void PopupMenu::Show(
     int hoveredIndex = -1;
     bool dismissed = false;
 
+    // The item the user picked, if any. It is NOT run from inside the
+    // loop below: see the end of this function.
+    std::function<void()> chosen;
+
     auto redraw = [&]()
     {
         XSetForeground(display, gc, theme.surface);
@@ -189,8 +193,15 @@ void PopupMenu::Show(
                     break;
                 }
 
+                // Remember the choice; run it only after the menu is gone.
+                // Running it here would execute the action while this loop
+                // still holds an X pointer AND keyboard grab on the whole
+                // screen - so an action that takes a while (it used to be a
+                // blocking D-Bus call) froze every window's input system-wide
+                // for its duration, and one that raised an error left the
+                // grab held.
                 if (!m_items[idx].separator && m_items[idx].enabled && m_items[idx].onClick)
-                    m_items[idx].onClick();
+                    chosen = m_items[idx].onClick;
 
                 dismissed = true;
                 break;
@@ -215,6 +226,11 @@ void PopupMenu::Show(
     XFreeGC(display, gc);
     XDestroyWindow(display, popup);
     XFlush(display);
+
+    // Only now - grabs released, popup unmapped and destroyed, the
+    // screen already repainting what was underneath - perform the action.
+    if (chosen)
+        chosen();
 }
 
 }

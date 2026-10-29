@@ -33,7 +33,13 @@ public:
         const Config& config
     );
 
-    void HandleKeyPress(
+    // Runs the command bound to `event`'s key combination, if any.
+    // Returns true if a configured binding matched (and was run),
+    // false if this key press is not a shortcut at all - which is
+    // what lets a modal (the Launcher, the Notepad) decide whether a
+    // key is for it: a combination the user bound is a global
+    // shortcut wherever focus is; anything else is ordinary input.
+    bool HandleKeyPress(
         const XKeyEvent& event
     );
 

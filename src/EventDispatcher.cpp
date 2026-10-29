@@ -84,15 +84,38 @@ void EventDispatcher::Dispatch(
 
         case KeyPress:
 
-            // The Launcher/Notepad get first refusal on every key
-            // while either is open (see WindowManager::Manage()'s
-            // Super+Q hardening notes for why this is a plain
-            // conditional here and never an XGrabKeyboard) - only
-            // fall through to ordinary hotkey matching once neither
-            // is open.
-            if (!m_windowManager.HandleModalKeyPress(event.xkey))
-                m_keyboard.HandleKeyPress(event.xkey);
+            // Key routing, in order of authority:
+            //
+            //  1. A locked screen owns the keyboard outright - not
+            //     even a configured shortcut may run behind it.
+            //  2. A key combination the user BOUND is a global
+            //     shortcut, wherever input focus is - including while
+            //     the Launcher/Notepad is open. These arrive here
+            //     because Kohiko XGrabKey()s every configured
+            //     combination on the root window, so the X server
+            //     delivers them to us instead of to the focused
+            //     window; they are never "typed into" anything.
+            //     (Before this, the modal took first refusal on every
+            //     key, so Super+3 in the Launcher inserted a "3"
+            //     instead of switching workspace.) Asking the
+            //     existing keybinding table - rather than listing
+            //     special keys in the modal - is what keeps this
+            //     exact: a plain "3" is not a binding, so it still
+            //     reaches the Launcher as text.
+            //  3. Everything else is input for whichever modal holds
+            //     focus (a plain conditional here, never an
+            //     XGrabKeyboard - see WindowManager::Manage()'s
+            //     Super+Q hardening notes).
+            if (m_windowManager.IsScreenLocked())
+            {
+                m_windowManager.HandleModalKeyPress(event.xkey);
+                break;
+            }
 
+            if (m_keyboard.HandleKeyPress(event.xkey))
+                break;
+
+            m_windowManager.HandleModalKeyPress(event.xkey);
             break;
 
         case ButtonPress:

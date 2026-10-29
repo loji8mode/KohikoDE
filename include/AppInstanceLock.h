@@ -71,6 +71,7 @@ public:
 private:
 
     int m_listenFd = -1;
+    int m_lockFd = -1; // flock()ed for this process's whole life; see AcquireOrListen()
     std::string m_socketPath;
     RaiseHandler m_handler;
 };

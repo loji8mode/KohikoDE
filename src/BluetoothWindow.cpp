@@ -263,7 +263,28 @@ std::unique_ptr<Widget> BluetoothWindow::BuildDetailsPanel(const BluetoothDevice
 
     y += 40 + 18;
 
-    card->AddChild(MakeDetailRow({ x, y, w, 22 }, "Connection", device.connected ? "Connected" : "Not Connected", device.connected ? theme.accent : 0));
+    // What the Connection row says: an operation in flight ("Pairing\u2026")
+    // or the last failure (never swallowed) take precedence over the
+    // steady state. Same row, same geometry - the details panel's
+    // height is computed up front and must not change.
+    const bool busy = m_bluez.IsBusy(device.objectPath);
+    const std::string lastError = m_bluez.LastError(device.objectPath);
+
+    std::string connectionText = device.connected ? "Connected" : "Not Connected";
+    unsigned long connectionColor = device.connected ? theme.accent : 0;
+
+    if (busy)
+    {
+        connectionText = m_bluez.BusyLabel(device.objectPath);
+        connectionColor = theme.accent;
+    }
+    else if (!lastError.empty())
+    {
+        constexpr std::size_t kMaxErrorChars = 46;
+        connectionText = lastError.size() > kMaxErrorChars ? lastError.substr(0, kMaxErrorChars - 3) + "..." : lastError;
+    }
+
+    card->AddChild(MakeDetailRow({ x, y, w, 22 }, "Connection", connectionText, connectionColor));
     y += 30;
 
     card->AddChild(MakeDetailRow({ x, y, w, 22 }, "Battery", device.batteryPercent >= 0 ? std::to_string(device.batteryPercent) + "%" : "\u2014"));
@@ -280,13 +301,21 @@ std::unique_ptr<Widget> BluetoothWindow::BuildDetailsPanel(const BluetoothDevice
     if (!device.paired)
     {
         auto pairBtn = std::make_unique<Button>();
-        pairBtn->label = "Pair";
+        pairBtn->label = busy ? "Cancel" : "Pair";
         pairBtn->primary = true;
         pairBtn->bounds = { x, y, w, buttonHeight };
-        pairBtn->onClick = [this, devicePath]
+        pairBtn->onClick = [this, devicePath, busy]
         {
-            m_bluez.PairDevice(devicePath);
-            m_bluez.ConnectDevice(devicePath);
+            // The window stays responsive while bluetoothd works (the call
+            // is asynchronous); while it runs this button is the way to
+            // stop waiting - and, for a Pair, to ask bluetoothd to cancel.
+            if (busy)
+                m_bluez.CancelPending(devicePath);
+            else
+                m_bluez.PairAndConnectDevice(devicePath);
+
+            RebuildPage();
+            m_window.RequestRedraw();
         };
         card->AddChild(std::move(pairBtn));
         y += buttonHeight;
@@ -296,13 +325,15 @@ std::unique_ptr<Widget> BluetoothWindow::BuildDetailsPanel(const BluetoothDevice
         auto disconnectBtn = std::make_unique<Button>();
         disconnectBtn->label = "Disconnect";
         disconnectBtn->tone = Button::Tone::Danger;
+        disconnectBtn->enabled = !busy;
         disconnectBtn->bounds = { x, y, w, buttonHeight };
-        disconnectBtn->onClick = [this, devicePath] { m_bluez.DisconnectDevice(devicePath); };
+        disconnectBtn->onClick = [this, devicePath] { m_bluez.DisconnectDevice(devicePath); RebuildPage(); m_window.RequestRedraw(); };
         card->AddChild(std::move(disconnectBtn));
         y += buttonHeight + buttonGap;
 
         auto forgetBtn = std::make_unique<Button>();
         forgetBtn->label = "Forget Device";
+        forgetBtn->enabled = !busy;
         forgetBtn->bounds = { x, y, w, buttonHeight };
         forgetBtn->onClick = [this, devicePath, adapterPathCopy]
         {
@@ -314,11 +345,12 @@ std::unique_ptr<Widget> BluetoothWindow::BuildDetailsPanel(const BluetoothDevice
 
         auto bothBtn = std::make_unique<Button>();
         bothBtn->label = "Disconnect and Forget";
+        bothBtn->enabled = !busy;
         bothBtn->bounds = { x, y, w, buttonHeight };
         bothBtn->onClick = [this, devicePath, adapterPathCopy]
         {
-            m_bluez.DisconnectDevice(devicePath);
-            m_bluez.RemoveDevice(adapterPathCopy, devicePath);
+            // Disconnect first, then remove once that has finished.
+            m_bluez.DisconnectAndRemoveDevice(adapterPathCopy, devicePath);
             m_selectedDevicePath.clear();
         };
         card->AddChild(std::move(bothBtn));
@@ -327,15 +359,25 @@ std::unique_ptr<Widget> BluetoothWindow::BuildDetailsPanel(const BluetoothDevice
     else
     {
         auto connectBtn = std::make_unique<Button>();
-        connectBtn->label = "Connect";
+        connectBtn->label = busy ? "Cancel" : "Connect";
         connectBtn->tone = Button::Tone::Accent;
         connectBtn->bounds = { x, y, w, buttonHeight };
-        connectBtn->onClick = [this, devicePath] { m_bluez.ConnectDevice(devicePath); };
+        connectBtn->onClick = [this, devicePath, busy]
+        {
+            if (busy)
+                m_bluez.CancelPending(devicePath);
+            else
+                m_bluez.ConnectDevice(devicePath);
+
+            RebuildPage();
+            m_window.RequestRedraw();
+        };
         card->AddChild(std::move(connectBtn));
         y += buttonHeight + buttonGap;
 
         auto forgetBtn = std::make_unique<Button>();
         forgetBtn->label = "Forget Device";
+        forgetBtn->enabled = !busy;
         forgetBtn->bounds = { x, y, w, buttonHeight };
         forgetBtn->onClick = [this, devicePath, adapterPathCopy]
         {

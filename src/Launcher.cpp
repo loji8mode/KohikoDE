@@ -461,6 +461,7 @@ void Launcher::Open()
         return;
 
     m_query.clear();
+    m_submitted = LaunchRequest{};
     m_selectedIndex = 0;
     m_scrollOffset = 0;
 
@@ -516,6 +517,38 @@ std::string Launcher::SelectedCommand()
         m_history.RecordLaunch(match.desktopId);
 
     return match.command;
+}
+
+LaunchRequest Launcher::SnapshotSelection()
+{
+    LaunchRequest request;
+
+    if (SelectedIsFile())
+    {
+        request.kind = LaunchRequest::Kind::RevealFile;
+        request.path = SelectedPath();
+        return request;
+    }
+
+    // SelectedCommand() is also where a launched application is
+    // recorded in the history - which belongs to the moment of
+    // submission, so it happens here, exactly once.
+    std::string command = SelectedCommand();
+
+    if (!command.empty())
+    {
+        request.kind = LaunchRequest::Kind::Command;
+        request.command = std::move(command);
+    }
+
+    return request;
+}
+
+LaunchRequest Launcher::TakeSubmitted()
+{
+    LaunchRequest request = std::move(m_submitted);
+    m_submitted = LaunchRequest{};
+    return request;
 }
 
 bool Launcher::SelectedIsFile() const
@@ -611,6 +644,10 @@ LauncherResult Launcher::HandleKeyPress(
 
         case XK_Return:
         case XK_KP_Enter:
+            // Freeze what is being submitted RIGHT NOW. Nothing the
+            // user does after this point - paging, typing, moving the
+            // selection - can change the launch (see LaunchRequest).
+            m_submitted = SnapshotSelection();
             return LauncherResult::Confirmed;
 
         case XK_BackSpace:

@@ -362,6 +362,16 @@ DBusClient::DBusClient() = default;
 
 DBusClient::~DBusClient()
 {
+    // Stop waiting on anything still in flight; callbacks are NOT run
+    // during teardown (their owners may already be gone).
+    for (auto& [id, entry] : m_asyncCalls)
+    {
+        dbus_pending_call_cancel(entry.pending);
+        dbus_pending_call_unref(entry.pending);
+    }
+
+    m_asyncCalls.clear();
+
     if (m_connection)
     {
         dbus_connection_close(m_connection);
@@ -489,6 +499,190 @@ bool DBusClient::Call(
     }
 
     dbus_message_unref(reply);
+    return true;
+}
+
+namespace
+{
+
+struct AsyncContext
+{
+    DBusClient* client;
+    DBusClient::CallId id;
+};
+
+void AsyncTrampoline(DBusPendingCall* pending, void* data)
+{
+    auto* context = static_cast<AsyncContext*>(data);
+    context->client->HandleAsyncReply(context->id, pending);
+}
+
+void FreeAsyncContext(void* data)
+{
+    delete static_cast<AsyncContext*>(data);
+}
+
+}
+
+DBusClient::CallId DBusClient::CallAsync(
+    const std::string& destination,
+    const std::string& objectPath,
+    const std::string& interface,
+    const std::string& method,
+    const std::vector<DBusValue>& args,
+    AsyncCallback done,
+    int timeoutMs)
+{
+    auto failNow = [&](const std::string& why)
+    {
+        if (done)
+        {
+            AsyncResult result;
+            result.error = why;
+            done(result);
+        }
+
+        return CallId{0};
+    };
+
+    if (!m_available)
+        return failNow("no D-Bus connection");
+
+    DBusMessage* msg = dbus_message_new_method_call(
+        destination.c_str(),
+        objectPath.c_str(),
+        interface.empty() ? nullptr : interface.c_str(),
+        method.c_str()
+    );
+
+    if (!msg)
+        return failNow("failed to allocate message");
+
+    DBusMessageIter iter;
+    dbus_message_iter_init_append(msg, &iter);
+    for (const auto& arg : args)
+        AppendValue(&iter, arg);
+
+    DBusPendingCall* pending = nullptr;
+    dbus_bool_t sent = dbus_connection_send_with_reply(m_connection, msg, &pending, timeoutMs);
+    dbus_message_unref(msg);
+
+    if (!sent || !pending)
+        return failNow("could not send D-Bus message");
+
+    CallId id = m_nextCallId++;
+    m_asyncCalls[id] = PendingAsync{pending, std::move(done)};
+
+    auto* context = new AsyncContext{this, id};
+
+    if (!dbus_pending_call_set_notify(pending, AsyncTrampoline, context, FreeAsyncContext))
+    {
+        delete context;
+        PendingAsync entry = std::move(m_asyncCalls[id]);
+        m_asyncCalls.erase(id);
+        dbus_pending_call_cancel(entry.pending);
+        dbus_pending_call_unref(entry.pending);
+
+        if (entry.done)
+        {
+            AsyncResult result;
+            result.error = "could not register for the D-Bus reply";
+            entry.done(result);
+        }
+
+        return 0;
+    }
+
+    return id;
+}
+
+void DBusClient::HandleAsyncReply(CallId id, DBusPendingCall* pending)
+{
+    auto it = m_asyncCalls.find(id);
+
+    if (it == m_asyncCalls.end())
+        return; // cancelled while the reply was in flight
+
+    PendingAsync entry = std::move(it->second);
+    m_asyncCalls.erase(it);
+
+    AsyncResult result;
+    DBusMessage* reply = dbus_pending_call_steal_reply(pending);
+
+    if (!reply)
+    {
+        result.error = "no reply";
+    }
+    else
+    {
+        DBusError error;
+        dbus_error_init(&error);
+
+        if (dbus_set_error_from_message(&error, reply))
+        {
+            result.error = error.message ? error.message : "unknown D-Bus error";
+            dbus_error_free(&error);
+        }
+        else
+        {
+            result.ok = true;
+
+            DBusMessageIter replyIter;
+            if (dbus_message_iter_init(reply, &replyIter))
+            {
+                do
+                {
+                    result.reply.push_back(ReadIterValue(&replyIter));
+                }
+                while (dbus_message_iter_next(&replyIter));
+            }
+        }
+
+        dbus_message_unref(reply);
+    }
+
+    dbus_pending_call_unref(entry.pending); // the reference CallAsync() got from libdbus
+
+    if (entry.done)
+        entry.done(result);
+}
+
+DBusClient::CallId DBusClient::SetPropertyAsync(
+    const std::string& destination,
+    const std::string& objectPath,
+    const std::string& interface,
+    const std::string& propertyName,
+    const DBusValue& value,
+    AsyncCallback done)
+{
+    return CallAsync(
+        destination, objectPath, "org.freedesktop.DBus.Properties", "Set",
+        { DBusValue::MakeString(interface), DBusValue::MakeString(propertyName), DBusValue::MakeVariant(value) },
+        std::move(done)
+    );
+}
+
+bool DBusClient::CancelAsync(CallId id)
+{
+    auto it = m_asyncCalls.find(id);
+
+    if (it == m_asyncCalls.end())
+        return false;
+
+    PendingAsync entry = std::move(it->second);
+    m_asyncCalls.erase(it);
+
+    dbus_pending_call_cancel(entry.pending);
+    dbus_pending_call_unref(entry.pending);
+
+    if (entry.done)
+    {
+        AsyncResult result;
+        result.cancelled = true;
+        result.error = "cancelled (stopped waiting; the operation itself may still complete)";
+        entry.done(result);
+    }
+
     return true;
 }
 

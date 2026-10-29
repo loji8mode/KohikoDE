@@ -2,6 +2,7 @@
 #include "DeviceNotificationDiff.h"
 #include "NotificationCenter.h"
 #include "PipeWireClient.h"
+#include "NativeTrayContract.h"
 #include "TrayIconClient.h"
 #include "UiIconCache.h"
 #include "UiPopupMenu.h"
@@ -275,11 +276,6 @@ int main()
         }
     });
 
-    tray.SetLeftClickHandler([]
-    {
-        AppInstanceLock::LaunchOrRaise("kohiko-audio", "kohiko-audio");
-    });
-
     tray.SetScrollHandler([&](int delta)
     {
         const AudioNode* node = FindDefaultOutput(pipewire);
@@ -287,7 +283,9 @@ int main()
             pipewire.AdjustVolume(node->id, delta * 0.05f);
     });
 
-    tray.SetRightClickHandler([&]
+    // Standard native-tray contract (see NativeTrayContract.h): left click
+    // opens the main window, right click shows this menu.
+    InstallNativeTrayContract(tray, "kohiko-audio", [&]
     {
         const AudioNode* node = FindDefaultOutput(pipewire);
 

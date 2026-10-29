@@ -46,6 +46,11 @@ public:
     bool Initialize();
     void Run();
 
+    // Test seam: the underlying UiWindow, so an integration test can find
+    // real widgets and the X window id and deliver real input events to
+    // them. Not used by the application itself.
+    UiWindow& WindowForTesting() { return m_window; }
+
     // The exact height BuildDetailsPanel() needs for `device` - top
     // padding, icon/name/status block, the three fixed detail rows,
     // and however many action buttons `device`'s paired/connected

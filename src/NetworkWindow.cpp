@@ -526,7 +526,25 @@ std::unique_ptr<Widget> NetworkWindow::BuildDetailsPanel(const NetworkDevice& wi
     bool connected = ap.isActiveConnection;
     const UiTheme& theme = UiTheme::Default();
 
-    card->AddChild(MakeDetailRow({ x, y, w, 22 }, "Status", connected ? "Connected" : "Not connected", connected ? theme.accent : 0));
+    // Same row, same geometry (the card's height is computed up front):
+    // "Working..." while a NetworkManager action is awaiting its reply,
+    // or the last action's failure - never silently dropped.
+    std::string statusText = connected ? "Connected" : "Not connected";
+    unsigned long statusColor = connected ? theme.accent : 0;
+
+    if (m_networkManager.PendingActions() > 0)
+    {
+        statusText = "Working\u2026";
+        statusColor = theme.accent;
+    }
+    else if (!m_networkManager.LastError().empty())
+    {
+        constexpr std::size_t kMaxErrorChars = 46;
+        const std::string& error = m_networkManager.LastError();
+        statusText = error.size() > kMaxErrorChars ? error.substr(0, kMaxErrorChars - 3) + "..." : error;
+    }
+
+    card->AddChild(MakeDetailRow({ x, y, w, 22 }, "Status", statusText, statusColor));
     y += 30;
 
     card->AddChild(MakeDetailRow({ x, y, w, 22 }, "Signal Strength", std::to_string(ap.strength) + "%"));
@@ -590,10 +608,24 @@ std::unique_ptr<Widget> NetworkWindow::BuildDetailsPanel(const NetworkDevice& wi
         // correctly treats as "activate with whatever's already
         // saved, don't touch it" rather than as "the user wants no
         // password".
-        if (!secured || m_networkManager.HasUsableSavedSecret(ssid))
+        //
+        // Asynchronous: the question goes to NetworkManager and the answer
+        // arrives through the event loop - nothing blocks while it is out.
+        if (!secured)
+        {
             m_networkManager.ConnectToAccessPoint(devicePath, apPath, ssid, "");
+        }
         else
-            PromptAndConnect(devicePath, apPath, ssid, secured);
+        {
+            m_networkManager.QueryUsableSavedSecret(ssid,
+                [this, devicePath, apPath, ssid, secured](bool usable)
+                {
+                    if (usable)
+                        m_networkManager.ConnectToAccessPoint(devicePath, apPath, ssid, "");
+                    else
+                        PromptAndConnect(devicePath, apPath, ssid, secured);
+                });
+        }
     };
     card->AddChild(std::move(connectBtn));
 

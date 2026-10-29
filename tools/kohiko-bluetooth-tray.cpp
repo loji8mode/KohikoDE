@@ -1,5 +1,6 @@
 #include "AppInstanceLock.h"
 #include "BluezClient.h"
+#include "NativeTrayContract.h"
 #include "TrayIconClient.h"
 #include "UiIconCache.h"
 #include "UiPopupMenu.h"
@@ -100,12 +101,10 @@ int main()
         }
     });
 
-    tray.SetRightClickHandler([]
-    {
-        AppInstanceLock::LaunchOrRaise("kohiko-bluetooth", "kohiko-bluetooth");
-    });
-
-    tray.SetLeftClickHandler([&]
+    // Standard native-tray contract (see NativeTrayContract.h): left click
+    // opens the main window, right click shows this menu. (They were
+    // swapped here before.)
+    InstallNativeTrayContract(tray, "kohiko-bluetooth", [&]
     {
         PopupMenu menu;
 

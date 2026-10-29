@@ -119,7 +119,7 @@ DESKTOP_SHARED_OBJ := $(patsubst src/%.cpp,build/%.o,$(DESKTOP_SHARED_SRC))
 DESKTOP_COMMON_OBJ := build/Font.o build/Config.o build/IconResolver.o build/Xdg.o build/Utils.o build/IniFile.o \
     build/NotificationPopup.o build/NotificationCenter.o
 
-.PHONY: all clean test install uninstall test-placementhabits test-startupplan
+.PHONY: all clean test install uninstall test-placementhabits test-startupplan test-barworkspaceclick test-appinstancelock test-nativetraycontract
 
 all: kohiko kohikoctl kohiko-settings
 
@@ -224,9 +224,12 @@ ifeq ($(KOHIKO_HAVE_PIPEWIRE)-$(KOHIKO_HAVE_DBUS_PKG)-$(KOHIKO_HAVE_LIBRSVG),yes
     TEST_NETWORKWINDOW := build/test_networkwindow
     TEST_BLUETOOTHWINDOW := build/test_bluetoothwindow
     TEST_AUDIO_LIVE_DEPS := kohiko-audio kohiko-audio-tray
+    # Native-app interaction tests: the real tray client/popup/instance lock,
+    # and the real BluetoothWindow driven against the slow mock bluetoothd.
+    TEST_NATIVE_INTERACTION := build/test_nativetraycontract build/fake-native-app build/test_native_responsive_harness
 endif
 
-test: kohiko kohikoctl build/x11_test_client build/test_bsptree build/test_launcherscoring build/test_placementhabits build/test_startupplan build/test_dbusvalue build/test_sessionstore build/test_configmigration build/test_recoverymode build/test_lockrecovery build/test_appdirwatcher build/test_autologinconfigurator build/test_consoleautologinconfigurator build/test_wallpapermanager build/test_desktopentry build/test_iconresolver build/test_eventloop build/test_windowplacementnotice build/test_rect_clamping build/test_notificationlayout build/test_devicenotificationdiff $(TEST_NETWORKMANAGERCLIENT) $(TEST_SCROLLHITTEST) $(TEST_NETWORKWINDOW) $(TEST_NETWORKMANAGER_LIVE_HARNESS) $(TEST_BLUETOOTHWINDOW) $(TEST_AUDIO_LIVE_DEPS)
+test: kohiko kohikoctl build/x11_test_client build/x11_pixel_probe build/test_barworkspaceclick build/test_appinstancelock build/test_bsptree build/test_launcherscoring build/test_placementhabits build/test_startupplan build/test_dbusvalue build/test_sessionstore build/test_configmigration build/test_recoverymode build/test_lockrecovery build/test_appdirwatcher build/test_autologinconfigurator build/test_consoleautologinconfigurator build/test_wallpapermanager build/test_desktopentry build/test_iconresolver build/test_eventloop build/test_windowplacementnotice build/test_rect_clamping build/test_notificationlayout build/test_devicenotificationdiff $(TEST_NETWORKMANAGERCLIENT) $(TEST_SCROLLHITTEST) $(TEST_NETWORKWINDOW) $(TEST_NETWORKMANAGER_LIVE_HARNESS) $(TEST_BLUETOOTHWINDOW) $(TEST_AUDIO_LIVE_DEPS) $(TEST_NATIVE_INTERACTION)
 	./build/test_bsptree
 	./build/test_launcherscoring
 	./build/test_placementhabits
@@ -249,10 +252,16 @@ test: kohiko kohikoctl build/x11_test_client build/test_bsptree build/test_launc
 	./build/test_devicenotificationdiff
 	sh tests/test_kohiko_session.sh
 	sh tests/test_networkmanager_live.sh
+	./build/test_barworkspaceclick
+	./build/test_appinstancelock
 	sh tests/test_xembed_dock_timeout.sh
+	sh tests/test_launcher_live.sh
 	sh tests/test_adaptive_live.sh
 	sh tests/test_autostart_live.sh
 	sh tests/test_version_consistency.sh
+	sh tests/test_native_tray_tools_use_contract.sh
+	sh tests/test_taskbar_live.sh
+	sh tests/test_floating_stacking_live.sh
 ifeq ($(KOHIKO_HAVE_DBUS_PKG),yes)
 	./build/test_networkmanagerclient
 endif
@@ -261,6 +270,8 @@ ifeq ($(KOHIKO_HAVE_PIPEWIRE)-$(KOHIKO_HAVE_DBUS_PKG)-$(KOHIKO_HAVE_LIBRSVG),yes
 	./build/test_networkwindow
 	./build/test_bluetoothwindow
 	sh tests/test_audio_notification_live.sh
+	./build/test_nativetraycontract build
+	sh tests/test_native_responsive_live.sh
 endif
 
 build/test_bsptree: tests/test_bsptree.cpp src/BSPTree.cpp src/BSPLeaf.cpp src/BSPSplit.cpp src/ManagedWindow.cpp src/LayoutEngine.cpp | build
@@ -438,6 +449,47 @@ build/test_networkmanager_live_harness: tests/live/test_networkmanager_live_harn
 build/x11_test_client: tests/live/x11_test_client.cpp | build
 	$(CXX) $(CXXFLAGS) -Wall -Wextra $< -o $@ -lX11
 
+# Reads real pixels back from the X server (what is actually visible):
+# used by the live tests for the taskbar highlight and window stacking.
+build/x11_pixel_probe: tests/live/x11_pixel_probe.cpp | build
+	$(CXX) $(CXXFLAGS) -Wall -Wextra $< -o $@ -lX11
+
+# Pure logic (header-only hit-test geometry, no X server): the taskbar's
+# clickable workspace numbers.
+build/test_barworkspaceclick: tests/test_barworkspaceclick.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $< -o $@
+
+# Single-instance guard (startup race, repeated clicks, raise vs relaunch).
+# No X server needed.
+# The standard tray-click contract (left = main window, right = menu) with the
+# real TrayIconClient/PopupMenu/AppInstanceLock; needs an X display. The fake
+# native app stands in for kohiko-audio/-network/-bluetooth.
+build/fake-native-app: tests/live/fake_native_app.cpp src/AppInstanceLock.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
+
+build/test_nativetraycontract: tests/test_nativetraycontract.cpp $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) tests/test_nativetraycontract.cpp $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) -o $@ $(LIBS) $(RSVG_LIBS)
+
+test-nativetraycontract: build/test_nativetraycontract build/fake-native-app
+	./build/test_nativetraycontract build
+
+# In-process harness for tests/test_native_responsive_live.sh: the REAL
+# BluetoothWindow + BluezClient driven with real X events against the mock
+# bluetoothd. Needs the same desktop objects as the tray-client tests.
+ifeq ($(KOHIKO_HAVE_DBUS_PKG),yes)
+build/test_native_responsive_harness: tests/test_native_responsive_harness.cpp build/BluetoothWindow.o build/BluezClient.o $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) tests/test_native_responsive_harness.cpp build/BluetoothWindow.o build/BluezClient.o $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) -o $@ $(LIBS) $(RSVG_LIBS) -pthread
+endif
+
+build/test_appinstancelock: tests/test_appinstancelock.cpp src/AppInstanceLock.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
+
+test-appinstancelock: build/test_appinstancelock
+	./build/test_appinstancelock
+
+test-barworkspaceclick: build/test_barworkspaceclick
+	./build/test_barworkspaceclick
+
 # Regression test for the scroll-routing fix (see CHANGELOG.md) -
 # links the full DESKTOP_SHARED_OBJ/DESKTOP_COMMON_OBJ group since
 # that's what actually builds UiWindow/UiWidget/UiScrollView, the same
@@ -503,9 +555,10 @@ build/test_bar: tests/test_bar.cpp src/Bar.cpp src/SystemTray.cpp src/Font.cpp s
 # set every one of the three real tray tools already links) rather
 # than hand-picking a smaller subset, since TrayIconClient/UiIconCache
 # are already part of that shared object set for exactly this reason.
-test-trayiconclient: build/test_trayiconclient build/test_trayiconclient_redraw_latency
+test-trayiconclient: build/test_trayiconclient build/test_trayiconclient_redraw_latency build/test_nativetraycontract build/fake-native-app
 	./build/test_trayiconclient
 	./build/test_trayiconclient_redraw_latency
+	./build/test_nativetraycontract build
 
 # Real TrayIconClient on its own X connection + an independent observer
 # connection reading real pixels back: measures state change -> visible.

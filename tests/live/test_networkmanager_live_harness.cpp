@@ -17,6 +17,10 @@
 
 #include "NetworkManagerClient.h"
 
+#include <poll.h>
+
+#include <functional>
+
 #include <cstdio>
 #include <cstdlib>
 
@@ -55,16 +59,55 @@ int main()
         return 1;
     }
 
-    std::printf("HasUsableSavedSecret() against the mock:\n");
+    // The client's actions are asynchronous: their replies arrive through
+    // Dispatch(), driven by the client's own fd - exactly what a native
+    // window's event loop does. These helpers do the same, and wait for a
+    // condition without ever blocking inside a D-Bus call.
+    auto pumpUntil = [&](const std::function<bool()>& done, int timeoutMs)
+    {
+        for (int waited = 0; waited < timeoutMs && !done(); waited += 20)
+        {
+            pollfd pfd{ nm.Fd(), POLLIN, 0 };
 
-    Check(nm.HasUsableSavedSecret("HomeNet"),
+            if (poll(&pfd, 1, 20) > 0)
+                nm.Dispatch();
+        }
+
+        return done();
+    };
+
+    auto usable = [&](const char* ssid)
+    {
+        bool answered = false;
+        bool result = false;
+
+        nm.QueryUsableSavedSecret(ssid, [&](bool u) { answered = true; result = u; });
+        Check(pumpUntil([&] { return answered; }, 3000), "the secret query answered through the event loop");
+
+        return result;
+    };
+
+    auto connect = [&](const char* device, const char* ap, const char* ssid, const char* password)
+    {
+        bool finished = false;
+        bool succeeded = false;
+
+        nm.ConnectToAccessPoint(device, ap, ssid, password, [&](bool ok, const std::string&) { finished = true; succeeded = ok; });
+        Check(pumpUntil([&] { return finished; }, 3000), "the connect finished through the event loop");
+
+        return succeeded;
+    };
+
+    std::printf("QueryUsableSavedSecret() against the mock:\n");
+
+    Check(usable("HomeNet"),
           "HomeNet (saved, real stored psk) reports a usable secret - the Connect button "
           "should skip the password prompt for this one");
-    Check(!nm.HasUsableSavedSecret("OldNet"),
+    Check(!usable("OldNet"),
           "OldNet (saved connection profile exists, but GetSecrets returns nothing usable - "
           "a stale/forgotten secret) reports no usable secret - the Connect button should "
           "still prompt for this one, not silently try to connect with nothing");
-    Check(!nm.HasUsableSavedSecret("BrandNewNetwork"),
+    Check(!usable("BrandNewNetwork"),
           "a network with no saved connection profile at all reports no usable secret");
 
     std::printf("\nDriving the three ConnectToAccessPoint() calls the shell script checks "
@@ -74,21 +117,21 @@ int main()
     //    activate the existing connection, never call Update() (an
     //    empty password isn't "the user wants no password", it's "the
     //    UI decided a prompt wasn't needed"), never create a new one.
-    nm.ConnectToAccessPoint("/fake/device0", "/fake/ap/HomeNet", "HomeNet", "");
-    std::printf("  ran: ConnectToAccessPoint(HomeNet, \"\")\n");
+    Check(connect("/fake/device0", "/fake/ap/HomeNet", "HomeNet", ""), "ConnectToAccessPoint(HomeNet, \"\") completed successfully");
 
     // 2. Update path: a new password for an SSID that already has a
     //    saved (if stale) connection - should update that same
     //    connection's secret, then activate it - not create a second,
     //    duplicate profile for the same SSID.
-    nm.ConnectToAccessPoint("/fake/device0", "/fake/ap/HomeNet", "HomeNet", "newpass123!");
-    std::printf("  ran: ConnectToAccessPoint(HomeNet, \"newpass123!\")\n");
+    Check(connect("/fake/device0", "/fake/ap/HomeNet", "HomeNet", "newpass123!"), "ConnectToAccessPoint(HomeNet, \"newpass123!\") completed successfully");
 
     // 3. Genuinely new network - no saved connection to reuse or
     //    update, so this is the one case that legitimately should
     //    call AddAndActivateConnection().
-    nm.ConnectToAccessPoint("/fake/device1", "/fake/ap/BrandNewNetwork", "BrandNewNetwork", "somepassword");
-    std::printf("  ran: ConnectToAccessPoint(BrandNewNetwork, \"somepassword\")\n");
+    Check(connect("/fake/device1", "/fake/ap/BrandNewNetwork", "BrandNewNetwork", "somepassword"), "ConnectToAccessPoint(BrandNewNetwork, \"somepassword\") completed successfully");
+
+    Check(nm.PendingActions() == 0, "no action is left pending afterwards");
+    Check(nm.LastError().empty(), "and none reported a failure");
 
     std::printf("\n%d in-process checks passed; see the driving shell script for the "
                 "call-log assertions.\n", g_pass);

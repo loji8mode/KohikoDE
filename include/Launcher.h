@@ -66,6 +66,39 @@ struct FileEntry
     std::vector<std::string> nameWords;
 };
 
+// An immutable record of exactly what the user submitted with Enter.
+//
+// The Launcher's selection (m_matches / m_selectedIndex) is live,
+// mutable state: typing, paging and arrow keys all change it, and
+// index rebuilds can reshuffle it. What gets LAUNCHED must not be
+// read from that state after the fact. When Enter is accepted,
+// HandleKeyPress() captures one of these - the actual command line
+// (executable and arguments) or file path, resolved right then - and
+// everything downstream (WindowManager::CloseLauncher()) launches
+// from the snapshot only, so no later input, however fast, can change
+// WHICH application was submitted.
+//
+// Deliberately contains NO workspace. Which workspace a launched
+// window lands on is decided when its window actually appears (see
+// WindowManager::Manage()), from the user's latest workspace context -
+// freezing the Launcher's workspace here would be exactly the stale
+// context bug this snapshot must not reintroduce.
+struct LaunchRequest
+{
+    enum class Kind
+    {
+        Nothing,    // nothing to launch (empty selection / empty query)
+        Command,    // run `command` through /bin/sh -c
+        RevealFile  // open `path`'s folder in the file manager
+    };
+
+    Kind kind = Kind::Nothing;
+    std::string command; // Kind::Command: executable + arguments, exactly as submitted
+    std::string path;    // Kind::RevealFile: the selected file
+
+    bool Empty() const { return kind == Kind::Nothing; }
+};
+
 class Launcher
 {
 public:
@@ -106,6 +139,17 @@ public:
 
     // The currently typed line - only meaningful while IsOpen().
     const std::string& Query() const;
+
+    // The snapshot taken when Enter was last accepted (empty if Enter
+    // has not been accepted since the Launcher opened). See
+    // LaunchRequest. Consuming it clears it, so one Enter can launch
+    // at most once.
+    LaunchRequest TakeSubmitted();
+
+    // Read-only state, for the `kohikoctl launcher` introspection
+    // verb and tests.
+    std::size_t SelectedIndex() const { return m_selectedIndex; }
+    const Rect& Geometry() const { return m_geometry; }
     std::string SelectedCommand();
     std::string SelectedPath();
     bool SelectedIsFile() const;
@@ -139,6 +183,9 @@ private:
     Rect ComputeGeometry(
         const Rect& monitorGeometry
     ) const;
+
+    // Resolves the current selection into a LaunchRequest, once.
+    LaunchRequest SnapshotSelection();
 
     void Redraw();
     void UpdateMatches();
@@ -212,6 +259,7 @@ private:
     bool m_open = false;
 
     std::string m_query;
+    LaunchRequest m_submitted; // set only by an accepted Enter; see LaunchRequest
     std::size_t m_cursor = 0;
     bool m_caretOn = true;
 

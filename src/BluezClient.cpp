@@ -149,53 +149,186 @@ const std::vector<BluetoothDevice>& BluezClient::Devices() const
     return m_devices;
 }
 
+bool BluezClient::IsBusy(const std::string& objectPath) const
+{
+    return m_inFlight.count(objectPath) != 0;
+}
+
+std::string BluezClient::BusyLabel(const std::string& objectPath) const
+{
+    auto it = m_inFlight.find(objectPath);
+    return it == m_inFlight.end() ? std::string() : it->second.label;
+}
+
+std::string BluezClient::LastError(const std::string& objectPath) const
+{
+    auto it = m_errors.find(objectPath);
+    return it == m_errors.end() ? std::string() : it->second;
+}
+
+bool BluezClient::BeginOperation(
+    const std::string& objectPath, const std::string& targetPath,
+    const std::string& interface, const std::string& method,
+    const std::string& label, const std::vector<DBusValue>& args,
+    int timeoutMs, DoneHandler done)
+{
+    if (m_inFlight.count(objectPath))
+    {
+        if (done)
+            done(false, "already in progress");
+
+        return false;
+    }
+
+    m_errors.erase(objectPath);
+
+    Operation operation;
+    operation.label = label;
+    operation.method = method;
+    m_inFlight[objectPath] = operation;
+
+    DBusClient::CallId id = m_bus.CallAsync(
+        kBluezService, targetPath, interface, method, args,
+        [this, objectPath, method, done](const DBusClient::AsyncResult& result)
+        {
+            m_inFlight.erase(objectPath);
+
+            if (result.cancelled)
+            {
+                m_errors[objectPath] = method == "Pair"
+                    ? "Pairing cancelled"
+                    : method + ": stopped waiting (the request was already sent and may still complete)";
+            }
+            else if (!result.ok)
+            {
+                m_errors[objectPath] = method + " failed: " + result.error;
+            }
+
+            if (done)
+                done(result.ok, result.error);
+
+            if (m_changeHandler)
+                m_changeHandler();
+        },
+        timeoutMs);
+
+    // CallAsync() runs the callback itself, before returning, only if the
+    // call could not even be sent - in which case the entry is already gone.
+    if (id != 0)
+    {
+        auto it = m_inFlight.find(objectPath);
+
+        if (it != m_inFlight.end())
+            it->second.callId = id;
+    }
+
+    if (m_changeHandler)
+        m_changeHandler(); // the window can show "Pairing\u2026" right away
+
+    return true;
+}
+
+bool BluezClient::CancelPending(const std::string& objectPath)
+{
+    auto it = m_inFlight.find(objectPath);
+
+    if (it == m_inFlight.end())
+        return false;
+
+    const std::string method = it->second.method;
+    const DBusClient::CallId id = it->second.callId;
+
+    // A Pair has a real cancel in the service; ask for it. (Any other
+    // in-flight call has none, so for those only the waiting stops.)
+    if (method == "Pair")
+        m_bus.CallAsync(kBluezService, objectPath, kDeviceIface, "CancelPairing", {}, nullptr);
+
+    m_bus.CancelAsync(id); // runs the completion callback above, which records the message
+
+    return true;
+}
+
+DBusClient::AsyncCallback BluezClient::RecordFailure(const std::string& objectPath, const std::string& what)
+{
+    return [this, objectPath, what](const DBusClient::AsyncResult& result)
+    {
+        if (!result.ok && !result.cancelled)
+            m_errors[objectPath] = what + " failed: " + result.error;
+
+        if (m_changeHandler)
+            m_changeHandler();
+    };
+}
+
 void BluezClient::SetAdapterPowered(const std::string& adapterPath, bool powered)
 {
-    m_bus.SetProperty(kBluezService, adapterPath, kAdapterIface, "Powered", DBusValue::MakeBool(powered));
+    m_bus.SetPropertyAsync(kBluezService, adapterPath, kAdapterIface, "Powered",
+        DBusValue::MakeBool(powered), RecordFailure(adapterPath, powered ? "Turning Bluetooth on" : "Turning Bluetooth off"));
 }
 
 void BluezClient::SetAdapterDiscoverable(const std::string& adapterPath, bool discoverable)
 {
-    m_bus.SetProperty(kBluezService, adapterPath, kAdapterIface, "Discoverable", DBusValue::MakeBool(discoverable));
+    m_bus.SetPropertyAsync(kBluezService, adapterPath, kAdapterIface, "Discoverable",
+        DBusValue::MakeBool(discoverable), RecordFailure(adapterPath, "Changing discoverability"));
 }
 
 void BluezClient::StartDiscovery(const std::string& adapterPath)
 {
-    m_bus.Call(kBluezService, adapterPath, kAdapterIface, "StartDiscovery", {});
+    m_bus.CallAsync(kBluezService, adapterPath, kAdapterIface, "StartDiscovery", {},
+        RecordFailure(adapterPath, "Starting the scan"));
 }
 
 void BluezClient::StopDiscovery(const std::string& adapterPath)
 {
-    m_bus.Call(kBluezService, adapterPath, kAdapterIface, "StopDiscovery", {});
+    m_bus.CallAsync(kBluezService, adapterPath, kAdapterIface, "StopDiscovery", {},
+        RecordFailure(adapterPath, "Stopping the scan"));
 }
 
-void BluezClient::PairDevice(const std::string& devicePath)
+void BluezClient::PairDevice(const std::string& devicePath, DoneHandler done)
 {
-    // Pairing can legitimately take several seconds (PIN/passkey
-    // confirmation round trips with the remote device) - a longer
-    // timeout than DBusClient's 4-second default so a slow-but-
-    // succeeding pairing isn't reported as a failure.
-    m_bus.Call(kBluezService, devicePath, kDeviceIface, "Pair", {}, nullptr, nullptr, 30000);
+    BeginOperation(devicePath, devicePath, kDeviceIface, "Pair", "Pairing\u2026", {}, 30000, std::move(done));
 }
 
-void BluezClient::ConnectDevice(const std::string& devicePath)
+void BluezClient::ConnectDevice(const std::string& devicePath, DoneHandler done)
 {
-    m_bus.Call(kBluezService, devicePath, kDeviceIface, "Connect", {}, nullptr, nullptr, 15000);
+    BeginOperation(devicePath, devicePath, kDeviceIface, "Connect", "Connecting\u2026", {}, 15000, std::move(done));
 }
 
-void BluezClient::DisconnectDevice(const std::string& devicePath)
+void BluezClient::DisconnectDevice(const std::string& devicePath, DoneHandler done)
 {
-    m_bus.Call(kBluezService, devicePath, kDeviceIface, "Disconnect", {});
+    BeginOperation(devicePath, devicePath, kDeviceIface, "Disconnect", "Disconnecting\u2026", {}, 4000, std::move(done));
 }
 
 void BluezClient::SetDeviceTrusted(const std::string& devicePath, bool trusted)
 {
-    m_bus.SetProperty(kBluezService, devicePath, kDeviceIface, "Trusted", DBusValue::MakeBool(trusted));
+    m_bus.SetPropertyAsync(kBluezService, devicePath, kDeviceIface, "Trusted",
+        DBusValue::MakeBool(trusted), RecordFailure(devicePath, "Changing trust"));
 }
 
-void BluezClient::RemoveDevice(const std::string& adapterPath, const std::string& devicePath)
+void BluezClient::RemoveDevice(const std::string& adapterPath, const std::string& devicePath, DoneHandler done)
 {
-    m_bus.Call(kBluezService, adapterPath, kAdapterIface, "RemoveDevice", { DBusValue::MakeObjectPath(devicePath) });
+    // RemoveDevice is a method of the ADAPTER, but what is busy - and what
+    // the window shows "Removing\u2026" on - is the device.
+    BeginOperation(devicePath, adapterPath, kAdapterIface, "RemoveDevice", "Removing\u2026",
+        { DBusValue::MakeObjectPath(devicePath) }, 4000, std::move(done));
+}
+
+void BluezClient::PairAndConnectDevice(const std::string& devicePath)
+{
+    PairDevice(devicePath, [this, devicePath](bool ok, const std::string& error)
+    {
+        // Already paired is fine: the user wants it connected.
+        if (ok || error.find("AlreadyExists") != std::string::npos || error.find("Already Exists") != std::string::npos)
+            ConnectDevice(devicePath);
+    });
+}
+
+void BluezClient::DisconnectAndRemoveDevice(const std::string& adapterPath, const std::string& devicePath)
+{
+    DisconnectDevice(devicePath, [this, adapterPath, devicePath](bool, const std::string&)
+    {
+        RemoveDevice(adapterPath, devicePath);
+    });
 }
 
 void BluezClient::SetChangeHandler(ChangeHandler handler)

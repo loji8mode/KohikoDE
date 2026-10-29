@@ -1,5 +1,127 @@
 # Changelog
 
+## Version 0.21.6
+
+Release date: 2026-10-18
+
+**0.21.6 is a UX-fix release:** Launcher / workspace / shortcut / taskbar /
+tray / native-utility / floating-window fixes. Adaptive placement (still
+enabled, unchanged), XEmbed handling, tray redraw, autostart de-duplication
+and the persistence format are untouched. Every fix below was reproduced
+against the 0.21.5 binary first; test results are Xvfb-only (see "Not
+verified").
+
+### Fixed - the Launcher kept the workspace it was opened on
+- **Reproduced, and narrower than reported:** where a new window lands was
+  already decided when it appears (`FocusedWorkspaceId()` at map time), so
+  "launch on workspace 3, switch to 5 while it starts" already landed on 5. The
+  stale context was `m_focusBeforeModal`: the window focused when the Launcher
+  OPENED, restored on close. Switch workspace while it is open, press Enter,
+  and `RestoreFocusAfterModal()` re-focused that hidden workspace-3 window
+  (live: `activewindow` flipped to it while workspace 5 was showing; on
+  several monitors it also dragged monitor focus back).
+- A workspace/monitor switch now carries an open Launcher/Notepad along
+  (`FollowModalsToWorkspaceContext()`): it moves to the monitor you switched on,
+  keeps focus and its query/selection, and the restore target is retargeted to
+  whatever you landed on. `RestoreFocusAfterModal()` also refuses to focus a
+  window that is no longer on screen. No timer, no `XSync`.
+- Launcher launches get NO pending workspace record: associating one at
+  selection time is exactly the stale capture to avoid. (Startup launches keep
+  theirs; those are what adaptive placement excludes from "openings".)
+
+### Fixed - global shortcuts did not work while the Launcher was open
+- **Root cause:** `HandleModalKeyPress()` took first refusal on EVERY key, so
+  grabbed combos like `Super+3` (delivered to Kohiko by `XGrabKey`) reached the
+  Launcher, whose `default:` branch inserted the character and ignored the
+  modifier. Now `EventDispatcher` offers every key to the existing keybinding
+  table first (`KeyboardManager::HandleKeyPress()` returns whether it matched),
+  except while the screen is locked. A bound combination is a shortcut; anything
+  else, digits included, is text. No per-key exceptions.
+
+### Fixed - Enter/selection race
+- Enter now captures an immutable `LaunchRequest` (the resolved command line or
+  file) inside `Launcher::HandleKeyPress()`, and `CloseLauncher()` launches from
+  that alone. (The race was latent: the old code read the live selection three
+  times after the fact.) The request deliberately contains no workspace.
+
+### Added - clickable taskbar workspace numbers
+- A left click on number N calls `SwitchWorkspaceOnMonitor()`, the function the
+  `workspace N` command ends in. Draw and hit-test share one geometry
+  definition (`Bar::WorkspaceGlyphX/SlotLeft/WorkspaceAtX`): contiguous,
+  non-overlapping 22 px boxes, so no click lands on a neighbour.
+
+### Fixed - native tray icons disagreed, and could open two windows
+- Audio: left = main window, right = menu. Network and Bluetooth had the two
+  **swapped**. All three now use one shared `InstallNativeTrayContract()`
+  (left = open/raise, right = menu, icon redrawn after the menu closes).
+- **Duplicate windows, two causes in `AppInstanceLock`:** `LaunchOrRaise()`
+  forked again on every click while the app was still starting (six clicks, six
+  processes), and `AcquireOrListen()`'s probe/unlink/bind let two simultaneous
+  starters both win. Now a launch in flight is not repeated, and the winner is
+  decided by an `flock` (released by the kernel on any exit, so no stale lock).
+- `PopupMenu` ran the chosen action INSIDE its loop while it still held the
+  screen's pointer and keyboard grabs; it now runs it after the popup is gone.
+
+### Fixed - native utilities froze during actions
+- **Root cause, measured:** `DBusClient::Call()` is
+  `dbus_connection_send_with_reply_and_block()` (4 s default; BlueZ `Pair` 30 s,
+  `Connect` 15 s) called from button handlers on the window's single-threaded
+  loop - and the Pair button issued Pair AND Connect back to back. NetworkManager
+  connect made a synchronous `GetSettings` per saved Wi-Fi network, and the
+  click handler a synchronous `GetSecrets`. On 0.21.5, with a 4 s Pair: another
+  control honoured after **4954 ms**, closing the window after **4684 ms**.
+- `DBusClient::CallAsync()/SetPropertyAsync()/CancelAsync()`: send, return,
+  deliver the reply from `Dispatch()` (the window already watches the fd). No
+  thread, no lock, no timer. Cancel stops WAITING only, and says so.
+- `BluezClient`/`NetworkManagerClient` actions are async with completion
+  handlers, per-object busy tracking (a duplicate is refused, not queued),
+  recorded failures shown in the window, and in-progress state ("Pairing...").
+  The Pair button becomes **Cancel**, which for a Pair sends bluetoothd's real
+  `CancelPairing`. Pair-then-Connect is chained (Connect after Pair finishes,
+  skipped on failure); NM matches saved networks from a cached SSID.
+  Result: other control ~40 ms, close 0.1 ms.
+- Audio is NOT affected: PipeWire actions only enqueue messages and `Iterate()`
+  polls with a 0 timeout (read, not run: no PipeWire here).
+
+### Fixed - floating windows disappearing under other windows
+- **Two root causes.** (1) `BeginSwapDrag()` raises the dragged TILED window above
+  everything; the no-swap branch of `EndSwapDrag()` never restored the policy
+  (floating above tiled), because only the swap branch ends in `Arrange()`.
+  It now restacks that one window directly below the lowest visible float
+  (one `XQueryTree` per drag release; nothing is raised). (2) `ArrangeMonitor()`
+  re-raised floats in `unordered_map` order, discarding the user's raises;
+  floats are now raised in ascending order of a per-window stacking serial
+  (`ManagedWindow::StackSerial()`, stamped by `StampStacking()` whenever a
+  window appears, becomes floating, or is raised by the user).
+
+### Changed - version string and documentation
+- `include/Version.h` is bumped from 0.21.5 to 0.21.6, so the startup log
+  line (`kohiko 0.21.6 starting`) reports the release. This is the only
+  version constant in the tree; `tests/test_version_consistency.sh` checks it
+  against this heading.
+- `README.md` now describes the unified native tray behaviour (left click
+  opens/raises, right click opens the menu) everywhere; its audio/network/
+  Bluetooth section still described the old network/Bluetooth asymmetry,
+  which contradicted its own System tray section. It also gains notes on the
+  non-blocking native utilities and on floating-window stacking.
+  `docs/ARCHITECTURE.md` and `docs/AUDIO_NETWORK_BLUETOOTH.md` are updated
+  for the asynchronous D-Bus layer, `AppInstanceLock` and the shared tray
+  contract. Documentation only; no behaviour change.
+
+### Tests (all new unless noted)
+`test_launcher_live.sh` (24), `test_taskbar_live.sh` (27),
+`test_barworkspaceclick` (17), `test_floating_stacking_live.sh` (25),
+`test_appinstancelock` (12), `test_nativetraycontract` (10),
+`test_native_tray_tools_use_contract.sh`, `test_native_responsive_live.sh` (32,
+real window + mock bluetoothd), `x11_pixel_probe`, mock BlueZ delays/errors/
+CancelPairing. `test_networkmanager_live_harness` ported to the async API.
+
+### Not verified / still synchronous
+Xvfb only - no real desktop, PipeWire, NetworkManager or BlueZ. Still blocking by
+design: the read paths (`Refresh()`, property reads), `RefreshSavedConnections()`,
+and the Wi-Fi password dialog. `BluetoothWindow` keeps its pre-existing 300 ms
+dirty-flag interval (not added by this change).
+
 ## Version 0.21.5
 
 Release date: 2026-10-08

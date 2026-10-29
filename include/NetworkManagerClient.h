@@ -72,6 +72,8 @@ struct SavedConnection
     std::string objectPath;
     std::string id;              // display name
     std::string type;            // "802-11-wireless", "802-3-ethernet", "vpn", "wireguard", ...
+    std::string ssid;            // Wi-Fi only: cached from GetSettings at refresh, so matching a saved
+                                 // network to an access point needs no D-Bus round trip at click time
     bool isVpn = false;
     bool isActive = false;
 
@@ -135,6 +137,25 @@ public:
     // literal RF-kill of every radio is outside NetworkManager's own
     // remit; see kohiko-network's README section on this for the
     // caveat spelled out for users).
+    // ---- Actions are ASYNCHRONOUS -----------------------------------
+    //
+    // Every action below returns immediately and finishes later, through
+    // Dispatch(), when NetworkManager's reply arrives - never by blocking
+    // the window's event loop in a D-Bus call (0.21.5 did: a connect
+    // issued one blocking GetSettings per saved Wi-Fi network, up to 4 s
+    // each, before it even asked NetworkManager to do anything). The
+    // optional DoneHandler reports the outcome; independently, a failure
+    // is kept in LastError() and ChangeHandler fires after every
+    // completion so the window can show it - failures are not swallowed.
+    using DoneHandler = std::function<void(bool ok, const std::string& error)>;
+
+    // Actions currently awaiting NetworkManager (for in-progress UI).
+    std::size_t PendingActions() const { return m_pendingActions; }
+
+    // The most recent action failure, "" if the last action succeeded.
+    const std::string& LastError() const { return m_lastError; }
+    void ClearError() { m_lastError.clear(); }
+
     void SetAirplaneMode(bool enabled);
 
     void SetWirelessEnabled(bool enabled);
@@ -155,7 +176,7 @@ public:
     // the Activated state and Devices() keeps reporting it
     // disconnected, exactly what a user watching NetworkManager's own
     // nm-applet would also see.
-    void ConnectToAccessPoint(const std::string& devicePath, const std::string& apPath, const std::string& ssid, const std::string& password);
+    void ConnectToAccessPoint(const std::string& devicePath, const std::string& apPath, const std::string& ssid, const std::string& password, DoneHandler done = nullptr);
 
     // Whether a saved 802-11-wireless connection profile already
     // exists for `ssid` *and* NetworkManager will actually hand back
@@ -180,21 +201,25 @@ public:
     // there in NetworkManager's own data model) - a saved WEP
     // connection's `wep-key0` isn't covered, consistent with this
     // task's own WPA/WPA2 scope.
-    bool HasUsableSavedSecret(const std::string& ssid);
+    // Asynchronous: `done(true)` if a saved profile for `ssid` already has a
+    // stored password NetworkManager can reuse, else `done(false)`. (Was a
+    // blocking bool-returning call that made synchronous GetSettings/
+    // GetSecrets round trips from inside a button handler.)
+    void QueryUsableSavedSecret(const std::string& ssid, std::function<void(bool usable)> done);
 
     // `devicePath` may be "/" (NetworkManager's own placeholder for
     // "pick automatically") - what's used for VPN connections, which
     // route over whichever device already has connectivity rather
     // than owning a device of their own.
-    void ActivateSavedConnection(const std::string& connectionPath, const std::string& devicePath);
+    void ActivateSavedConnection(const std::string& connectionPath, const std::string& devicePath, DoneHandler done = nullptr);
 
     // Looks up `connectionPath`'s current SavedConnection::
     // activeConnectionPath and deactivates that - works uniformly for
     // both a normal device-bound connection and a VPN connection.
-    void DeactivateConnection(const std::string& connectionPath);
-    void ForgetConnection(const std::string& connectionPath);
+    void DeactivateConnection(const std::string& connectionPath, DoneHandler done = nullptr);
+    void ForgetConnection(const std::string& connectionPath, DoneHandler done = nullptr);
 
-    void DisconnectDevice(const std::string& devicePath);
+    void DisconnectDevice(const std::string& devicePath, DoneHandler done = nullptr);
 
     using ChangeHandler = std::function<void()>;
     void SetChangeHandler(ChangeHandler handler);
@@ -208,6 +233,13 @@ private:
     bool m_wirelessEnabled = true;
     bool m_wwanEnabled = true;
     ChangeHandler m_changeHandler;
+
+    // Wraps an action's completion: bookkeeping (pending count, LastError),
+    // the caller's DoneHandler, then ChangeHandler.
+    DBusClient::AsyncCallback Track(const std::string& what, DoneHandler done);
+
+    std::size_t m_pendingActions = 0;
+    std::string m_lastError;
 
     void RefreshDevices();
     void RefreshSavedConnections();

@@ -696,9 +696,18 @@ layer underneath them are exactly as they were.
    but this section's own recommendation - these apps' own page
    navigation, search, row selection, and especially
    `kohiko-bluetooth`'s pairing flow (`BluezClient::PairDevice()`/
-   `ConnectDevice()` are genuinely slow, blocking D-Bus calls - see
+   `ConnectDevice()` are genuinely slow calls - see
    `BluetoothWindow.h`'s own comment - and their real-world timing
-   still hasn't been tested) - remains open.
+   still hasn't been tested against real hardware) - remains open.
+   > **Update, 0.21.6:** those calls are no longer *blocking*. As of
+   > 0.21.6 `BluezClient` and `NetworkManagerClient` actions are
+   > asynchronous (`DBusClient::CallAsync()`; the reply arrives through
+   > `Dispatch()`), so a slow pairing no longer freezes the window - the
+   > Pair button becomes Cancel and the rest of the window keeps working.
+   > That was verified against a deliberately slow *mock* bluetoothd under
+   > Xvfb, not against real BlueZ hardware, so the recommendation above
+   > about real-world timing still stands. See `CHANGELOG.md`'s 0.21.6
+   > entry and `ARCHITECTURE.md`'s "Backend actions are asynchronous".
 2. **Read `docs/ARCHITECTURE.md`'s "coordinate convention" and
    "deferred destruction" sections before touching any page-building
    code** in any of the three apps, or before adding a new widget to

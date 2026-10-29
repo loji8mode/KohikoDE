@@ -25,6 +25,7 @@ import sys
 import json
 
 import dbus
+import dbus.exceptions
 import dbus.service
 import dbus.mainloop.glib
 from gi.repository import GLib
@@ -109,15 +110,63 @@ class Device(BluezObject):
         if battery is not None and battery >= 0:
             self.set_prop(BATTERY_IFACE, "Percentage", dbus.Byte(battery))
 
-    @dbus.service.method(DEVICE_IFACE, in_signature="", out_signature="")
-    def Pair(self):
+    # Optional per-device behaviour, from the scenario (all default to "instant success"):
+    #   "pair_delay_ms" / "connect_delay_ms" - how long the call stays pending before it
+    #       replies. Replies are scheduled with GLib.timeout_add through python-dbus's
+    #       async callbacks, so the MOCK never blocks either - which is what lets tests
+    #       observe a client that keeps working while a slow Pair/Connect is in flight.
+    #   "pair_error" / "connect_error" - the call fails with this message instead.
+    # CancelPairing aborts a pending Pair, as the real bluetoothd's does.
+    delays = {}
+    errors = {}
+    pending_pair = None
+
+    def _later(self, name, ok_action, reply_cb, error_cb):
+        delay = self.delays.get(name, 0)
+        error = self.errors.get(name)
+
+        def finish():
+            if name == "Pair":
+                self.pending_pair = None
+
+            if error:
+                error_cb(dbus.exceptions.DBusException(error, name="org.bluez.Error.Failed"))
+            else:
+                ok_action()
+                reply_cb()
+
+            log_call(f"DONE {name} path={self.path} {'error' if error else 'ok'}")
+            return False
+
+        if delay <= 0:
+            finish()
+            return
+
+        source = GLib.timeout_add(delay, finish)
+
+        if name == "Pair":
+            self.pending_pair = (source, error_cb)
+
+    @dbus.service.method(DEVICE_IFACE, in_signature="", out_signature="", async_callbacks=("reply_cb", "error_cb"))
+    def Pair(self, reply_cb, error_cb):
         log_call(f"CALL Pair path={self.path}")
-        self.set_prop(DEVICE_IFACE, "Paired", dbus.Boolean(True))
+        self._later("Pair", lambda: self.set_prop(DEVICE_IFACE, "Paired", dbus.Boolean(True)), reply_cb, error_cb)
 
     @dbus.service.method(DEVICE_IFACE, in_signature="", out_signature="")
-    def Connect(self):
+    def CancelPairing(self):
+        log_call(f"CALL CancelPairing path={self.path}")
+
+        if self.pending_pair:
+            source, error_cb = self.pending_pair
+            self.pending_pair = None
+            GLib.source_remove(source)
+            error_cb(dbus.exceptions.DBusException("Authentication Canceled", name="org.bluez.Error.AuthenticationCanceled"))
+            log_call(f"DONE Pair path={self.path} cancelled")
+
+    @dbus.service.method(DEVICE_IFACE, in_signature="", out_signature="", async_callbacks=("reply_cb", "error_cb"))
+    def Connect(self, reply_cb, error_cb):
         log_call(f"CALL Connect path={self.path}")
-        self.set_prop(DEVICE_IFACE, "Connected", dbus.Boolean(True))
+        self._later("Connect", lambda: self.set_prop(DEVICE_IFACE, "Connected", dbus.Boolean(True)), reply_cb, error_cb)
 
     @dbus.service.method(DEVICE_IFACE, in_signature="", out_signature="")
     def Disconnect(self):
@@ -174,6 +223,8 @@ def main():
         device = Device(bus, d["path"], d.get("address", "BB:BB:BB:BB:BB:BB"), d.get("alias", "Device"),
                          d.get("icon", ""), d.get("paired", False), d.get("connected", False),
                          d.get("trusted", False), battery if battery is not None and battery >= 0 else None)
+        device.delays = {"Pair": d.get("pair_delay_ms", 0), "Connect": d.get("connect_delay_ms", 0)}
+        device.errors = {k: d[key] for k, key in (("Pair", "pair_error"), ("Connect", "connect_error")) if d.get(key)}
         interfaces = [DEVICE_IFACE]
         if battery is not None and battery >= 0:
             interfaces.append(BATTERY_IFACE)

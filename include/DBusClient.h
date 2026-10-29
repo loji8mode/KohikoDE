@@ -2,7 +2,9 @@
 
 #include "DBusValue.h"
 
+#include <cstdint>
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -11,6 +13,7 @@
 // DBusClient& around. Only DBusClient.cpp needs the real libdbus type.
 struct DBusConnection;
 struct DBusMessage;
+struct DBusPendingCall;
 
 namespace Kohiko
 {
@@ -104,6 +107,74 @@ public:
     // org.freedesktop.DBus.Properties.Get - `out` is already unwrapped
     // (never a Type::Variant) for convenience, since every property
     // value D-Bus hands back is boxed in exactly one variant layer.
+    // ---- Asynchronous calls ----------------------------------------
+    //
+    // Call() above BLOCKS the calling thread in
+    // dbus_connection_send_with_reply_and_block() until the service
+    // replies or `timeoutMs` passes - 4 s by default, and callers asked
+    // for 15 s (BlueZ Connect) and 30 s (BlueZ Pair). Every native
+    // window runs a single-threaded event loop, so a blocking call made
+    // from a button handler freezes the whole window - no redraw, no
+    // close, no move - for as long as the service takes.
+    //
+    // CallAsync() sends the message and returns immediately. The reply
+    // is delivered later, from Dispatch() (i.e. from the application's
+    // own event loop, because the window already watches Fd()), to
+    // `done`. No thread, no lock, no polling timer: a reply arriving on
+    // the D-Bus socket is the event.
+    //
+    // `done` is invoked exactly once, on the thread that calls
+    // Dispatch(), with ok/reply/error filled in - OR, if the call could
+    // not even be sent (no connection), synchronously before CallAsync()
+    // returns, with ok=false. It may freely start new calls.
+    struct AsyncResult
+    {
+        bool ok = false;        // the service replied successfully
+        bool cancelled = false; // CancelAsync() stopped waiting; see there
+        std::vector<DBusValue> reply;
+        std::string error;      // D-Bus error message when !ok
+    };
+
+    using AsyncCallback = std::function<void(const AsyncResult&)>;
+    using CallId = std::uint64_t;
+
+    CallId CallAsync(
+        const std::string& destination,
+        const std::string& objectPath,
+        const std::string& interface,
+        const std::string& method,
+        const std::vector<DBusValue>& args,
+        AsyncCallback done,
+        int timeoutMs = 4000
+    );
+
+    CallId SetPropertyAsync(
+        const std::string& destination,
+        const std::string& objectPath,
+        const std::string& interface,
+        const std::string& propertyName,
+        const DBusValue& value,
+        AsyncCallback done
+    );
+
+    // Stops WAITING for a call's reply: its callback fires once with
+    // cancelled=true and the real reply, if it ever arrives, is
+    // discarded. This does NOT cancel the operation inside the service -
+    // a BlueZ Pair() that was already sent may still complete. Callers
+    // that need the operation itself stopped must ask the service (e.g.
+    // BlueZ's CancelPairing) and must not tell the user it was
+    // cancelled just because they stopped waiting. Returns false if
+    // `id` is not (or no longer) in flight.
+    bool CancelAsync(CallId id);
+
+    // How many async calls are currently awaiting a reply.
+    std::size_t PendingAsyncCalls() const { return m_asyncCalls.size(); }
+
+    // Internal: the libdbus notify trampoline's entry point. Public only
+    // because it is called from a C callback (same reason as
+    // HandleMessage() below).
+    void HandleAsyncReply(CallId id, DBusPendingCall* pending);
+
     bool GetProperty(
         const std::string& destination,
         const std::string& objectPath,
@@ -175,6 +246,15 @@ private:
         std::string path;
         SignalHandler handler;
     };
+
+    struct PendingAsync
+    {
+        DBusPendingCall* pending = nullptr;
+        AsyncCallback done;
+    };
+
+    std::map<CallId, PendingAsync> m_asyncCalls;
+    CallId m_nextCallId = 1;
 
     bool m_available = false;
     DBusConnection* m_connection = nullptr;

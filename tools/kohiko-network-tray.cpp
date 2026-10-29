@@ -1,5 +1,6 @@
 #include "AppInstanceLock.h"
 #include "NetworkManagerClient.h"
+#include "NativeTrayContract.h"
 #include "TrayIconClient.h"
 #include "UiIconCache.h"
 #include "UiPopupMenu.h"
@@ -140,12 +141,10 @@ int main()
         }
     });
 
-    tray.SetRightClickHandler([]
-    {
-        AppInstanceLock::LaunchOrRaise("kohiko-network", "kohiko-network");
-    });
-
-    tray.SetLeftClickHandler([&]
+    // Standard native-tray contract (see NativeTrayContract.h): left click
+    // opens the main window, right click shows this menu. (They were
+    // swapped here before.)
+    InstallNativeTrayContract(tray, "kohiko-network", [&]
     {
         PopupMenu menu;
 

@@ -1,0 +1,8 @@
+{
+  "adapters": [
+    {"path": "/org/bluez/hci0", "address": "AA:BB:CC:DD:EE:00", "alias": "Kohiko Desktop", "powered": true, "discoverable": false, "discovering": false}
+  ],
+  "devices": [
+    {"path": "/org/bluez/hci0/dev_10", "adapter": "/org/bluez/hci0", "address": "AA:AA:AA:AA:AA:10", "alias": "Slow Pair Device", "icon": "audio-headphones", "paired": false, "connected": false, "trusted": false, "battery": -1, "pair_delay_ms": 4000, "connect_delay_ms": 1000}
+  ]
+}

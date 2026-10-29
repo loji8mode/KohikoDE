@@ -103,6 +103,14 @@ public:
 
     WindowState PreviousState() const;
 
+    // Monotonic "last raised" stamp (see WindowManager::StampStacking()).
+    // Among floating windows, a higher serial means more recently raised
+    // and therefore stacked higher: ArrangeMonitor() raises floats in
+    // ascending serial order, which makes its re-raise order-PRESERVING
+    // instead of arbitrary. 0 = never stamped.
+    unsigned long StackSerial() const { return m_stackSerial; }
+    void SetStackSerial(unsigned long serial) { m_stackSerial = serial; }
+
     bool IsTiled() const;
 
     bool IsFloating() const;
@@ -192,6 +200,7 @@ private:
     int m_monitor = 0;
 
     bool m_focused = false;
+    unsigned long m_stackSerial = 0;
     bool m_urgent = false;
 
     WindowState m_state = WindowState::Tiled;

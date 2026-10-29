@@ -904,7 +904,7 @@ at all.
 
 ## How adaptive placement learns
 
-This section describes Kohiko 0.21.5, which keeps adaptive placement
+This section describes Kohiko 0.21.6, which keeps adaptive placement
 enabled (see `general.adaptive_placement`); earlier releases recorded
 only the placements you made, with no notion of opportunities.
 
@@ -1124,7 +1124,10 @@ live. `focusmonitor`/`movetomonitor` remain available as commands for
 anyone who wants an explicit keybind of their own.
 
 All of the above are just entries in `kohiko.conf` - remove, remap, or add
-to them freely; nothing is hardcoded.
+to them freely; nothing is hardcoded. These bindings keep working while the
+launcher or notepad is open (see [The launcher](#the-launcher-superd)), and
+the workspace numbers on the bar are clickable as well (see [System
+tray](#system-tray)).
 
 ## System tray
 
@@ -1145,6 +1148,17 @@ the next section) rather than expecting a third-party applet like
 just fine if you run them instead, since this is a completely ordinary
 implementation of the standard protocol either way, but there's no
 need to for these three in particular.
+
+**Kohiko's own tray icons all behave the same way:** a **left click** opens
+(or raises) that utility's main window - clicking again while it is still
+starting, or once it is up, never opens a second one - and a **right click**
+opens the compact menu of quick actions. A menu action runs only after the
+menu has closed. This applies only to Kohiko's own audio/network/Bluetooth
+icons; third-party icons keep whatever behaviour their application gives them.
+
+The workspace numbers at the left of the bar are clickable too: a left click
+on **N** switches to workspace N, exactly as the `workspace N` keybinding
+does (the active number is drawn in the accent colour).
 
 ### Tray icons are infrastructure, not managed windows
 
@@ -1258,16 +1272,41 @@ Kohiko's own XDG autostart handling - see [XDG
 autostart](#xdg-autostart-desktop-entries) above for exactly what runs
 them and when, since `auto_start_programs=` is a different,
 config-driven mechanism that has nothing to do with these three.
-Left-clicking `kohiko-audio-tray` opens `kohiko-audio`,
-and right-click opens a quick mute/device-switch menu; left-clicking
-`kohiko-network-tray`/`kohiko-bluetooth-tray` opens a quick popup, and
-right-click opens the full app - this asymmetry matches how each one
-is most often used (audio's quick actions are reached for constantly;
-network/Bluetooth's aren't). The audio tray widget's scroll wheel
-adjusts the default output's volume directly. Clicking a tray widget's
-"open the full app" action raises the already-running window instead
-of launching a second one, the same single-instance behavior as
-opening the app any other way.
+All three tray widgets behave identically (see [System
+tray](#system-tray)): a left click opens - or raises - the matching full
+app, and a right click opens a compact menu of quick actions, whose
+chosen action runs after the menu has closed. The audio menu mutes or
+unmutes the default output and switches the default output device; the
+network menu turns Wi-Fi on or off and lists up to six nearby networks
+(an open network connects directly; a secured one needs the full app for
+its password); the Bluetooth menu turns Bluetooth on or off and
+connects or disconnects paired devices. Each menu ends with an entry
+that opens the full app. (Before 0.21.6, the network and Bluetooth tray
+widgets had the two clicks the other way round from the audio one.) The
+audio tray widget's scroll wheel adjusts the default output's volume
+directly. Clicking a tray widget's "open the full app" action raises the
+already-running window instead of launching a second one - including
+when the app is still starting, so repeated clicks never open
+duplicate windows - the same single-instance behavior as opening the
+app any other way.
+
+**Actions don't freeze the window.** In `kohiko-network` and
+`kohiko-bluetooth`, whatever talks to NetworkManager or BlueZ -
+connecting to a network, pairing, connecting or disconnecting a device,
+toggling power - is sent and then completed through the window's own
+event loop (no threads): the window keeps repainting and answering
+clicks, the item in progress says so (for instance "Pairing..."), and a
+failed action is reported in the window instead of being dropped. A
+second action on a network or device that already has one in flight is
+refused rather than queued. While a device operation runs, its Pair or
+Connect button becomes **Cancel**; cancelling a pairing asks `bluetoothd`
+to cancel it for real, while cancelling anything else only stops
+waiting - the request was already sent and may still complete, and the
+window says so. Pairing and the connection that follows it are
+chained: the connection is attempted only after pairing has finished
+successfully. Reading state (refreshes) and the Wi-Fi password dialog are
+still synchronous, and `kohiko-audio` is not affected at all (its
+PipeWire actions are queued, not awaited).
 
 None of these three apps or their tray widgets are built at all if
 `libdbus-1-dev`/`libpipewire-0.3-dev`/`librsvg2-dev` aren't present at
@@ -1371,6 +1410,13 @@ Both left-click gestures share one bind (`mouse.swap=`, default
 under the cursor is tiled or floating. Resize is separately rebindable
 via `mouse.resize=` (e.g. `SUPER+BTN2` for the middle button).
 
+Floating windows always sit above tiled ones, and among themselves they
+stay in the order you last brought them forward: a floating window you
+have just dragged, resized, or raised is not pushed back underneath
+another float when a window opens or closes elsewhere. A tiled window you
+pick up with `Super`+left-click and put back without swapping returns to
+just below the floating windows instead of staying on top of them.
+
 ## The launcher (Super+D)
 
 `Super+D` opens a small centered input box - about a twelfth of the
@@ -1387,6 +1433,15 @@ external launcher binary required. If you'd rather use dmenu, rofi, or
 similar instead, the general `exec.<name>=` + `bind=... exec <name>`
 mechanism is still there for it; see the commented-out example in
 `config/default.conf`.
+
+Global keybindings keep working while the launcher is open: a key combination
+you have bound (for instance `Super+3` for `workspace 3`) does its job instead
+of being typed into the box, and the launcher moves with you to the workspace
+or monitor you switch to, keeping what you had typed. Ordinary unmodified
+keys - including digits - are plain text. What `Enter` submits is fixed at the
+moment you press it: nothing typed afterwards can change which application
+launches, and the new window opens on whichever workspace you are on when it
+actually appears, not the one the launcher was opened on.
 
 It also stays raised above everything else for as long as it's open -
 including a program that opens *while* it's up. The launcher deliberately
@@ -1809,6 +1864,9 @@ relative proportions, just applied to whichever axis now applies.
 - **The launcher (`Super+D`) and notepad (`Super+N`)** open centered on
   whichever monitor the cursor is on - falling back to the focused
   monitor, then the primary one, if the cursor is outside every monitor.
+  Your global keybindings keep working while either is open, and the
+  launcher follows you to the workspace or monitor you switch to; `Enter`
+  launches exactly what was selected when you pressed it.
 - **The scratchpad** reliably keeps real X input focus across workspace
   switches, so releasing it (`Super+Space`) or typing into it keeps
   working no matter how many times you've switched away and back since
@@ -1915,7 +1973,9 @@ relative proportions, just applied to whichever axis now applies.
   [Audio, network, and Bluetooth](#audio-network-and-bluetooth)) with
   matching tray widgets, built on PipeWire, NetworkManager, and BlueZ
   respectively - Kohiko still doesn't replace any of those, just adds
-  a native UI in front of each.
+  a native UI in front of each. All three tray widgets share one click
+  contract (left = open/raise, right = menu), and the network and
+  Bluetooth apps stay responsive while NetworkManager/BlueZ actions run.
 - **Persistent monitor preferences** - a monitor that isn't pinned by
   an explicit `monitor=` rule remembers whatever workspace it was
   actually showing as of the last clean shutdown and starts back on

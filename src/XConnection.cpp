@@ -289,6 +289,15 @@ void XConnection::Raise(::Window window)
     XRaiseWindow(m_display, window);
 }
 
+void XConnection::StackBelow(::Window window, ::Window sibling)
+{
+    XWindowChanges changes;
+    changes.sibling = sibling;
+    changes.stack_mode = Below;
+
+    XConfigureWindow(m_display, window, CWSibling | CWStackMode, &changes);
+}
+
 void XConnection::Lower(::Window window)
 {
     XLowerWindow(m_display, window);

@@ -105,6 +105,49 @@ public:
     // never negative.
     const Rect& PowerButtonRect() const;
 
+    // ---- Workspace indicators (the clickable numbers) -------------
+    //
+    // One geometry definition shared by drawing and hit-testing, so
+    // what is drawn where and what a click lands on can never drift
+    // apart. Indicator i (1-based) has its glyph drawn at
+    // WorkspaceGlyphX(i); its click target is the 22 px column
+    // [WorkspaceSlotLeft(i), WorkspaceSlotLeft(i) + 22) - the glyph
+    // is centred in it. Columns are contiguous and never overlap, so
+    // every x belongs to AT MOST one indicator: no click can hit a
+    // neighbour, and nothing outside the row (the notification text,
+    // the tray, the clock, the power button) is ever claimed.
+    static constexpr int kWorkspaceGlyphLeft = 10; // x of indicator 1's glyph
+    static constexpr int kWorkspaceSlotWidth = 22; // distance between indicators
+    static constexpr int kWorkspaceSlotInset = 5;  // glyph sits this far into its slot
+
+    static int WorkspaceGlyphX(int workspace)
+    {
+        return kWorkspaceGlyphLeft + (workspace - 1) * kWorkspaceSlotWidth;
+    }
+
+    static int WorkspaceSlotLeft(int workspace)
+    {
+        return WorkspaceGlyphX(workspace) - kWorkspaceSlotInset;
+    }
+
+    // Which workspace indicator (1..count) a bar-relative x falls
+    // on, or 0 if none. Pure function of x and the workspace count.
+    static int WorkspaceAtX(int x, int workspaceCount)
+    {
+        int offset = x - WorkspaceSlotLeft(1);
+
+        if (offset < 0 || workspaceCount < 1)
+            return 0;
+
+        int workspace = offset / kWorkspaceSlotWidth + 1;
+
+        return workspace <= workspaceCount ? workspace : 0;
+    }
+
+    // Same, for a bar-relative point: 0 unless it is also within the
+    // bar's own height.
+    int WorkspaceAt(int x, int y) const;
+
     // This bar's own on-screen position/size - WindowManager needs it
     // to translate PowerButtonRect() (bar-window-relative) into the
     // root-relative coordinates PowerMenu::Open() expects.

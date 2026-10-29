@@ -329,6 +329,9 @@ void NetworkManagerClient::RefreshSavedConnections()
         saved.type = connectionSection.Get("type").AsString();
         saved.isVpn = (saved.type == "vpn" || saved.type == "wireguard");
 
+        if (saved.type == "802-11-wireless")
+            saved.ssid = BytesToString(settingsReply.front().Get("802-11-wireless").Get("ssid"));
+
         for (auto& [settingsPath, activePath] : activeBySettingsPath)
         {
             if (settingsPath == connPath)
@@ -361,20 +364,41 @@ bool NetworkManagerClient::NetworkingEnabled() const { return m_networkingEnable
 bool NetworkManagerClient::WirelessEnabled() const { return m_wirelessEnabled; }
 bool NetworkManagerClient::WwanEnabled() const { return m_wwanEnabled; }
 
+DBusClient::AsyncCallback NetworkManagerClient::Track(const std::string& what, DoneHandler done)
+{
+    ++m_pendingActions;
+
+    return [this, what, done = std::move(done)](const DBusClient::AsyncResult& result)
+    {
+        if (m_pendingActions > 0)
+            --m_pendingActions;
+
+        if (result.ok)
+            m_lastError.clear();
+        else
+            m_lastError = what + " failed: " + result.error;
+
+        if (done)
+            done(result.ok, result.error);
+
+        if (m_changeHandler)
+            m_changeHandler();
+    };
+}
+
 void NetworkManagerClient::SetAirplaneMode(bool enabled)
 {
-    // "Airplane mode" here means "every NetworkManager-managed radio
-    // off" - enabled=true turns radios off, matching the usual
-    // physical-switch meaning of the phrase, which is the inverse of
-    // the WirelessEnabled/WwanEnabled property sense.
     bool radiosOn = !enabled;
-    m_bus.SetProperty(kNmService, kNmManagerPath, kNmManagerIface, "WirelessEnabled", DBusValue::MakeBool(radiosOn));
-    m_bus.SetProperty(kNmService, kNmManagerPath, kNmManagerIface, "WwanEnabled", DBusValue::MakeBool(radiosOn));
+    auto finish = Track(enabled ? "Turning airplane mode on" : "Turning airplane mode off", nullptr);
+
+    m_bus.SetPropertyAsync(kNmService, kNmManagerPath, kNmManagerIface, "WirelessEnabled", DBusValue::MakeBool(radiosOn), nullptr);
+    m_bus.SetPropertyAsync(kNmService, kNmManagerPath, kNmManagerIface, "WwanEnabled", DBusValue::MakeBool(radiosOn), finish);
 }
 
 void NetworkManagerClient::SetWirelessEnabled(bool enabled)
 {
-    m_bus.SetProperty(kNmService, kNmManagerPath, kNmManagerIface, "WirelessEnabled", DBusValue::MakeBool(enabled));
+    m_bus.SetPropertyAsync(kNmService, kNmManagerPath, kNmManagerIface, "WirelessEnabled", DBusValue::MakeBool(enabled),
+        Track(enabled ? "Turning Wi-Fi on" : "Turning Wi-Fi off", nullptr));
 }
 
 void NetworkManagerClient::RequestWiFiScan()
@@ -384,103 +408,82 @@ void NetworkManagerClient::RequestWiFiScan()
         if (device.kind != NetworkDeviceKind::WiFi)
             continue;
 
-        m_bus.Call(kNmService, device.objectPath, kNmWirelessIface, "RequestScan",
-            { DBusValue::MakeDict({}) });
+        m_bus.CallAsync(kNmService, device.objectPath, kNmWirelessIface, "RequestScan",
+            { DBusValue::MakeDict({}) }, Track("Scanning for networks", nullptr));
     }
 }
 
-bool NetworkManagerClient::HasUsableSavedSecret(const std::string& ssid)
+void NetworkManagerClient::QueryUsableSavedSecret(const std::string& ssid, std::function<void(bool usable)> done)
 {
     for (auto& saved : m_savedConnections)
     {
-        if (saved.type != "802-11-wireless")
+        if (saved.type != "802-11-wireless" || saved.ssid != ssid)
             continue;
 
-        std::vector<DBusValue> settingsReply;
-        if (!m_bus.Call(kNmService, saved.objectPath, kNmConnectionIface, "GetSettings", {}, &settingsReply) || settingsReply.empty())
-            continue;
+        // No GetSettings here: the SSID was cached at refresh, so the only
+        // thing left to ask NetworkManager is the secret itself.
+        m_bus.CallAsync(kNmService, saved.objectPath, kNmConnectionIface, "GetSecrets",
+            { DBusValue::MakeString("802-11-wireless-security") },
+            [done](const DBusClient::AsyncResult& result)
+            {
+                if (!result.ok || result.reply.empty())
+                {
+                    done(false);
+                    return;
+                }
 
-        const DBusValue& wifiSection = settingsReply.front().Get("802-11-wireless");
-        if (BytesToString(wifiSection.Get("ssid")) != ssid)
-            continue;
-
-        // Found the saved profile for this SSID - whether it counts
-        // as "usable" now hinges entirely on GetSecrets(), not on
-        // anything GetSettings() already told us (see this method's
-        // own header comment for why those are deliberately separate
-        // calls).
-        std::vector<DBusValue> secretsReply;
-        if (!m_bus.Call(kNmService, saved.objectPath, kNmConnectionIface, "GetSecrets",
-                { DBusValue::MakeString("802-11-wireless-security") }, &secretsReply) || secretsReply.empty())
-            return false;
-
-        const DBusValue& securitySection = secretsReply.front().Get("802-11-wireless-security");
-        return !securitySection.Get("psk").AsString().empty();
+                const DBusValue& securitySection = result.reply.front().Get("802-11-wireless-security");
+                done(!securitySection.Get("psk").AsString().empty());
+            });
+        return;
     }
 
-    return false; // no saved connection at all for this SSID
+    done(false); // no saved connection at all for this SSID
 }
 
 void NetworkManagerClient::ConnectToAccessPoint(
     const std::string& devicePath, const std::string& apPath,
-    const std::string& ssid, const std::string& password)
+    const std::string& ssid, const std::string& password, DoneHandler done)
 {
-    // First preference: reuse an existing saved profile for this
-    // exact SSID, exactly like clicking a known network in nm-applet
-    // does - it carries over any previously-entered credentials
-    // rather than asking again.
+    DBusClient::AsyncCallback finish = Track("Connecting to " + ssid, std::move(done));
+
+    // Reuse an existing saved profile for this SSID if there is one: its
+    // SSID is cached, so this match involves no D-Bus traffic at all.
     for (auto& saved : m_savedConnections)
     {
-        if (saved.type != "802-11-wireless")
+        if (saved.type != "802-11-wireless" || saved.ssid != ssid)
             continue;
 
-        std::vector<DBusValue> settingsReply;
-        if (!m_bus.Call(kNmService, saved.objectPath, kNmConnectionIface, "GetSettings", {}, &settingsReply) || settingsReply.empty())
-            continue;
+        const std::string connectionPath = saved.objectPath;
 
-        const DBusValue& wifiSection = settingsReply.front().Get("802-11-wireless");
-        std::string savedSsid = BytesToString(wifiSection.Get("ssid"));
-
-        if (savedSsid == ssid)
+        auto activate = [this, connectionPath, devicePath, apPath, finish]
         {
-            if (!password.empty())
+            m_bus.CallAsync(kNmService, kNmManagerPath, kNmManagerIface, "ActivateConnection",
+                { DBusValue::MakeObjectPath(connectionPath), DBusValue::MakeObjectPath(devicePath), DBusValue::MakeObjectPath(apPath) },
+                finish);
+        };
+
+        if (password.empty())
+        {
+            activate(); // activate with whatever is already saved; don't touch it
+            return;
+        }
+
+        // A newly typed password is persisted into the SAME profile (never a
+        // second one): GetSettings -> Update -> ActivateConnection, each step
+        // asynchronous, each starting from the previous step's reply.
+        m_bus.CallAsync(kNmService, connectionPath, kNmConnectionIface, "GetSettings", {},
+            [this, connectionPath, password, activate, finish](const DBusClient::AsyncResult& settingsResult)
             {
-                // The user was just asked for, and just typed, this
-                // password - it has to actually reach NetworkManager,
-                // or a previously-saved (possibly wrong, possibly
-                // just outdated after the AP's passphrase changed)
-                // secret keeps getting silently reactivated instead,
-                // no matter what gets typed into the prompt each
-                // time. This was unreachable before the BytesToString()
-                // fix just above it (the SSID comparison this sits
-                // inside never used to succeed at all - see that
-                // function's own comment), so this exact gap could
-                // never have been hit in practice until that was
-                // fixed either - both halves of this bug had to be
-                // fixed together, not just the first one found.
-                //
-                // Settings.Connection.Update() replaces the *entire*
-                // connection - it is not a merge/patch operation, per
-                // NetworkManager's own D-Bus reference ("Update the
-                // connection with new settings and properties,
-                // replacing all previous settings and properties").
-                // So this starts from every section GetSettings() (via
-                // settingsReply.front()) just returned - preserving
-                // ipv4/ipv6/connection/etc. untouched - and only adds
-                // or overwrites the one thing that actually needs to
-                // change: this section's own "psk". Each outer-level
-                // section is re-wrapped in exactly one Variant on the
-                // way back out (Unwrap() first in case it already
-                // carried one, then MakeVariant() once), matching how
-                // the brand-new-connection path a few lines down
-                // already writes this same shape - normalizing rather
-                // than assuming which format GetSettings() itself
-                // used avoids having to guess about a nesting-depth
-                // question this file already got wrong once (see
-                // BytesToString() above).
+                if (!settingsResult.ok || settingsResult.reply.empty())
+                {
+                    finish(settingsResult); // can't read the profile: report, don't guess
+                    return;
+                }
+
                 std::map<std::string, DBusValue> topLevel;
 
-                for (const auto& [sectionName, sectionValue] : settingsReply.front().Entries())
+                for (const auto& [sectionName, sectionValue] : settingsResult.reply.front().Entries())
                     topLevel.emplace(sectionName, DBusValue::MakeVariant(sectionValue.Unwrap()));
 
                 std::map<std::string, DBusValue> securitySection;
@@ -495,20 +498,13 @@ void NetworkManagerClient::ConnectToAccessPoint(
 
                 topLevel["802-11-wireless-security"] = DBusValue::MakeVariant(DBusValue::MakeDict(std::move(securitySection)));
 
-                m_bus.Call(kNmService, saved.objectPath, kNmConnectionIface, "Update",
-                    { DBusValue::MakeDict(std::move(topLevel)) });
-            }
-
-            m_bus.Call(kNmService, kNmManagerPath, kNmManagerIface, "ActivateConnection",
-                { DBusValue::MakeObjectPath(saved.objectPath), DBusValue::MakeObjectPath(devicePath), DBusValue::MakeObjectPath(apPath) });
-            return;
-        }
+                m_bus.CallAsync(kNmService, connectionPath, kNmConnectionIface, "Update",
+                    { DBusValue::MakeDict(std::move(topLevel)) },
+                    [activate](const DBusClient::AsyncResult&) { activate(); }); // as before: activate whether or not Update succeeded
+            });
+        return;
     }
 
-    // No saved profile - build a brand new minimal connection,
-    // exactly the two settings sections NetworkManager requires to
-    // add-and-activate one from scratch: an SSID, and (if a password
-    // was given) a WPA-PSK secret.
     std::map<std::string, DBusValue> connectionSection;
     connectionSection.emplace("id", DBusValue::MakeVariant(DBusValue::MakeString(ssid)));
     connectionSection.emplace("type", DBusValue::MakeVariant(DBusValue::MakeString("802-11-wireless")));
@@ -532,38 +528,40 @@ void NetworkManagerClient::ConnectToAccessPoint(
         topLevel.emplace("802-11-wireless-security", DBusValue::MakeVariant(DBusValue::MakeDict(std::move(securitySection))));
     }
 
-    m_bus.Call(kNmService, kNmManagerPath, kNmManagerIface, "AddAndActivateConnection",
+    m_bus.CallAsync(kNmService, kNmManagerPath, kNmManagerIface, "AddAndActivateConnection",
         { DBusValue::MakeDict(std::move(topLevel)),
-          DBusValue::MakeObjectPath(devicePath), DBusValue::MakeObjectPath(apPath) });
+          DBusValue::MakeObjectPath(devicePath), DBusValue::MakeObjectPath(apPath) },
+        finish);
 }
 
-void NetworkManagerClient::ActivateSavedConnection(const std::string& connectionPath, const std::string& devicePath)
+void NetworkManagerClient::ActivateSavedConnection(const std::string& connectionPath, const std::string& devicePath, DoneHandler done)
 {
-    m_bus.Call(kNmService, kNmManagerPath, kNmManagerIface, "ActivateConnection",
-        { DBusValue::MakeObjectPath(connectionPath), DBusValue::MakeObjectPath(devicePath), DBusValue::MakeObjectPath("/") });
+    m_bus.CallAsync(kNmService, kNmManagerPath, kNmManagerIface, "ActivateConnection",
+        { DBusValue::MakeObjectPath(connectionPath), DBusValue::MakeObjectPath(devicePath), DBusValue::MakeObjectPath("/") },
+        Track("Connecting", std::move(done)));
 }
 
-void NetworkManagerClient::DeactivateConnection(const std::string& connectionPath)
+void NetworkManagerClient::DeactivateConnection(const std::string& connectionPath, DoneHandler done)
 {
     for (auto& saved : m_savedConnections)
     {
         if (saved.objectPath == connectionPath && !saved.activeConnectionPath.empty())
         {
-            m_bus.Call(kNmService, kNmManagerPath, kNmManagerIface, "DeactivateConnection",
-                { DBusValue::MakeObjectPath(saved.activeConnectionPath) });
+            m_bus.CallAsync(kNmService, kNmManagerPath, kNmManagerIface, "DeactivateConnection",
+                { DBusValue::MakeObjectPath(saved.activeConnectionPath) }, Track("Disconnecting", std::move(done)));
             return;
         }
     }
 }
 
-void NetworkManagerClient::ForgetConnection(const std::string& connectionPath)
+void NetworkManagerClient::ForgetConnection(const std::string& connectionPath, DoneHandler done)
 {
-    m_bus.Call(kNmService, connectionPath, kNmConnectionIface, "Delete", {});
+    m_bus.CallAsync(kNmService, connectionPath, kNmConnectionIface, "Delete", {}, Track("Forgetting the network", std::move(done)));
 }
 
-void NetworkManagerClient::DisconnectDevice(const std::string& devicePath)
+void NetworkManagerClient::DisconnectDevice(const std::string& devicePath, DoneHandler done)
 {
-    m_bus.Call(kNmService, devicePath, kNmDeviceIface, "Disconnect", {});
+    m_bus.CallAsync(kNmService, devicePath, kNmDeviceIface, "Disconnect", {}, Track("Disconnecting", std::move(done)));
 }
 
 void NetworkManagerClient::SetChangeHandler(ChangeHandler handler)

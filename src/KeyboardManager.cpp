@@ -64,7 +64,7 @@ void KeyboardManager::Configure(
     }
 }
 
-void KeyboardManager::HandleKeyPress(
+bool KeyboardManager::HandleKeyPress(
     const XKeyEvent& event)
 {
     static constexpr unsigned int kRelevantMask =
@@ -77,9 +77,11 @@ void KeyboardManager::HandleKeyPress(
         if (binding.keycode == event.keycode && binding.modifiers == modifiers)
         {
             m_windowManager.Execute(binding.command);
-            return;
+            return true;
         }
     }
+
+    return false;
 }
 
 KeySym KeyboardManager::ResolveKeysym(

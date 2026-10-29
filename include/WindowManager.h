@@ -211,6 +211,12 @@ public:
     // only when this returns false.
     bool HandleModalKeyPress(const XKeyEvent& event);
 
+    // True while the lock screen owns the keyboard. EventDispatcher
+    // checks this BEFORE offering a key to the global keybindings:
+    // nothing - not even a configured shortcut - may run behind a
+    // locked screen.
+    bool IsScreenLocked() const;
+
     bool IsManaged(WindowID id) const;
 
     // --- Command execution (keybinds + `kohikoctl dispatch ...`) ----------
@@ -248,6 +254,28 @@ public:
     void BeginSwapDrag(ManagedWindow* window, const Point& cursor);
     void UpdateSwapDrag(ManagedWindow* window, const Point& cursor);
     void EndSwapDrag(ManagedWindow* window, const Point& cursor);
+
+    // Puts a TILED window back where the stacking policy says it
+    // belongs - below every visible floating window - after
+    // BeginSwapDrag() raised it above them for the duration of the
+    // drag. Moves only `tiled`, directly below the lowest visible
+    // floating window on its workspace: no float is raised, so the
+    // floats' own relative order (and focus) is untouched. Needs the
+    // actual X stacking order, so it does ONE XQueryTree - once per
+    // drag release, never per event.
+    void RestackBelowFloatingWindows(ManagedWindow* tiled);
+
+    // Records that `window` was just brought to the top - because it
+    // appeared, became floating, or the user raised it (dragging or
+    // resizing it, or showing the scratchpad). ArrangeMonitor()
+    // re-raises every visible floating window on every layout pass so
+    // floats always sit above tiled windows; it uses these stamps to
+    // do that in the order the user last put them in, rather than in
+    // whatever order a hash map happens to iterate. Without it, a
+    // float the user had just dragged on top of another float was
+    // silently pushed back underneath it by the very next Arrange().
+    void StampStacking(ManagedWindow* window);
+    unsigned long m_stackCounter = 0;
 
     // The floating-window equivalent of the Swap-drag trio above - a
     // plain 1:1 follow-the-cursor move rather than a pick-up-and-swap,
@@ -522,6 +550,20 @@ private:
 
     void ToggleLauncher();
     void CloseLauncher(bool run);
+
+    // Launches exactly what `request` says - the Launcher's
+    // immutable snapshot of what Enter submitted - and nothing else.
+    void SubmitLaunch(const LaunchRequest& request);
+
+    // Called whenever the user's workspace context changes (a
+    // workspace switch, however it was triggered: keyboard, mouse,
+    // IPC) while the Launcher or Notepad is open. Moves the modal to
+    // the monitor the user is now on, keeps it focused and on top,
+    // and - the important part - retargets m_focusBeforeModal, which
+    // was captured when the modal OPENED and so describes the OLD
+    // workspace. Preserves the modal's own state (query, selection,
+    // text): only its geometry changes.
+    void FollowModalsToWorkspaceContext();
     void ToggleNotepad();
     void CloseNotepad();
     void RestoreFocusAfterModal();
@@ -903,6 +945,11 @@ private:
     std::string DumpClientsJson() const;
     std::string DumpMonitorsJson() const;
     std::string DumpActiveWindowJson() const;
+
+    // `kohikoctl launcher`: the Launcher's observable state (open?,
+    // query, selection, which monitor it is on, geometry). Read-only;
+    // exists so tests can assert real Launcher behaviour.
+    std::string DumpLauncherJson() const;
 
 private:
 

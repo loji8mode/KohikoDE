@@ -2,9 +2,12 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <map>
 
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -47,11 +50,39 @@ AppInstanceLock::~AppInstanceLock()
         close(m_listenFd);
         unlink(m_socketPath.c_str());
     }
+
+    if (m_lockFd >= 0)
+        close(m_lockFd); // releases the flock (the kernel would anyway at exit)
 }
 
 bool AppInstanceLock::AcquireOrListen(const std::string& appId)
 {
     m_socketPath = SocketPathFor(appId);
+
+    // Decide "who is THE instance" atomically, with the kernel, before
+    // touching the socket at all. The old sequence - probe the socket,
+    // unlink it, bind a fresh one - is a race: two instances starting
+    // within one another's startup time (a double-click on a tray icon
+    // does exactly that) both probe an absent listener, both unlink, both
+    // bind, and the second silently steals the path - two main windows.
+    // An exclusive flock() on a lock file has exactly one winner no
+    // matter how the starts interleave, is released by the kernel when the
+    // holder exits OR crashes (so there is never a stale lock to clean
+    // up), and needs no polling. The lock file itself is deliberately
+    // never deleted (deleting it would let a late opener lock a different
+    // inode than the one the winner holds).
+    m_lockFd = open((m_socketPath + ".lock").c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+
+    if (m_lockFd >= 0 && flock(m_lockFd, LOCK_EX | LOCK_NB) != 0)
+    {
+        // Somebody else holds it: they are the instance (maybe still
+        // starting up). Ask them to raise if they are already listening;
+        // either way this process must not become a second one.
+        close(m_lockFd);
+        m_lockFd = -1;
+        RequestRaise(appId);
+        return false;
+    }
 
     // First, check whether an instance is already listening - if so,
     // this process isn't the one that gets to run.
@@ -155,10 +186,36 @@ bool AppInstanceLock::RequestRaise(const std::string& appId)
 
 void AppInstanceLock::LaunchOrRaise(const std::string& appId, const std::string& executableName)
 {
+    // Launches this process has started and not yet seen the end of.
+    // Without it, every click made while the app was still starting up
+    // (it is not listening yet, so RequestRaise() fails) forked ANOTHER
+    // copy. Reaping with WNOHANG here is the only housekeeping needed:
+    // no timer, no blocking wait.
+    static std::map<std::string, pid_t> launching;
+
+    for (auto it = launching.begin(); it != launching.end();)
+    {
+        int status = 0;
+
+        if (waitpid(it->second, &status, WNOHANG) == it->second)
+            it = launching.erase(it); // exited (failed or finished): not "starting" any more
+        else
+            ++it;
+    }
+
     if (RequestRaise(appId))
+    {
+        launching.erase(appId); // it is up and answering
         return;
+    }
+
+    if (launching.count(appId))
+        return; // already started, still coming up: the window will appear by itself
 
     pid_t pid = fork();
+    if (pid > 0)
+        launching[appId] = pid;
+
     if (pid == 0)
     {
         // Detach fully so the app keeps running after this tray
