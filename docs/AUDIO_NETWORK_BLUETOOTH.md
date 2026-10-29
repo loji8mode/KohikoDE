@@ -769,3 +769,20 @@ window's thread. The UI shows "Working..." and disables the control while
 an operation is pending and reports a failure on the device/network and as
 a desktop notification. PipeWire needs none of this: its operations are
 asynchronous protocol messages dispatched from the loop's fd.
+
+**Errors and what was verified (0.22.1).** A failed operation is never
+silent: the completion callback receives `OperationResult{ok, message}`,
+the window shows the message on the affected device/network, and a desktop
+notification is posted. The pieces are tested with scripted stand-ins -
+`OperationWorker`'s queueing, lanes, duplicate refusal and cancellation
+(`tests/test_operationworker.cpp`, pure), and the windows against a fake
+D-Bus (`kohiko-bluetooth-fakebus`) with synthetic X11 input
+(`tests/test_native_responsive_live.sh`, `test_tray_contract_live.sh`,
+`test_ui_event_queue_live.sh`). **No real BlueZ adapter, NetworkManager
+with real networks or PipeWire graph was involved**, so real timings (a
+15 s connect, a keyring prompt), real error strings and multi-monitor
+placement of the windows and toasts are unverified. Those live tests are
+built only where the D-Bus, librsvg and PipeWire development files exist;
+in the environment used to finalize 0.22.1 they were not available, so
+`make test` skipped them there - run `make test` on a machine that has
+them (and read its output for skips) before relying on this section.

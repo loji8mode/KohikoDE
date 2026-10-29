@@ -721,7 +721,19 @@ std::string XConnection::GetWindowRole(::Window window, const XAtoms& atoms)
             AnyPropertyType, &actualType, &actualFormat, &itemCount, &bytesLeft, &data
         ) == Success && data)
     {
-        role.assign(reinterpret_cast<char*>(data), itemCount);
+        // A text property: 8-bit items (STRING or UTF8_STRING - both are
+        // seen in the wild). Anything else is not a role. A client that
+        // writes the terminating NUL into the property (some toolkits
+        // do) must not get a role that differs from the one a rule says
+        // by an invisible trailing byte.
+        if (actualFormat == 8)
+        {
+            role.assign(reinterpret_cast<char*>(data), itemCount);
+
+            while (!role.empty() && role.back() == '\0')
+                role.pop_back();
+        }
+
         XFree(data);
     }
 

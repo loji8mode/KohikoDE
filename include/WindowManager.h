@@ -885,6 +885,26 @@ private:
     static WindowIdentity RuleIdentityOf(
         const ManagedWindow& window);
 
+    // Re-reads WM_CLASS, WM_WINDOW_ROLE and _NET_WM_WINDOW_TYPE from X11
+    // into the managed window. Called when the client changes one of
+    // them (HandlePropertyNotify) and right before the chooser is
+    // handed the focused window's identity, so a rule is never written
+    // for what the window said when it first appeared if it has said
+    // something else since. It never re-applies rules to a window that
+    // is already open - rules are decided once, when a window is
+    // first managed.
+    void RefreshWindowIdentity(
+        ManagedWindow& window);
+
+    // One log line saying which `windowrule=` lines matched a window
+    // being managed (least specific first), and - separately - which
+    // rules written for the same application did NOT match it (a role
+    // or type mismatch is the usual reason), so "my rule isn't being
+    // applied" can be answered from the log. Silent for a window no
+    // rule is written for.
+    void LogWindowRuleMatches(
+        const ManagedWindow& window) const;
+
     // Re-raises the Launcher/Notepad above whatever Arrange() (or a
     // manual Raise() elsewhere, e.g. the Scratchpad or a Swap drag)
     // just put on top of it. Without this, a window that opens - or

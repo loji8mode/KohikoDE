@@ -871,6 +871,21 @@ void WindowManager::HandleFocusIn(const XFocusChangeEvent& event)
 
 void WindowManager::HandlePropertyNotify(const XPropertyEvent& event)
 {
+    // The identity a window rule selects on is read when the window is
+    // first managed. A client that sets or changes it afterwards (rare,
+    // but legal) would otherwise leave Kohiko holding the old value
+    // forever - and the chooser would then write a rule for a window
+    // that no longer exists in that form.
+    if (event.atom == XA_WM_CLASS ||
+        event.atom == m_atoms.WM_WINDOW_ROLE ||
+        event.atom == m_atoms.NET_WM_WINDOW_TYPE)
+    {
+        if (ManagedWindow* window = m_repository.Get(event.window))
+            RefreshWindowIdentity(*window);
+
+        return;
+    }
+
     if (event.atom != m_atoms.NET_WM_NAME && event.atom != XA_WM_NAME)
         return;
 
@@ -1828,6 +1843,7 @@ void WindowManager::Manage(WindowID id, bool skipXEmbedCheck)
     ManagedWindow* parent = isTransient ? m_repository.Get(transientOwner) : nullptr;
 
     WindowRuleEffect rules = ResolveWindowRules(RuleIdentityOf(*window));
+    LogWindowRuleMatches(*window);
 
     // Whether a `workspace<N>=` autostart line (RunAutostart()) was
     // the thing that launched this window's process in the first
@@ -3582,6 +3598,10 @@ void WindowManager::ChooseWindowRuleForFocused(const std::string& scope)
     if (!focused)
         return;
 
+    // The rule is written for what this window says it is RIGHT NOW,
+    // read from X11 - not what it said when it was first managed.
+    RefreshWindowIdentity(*focused);
+
     std::string appKey = WindowRule::AppKeyFor(focused->ClassName(), focused->InstanceName());
 
     if (appKey.empty())
@@ -3590,17 +3610,26 @@ void WindowManager::ChooseWindowRuleForFocused(const std::string& scope)
         return;
     }
 
-    // Which windows of the application the dialog's rule covers. The
-    // default - and what every existing binding keeps doing - is the
-    // whole application. `role`, `type` and `role+type` narrow it to the
-    // focused window's WM_WINDOW_ROLE / window type, which is how one
-    // application's differently-behaving windows (a browser and its
-    // Picture-in-Picture overlay) get independent rules. A scope the
-    // focused window cannot satisfy is refused instead of quietly
-    // falling back to the whole application.
+    // Which windows of the application the dialog's rule covers.
+    // `app` / `role` / `type` / `role+type` open the dialog on exactly
+    // that kind (the whole application, or the focused window's
+    // WM_WINDOW_ROLE / window type): the way one application's
+    // differently-behaving windows (a browser and its Picture-in-Picture
+    // overlay) get independent rules. A scope the focused window cannot
+    // satisfy is refused instead of quietly falling back to the whole
+    // application.
     std::string scopeArg;
 
-    if (scope == "role" || scope == "type" || scope == "role+type")
+    // No argument: the dialog opens on the kind of rule that already
+    // applies to this window (see ChooseWindowModel::BuildScopeChoices)
+    // and lets the person pick between "All windows" and this window's
+    // role/type in the dialog itself. An explicit scope opens it on
+    // exactly that one.
+    if (scope == "app")
+    {
+        scopeArg = " --scope app";
+    }
+    else if (scope == "role" || scope == "type" || scope == "role+type")
     {
         if ((scope == "role" || scope == "role+type") && focused->Role().empty())
         {
@@ -3616,7 +3645,7 @@ void WindowManager::ChooseWindowRuleForFocused(const std::string& scope)
 
         scopeArg = " --scope " + scope;
     }
-    else if (!scope.empty() && scope != "app")
+    else if (!scope.empty())
     {
         Logger::Warning("choose_window: unknown scope \"" + scope + "\" (use app, role, type or role+type)");
         return;
@@ -4566,6 +4595,63 @@ WindowIdentity WindowManager::RuleIdentityOf(
     return identity;
 }
 
+void WindowManager::RefreshWindowIdentity(
+    ManagedWindow& window)
+{
+    std::string className;
+    std::string instanceName;
+    m_connection.GetWindowClass(window.Id(), className, instanceName);
+
+    window.SetClassName(className);
+    window.SetInstanceName(instanceName);
+    window.SetRole(m_connection.GetWindowRole(window.Id(), m_atoms));
+    window.SetWindowType(m_connection.GetWindowTypeName(window.Id(), m_atoms));
+}
+
+void WindowManager::LogWindowRuleMatches(
+    const ManagedWindow& window) const
+{
+    if (m_windowRules.empty())
+        return;
+
+    WindowIdentity identity = RuleIdentityOf(window);
+    std::string appKey = WindowRule::AppKeyFor(identity.className, identity.instanceName);
+
+    std::string who =
+        "window " + std::to_string(static_cast<unsigned long>(window.Id())) +
+        " (class \"" + identity.className + "\", instance \"" + identity.instanceName +
+        "\", role \"" + identity.role + "\", type \"" + identity.windowType + "\")";
+
+    std::vector<WindowRule> matched = MatchingWindowRules(m_windowRules, identity);
+
+    if (!matched.empty())
+    {
+        std::string list;
+
+        for (const WindowRule& rule : matched)
+            list += std::string(list.empty() ? "" : "; ") + rule.Serialize();
+
+        Logger::Info(who + " matched " + std::to_string(matched.size()) +
+            " window rule(s), least specific first: " + list);
+    }
+
+    // The same application's rules that did NOT match - almost always a
+    // role or type that differs from what this window declared.
+    std::string skipped;
+
+    for (const WindowRule& rule : m_windowRules)
+    {
+        if (rule.appKey.empty() || Utils::Lower(rule.appKey) != Utils::Lower(appKey))
+            continue;
+
+        if (!rule.Matches(identity))
+            skipped += std::string(skipped.empty() ? "" : "; ") + rule.Serialize();
+    }
+
+    if (!skipped.empty())
+        Logger::Info(who + " did not match these rules for the same application: " + skipped);
+}
+
 void WindowManager::NoteRaised(ManagedWindow* window)
 {
     if (window && window->IsFloating())
@@ -4671,6 +4757,8 @@ std::string WindowManager::DumpClientsJson() const
             << "\"title\":" << Json::String(window->Title()) << ","
             << "\"class\":" << Json::String(window->ClassName()) << ","
             << "\"instance\":" << Json::String(window->InstanceName()) << ","
+            << "\"role\":" << Json::String(window->Role()) << ","
+            << "\"type\":" << Json::String(window->WindowType()) << ","
             << "\"pid\":" << window->Pid() << ","
             << "\"workspace\":" << window->Workspace() << ","
             << "\"monitor\":" << window->Monitor() << ","
@@ -4738,6 +4826,9 @@ std::string WindowManager::DumpActiveWindowJson() const
         << "\"id\":" << static_cast<unsigned long>(window->Id()) << ","
         << "\"title\":" << Json::String(window->Title()) << ","
         << "\"class\":" << Json::String(window->ClassName()) << ","
+        << "\"instance\":" << Json::String(window->InstanceName()) << ","
+        << "\"role\":" << Json::String(window->Role()) << ","
+        << "\"type\":" << Json::String(window->WindowType()) << ","
         << "\"workspace\":" << window->Workspace() << ","
         << "\"x\":" << r.x << ",\"y\":" << r.y
         << ",\"width\":" << r.width << ",\"height\":" << r.height

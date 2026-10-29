@@ -63,6 +63,7 @@ current limitations, recommendations), see
 - [Rendering pipeline](#rendering-pipeline)
 - [Build system](#build-system)
 - [Extension points](#extension-points)
+- [Testing and its limits](#testing-and-its-limits)
 - [Known limitations / recommendations for the next session](#known-limitations--recommendations-for-the-next-session)
 
 ## Process map
@@ -76,7 +77,7 @@ contracts, never on shared memory or a shared address space:
 | `kohiko` | The window manager itself - the only process that speaks X11 as a *window manager* (`SubstructureRedirect` etc.) | X server directly (Xlib); `kohikoctl` over a Unix socket; `kohiko-settings` only indirectly, via the config file |
 | `kohikoctl` | A CLI client - sends one line, reads one response, exits | `kohiko`'s `IPCServer`, over a Unix socket |
 | `kohiko-settings` | A structured GUI editor for `kohiko.conf` | The config file directly (reads via `Config`, writes via `ConfigWriter`); tells `kohiko` to reload via IPC after saving |
-| `kohiko-choose-window` | A small dialog (and scriptable CLI) that edits ONE application's `windowrule=app:...` line - the only thing besides Settings that writes a window rule | The config file directly (`WindowRuleStore` via `ConfigWriter`); tells `kohiko` to reload via IPC; opened by the `choose_window` command, which passes it the focused window's identity. Plain X11/Xft only - deliberately not the D-Bus/PipeWire `Ui*` toolkit, so it exists on every install |
+| `kohiko-choose-window` | A small dialog (and scriptable CLI) that edits ONE `windowrule=` line - for the whole application (`app:zen`) or for one kind of its windows (`app:zen role:PictureInPicture`), chosen in the dialog's "Applies to" row - the only thing besides Settings that writes a window rule | The config file directly (`WindowRuleStore` via `ConfigWriter`); tells `kohiko` to reload via IPC; opened by the `choose_window` command, which passes it the focused window's identity (class, instance, title, role, type - freshly read from X11). Plain X11/Xft only - deliberately not the D-Bus/PipeWire `Ui*` toolkit, so it exists on every install |
 | `kohiko-audio` / `kohiko-network` / `kohiko-bluetooth` | Ordinary X11 client apps, each a full settings page for one subsystem | PipeWire / NetworkManager (D-Bus) / BlueZ (D-Bus) respectively - never `kohiko` itself |
 | `kohiko-audio-tray` / `kohiko-network-tray` / `kohiko-bluetooth-tray` | Small system-tray clients | The same backend as their matching full app, plus `AppInstanceLock` to raise the full app instead of launching a second instance |
 
@@ -118,6 +119,60 @@ description - that content lives there because it's tightly coupled
 to the user-facing behavior the rest of the README documents (window
 rules, multi-monitor, session restore, ...), and duplicating it here
 would just create two copies to keep in sync.
+
+**Where a window rule's identity comes from and how rules are chosen.**
+`WindowManager::Manage()` reads a new window's `WM_CLASS` (instance
+first, class second; the class is the application), `WM_WINDOW_ROLE` and
+the first `_NET_WM_WINDOW_TYPE` straight from X11 (`XConnection::
+GetWindowClass/GetWindowRole/GetWindowTypeName`; the role is read by that
+property name, the type is compared as a real atom, not as text) into the
+`ManagedWindow`, and builds a `WindowIdentity` from it
+(`RuleIdentityOf()`). `HandlePropertyNotify()` re-reads the three when
+the client changes them, and `ChooseWindowRuleForFocused()` re-reads them
+again right before handing the focused window to the dialog, so the dialog
+never works from a stale copy. Rules themselves are still decided once, in
+`Manage()`: `MatchingWindowRules()` (`WindowRule.cpp`, pure) returns the
+rules whose every selector matches - `role:`/`type:` are exact, and a
+window lacking the role/type never matches such a rule - ordered least
+specific first (fewest selectors; ties in file order), and
+`ResolveWindowRules()` folds that list so each property comes from the most
+specific rule that sets it. `LogWindowRuleMatches()` logs the matched list,
+and the same application's rules that did not match, for each new window.
+
+The dialog's logic is `ChooseWindowModel` (no X11): its `BuildScopeChoices()`
+turns the window's role/type into the kinds a rule can be for (`All
+windows`, role, type, role + type) each carrying the rule saved for it
+(`WindowRuleStore::FindAppRule`) and picks the kind to open on; per-kind
+choices are kept separately and Save/Reset act on the selected kind only
+(`UpsertAppRule`/`RemoveAppRule` match on application + role + type
+exactly). Settings' rule rows edit through `WindowRuleDraft` (also no X11:
+parse a `windowrule=` value into fields, serialize it back byte for byte,
+cycle the `type:` choice), which is why a row's role and type survive every
+other edit.
+
+**The Launcher and workspace switching.** The Launcher is deliberately not
+an `XGrabKeyboard` client (see its header), so while it is open the key
+routing in `WindowManager` first asks `KeyboardManager::IsGlobalShortcut()`:
+a key the user bound to a `bind=` shortcut is handled by Kohiko (`Super+3`
+switches workspace), everything else is the Launcher's. A workspace switch
+(`SwitchWorkspace()`: `Super+N`, a click on the bar, `kohikoctl`) ends in
+`ReconcileModalsAfterWorkspaceChange()`, which moves an open Launcher to the
+focused monitor (`Launcher::Reposition()` - same query, selection and
+scroll position) and records the window that now has focus, on the
+workspace now current, as the one to give focus back to when it closes.
+Enter produces an immutable `LaunchRequest` (the command/path as values)
+submitted once; a program started from it is placed on the workspace
+current when its window maps, unless a `workspace:` rule says otherwise.
+
+**The bar's workspace numbers** are laid out by `BarLayout.h`, shared by
+drawing and click hit-testing so the boxes tile the strip exactly; a left
+click on number N is the same transition as `Super+N`. **Floating
+windows** form a tier above the tiles: `ArrangeMonitor()` restacks the
+floating windows after every layout, ordered by a per-window "last raised"
+ticket (`ManagedWindow::RaiseSerial()`, the focused floating window always
+last) rather than by repository order, so their relative order is stable;
+`RestackTileBelowFloating()` puts a carried tile that was dropped without
+a swap back under that tier.
 
 `kohiko-settings` (`SettingsWindow`) is a separate ordinary
 application - not part of the `kohiko` process - with its own
@@ -920,6 +975,57 @@ where `kohiko` itself might not be running or reachable - `kohikoctl
 restore-config` and `configure-autologin` are the two examples that
 exist for exactly that reason (see each one's own header comment).
 
+## Testing and its limits
+
+`make test` (or `ctest` with CMake) runs, in order: unit tests of the pure
+logic (`WindowRule`, `WindowRuleStore`, `WindowRuleDraft`,
+`ChooseWindowModel`, the BSP tree, autostart planning, config migration,
+event-loop scheduling, bar layout, the operation worker, ...) and then
+live tests that start the real `kohiko` on a private Xvfb display and
+drive it with synthetic X11 clients (`tests/live/x11_test_client`), real
+XTEST input (`x11_input`) and an X-server-side probe (`x11_probe`:
+stacking order, pixels, grabs). The window-rule tests specifically:
+
+- `test_windowrule` / `test_windowrulestore` - the selectors, parsing,
+  precedence (including file-order independence, per-property
+  inheritance and missing/mismatched role/type) and the one-line-per-rule
+  store;
+- `test_choosewindowmodel` / `test_windowruledraft` - the dialog's kinds
+  and keys, and Settings' row editing: role/type survive other edits, each
+  kind saves/resets independently;
+- `test_zen_window_rules_live.sh` - the two Zen window kinds as synthetic
+  clients, placement under real `kohiko`, config round trip and reload,
+  the identity refresh and the rule-match log;
+- `test_zen_chooser_dialog_live.sh` - the real dialog opened by the real
+  `Super+Shift+W` binding and driven with real key events, then the saved
+  config and the placement of newly opened windows; plus a start-up smoke
+  test of `kohiko-settings`;
+- `test_version_consistency.sh` - `include/Version.h` is the one version
+  source; the changelog's newest heading, the README's current-version
+  line and the start-up banner must agree with it.
+
+What this does **not** establish, and which is stated again in
+`CHANGELOG.md`:
+
+- **No test has run against a real Zen Browser.** Synthetic clients
+  carry the properties collected from a real Zen; whether Zen sets them
+  before it maps the window is not tested. `kohikoctl clients`, the
+  rule-match log lines and `xprop` are how to check a real window.
+- **No real Bluetooth, NetworkManager or PipeWire** and no multi-monitor
+  hardware: the native apps are exercised against a scripted fake D-Bus
+  and a single Xvfb screen.
+- **The Settings window is not driven by an automated test**: its editing
+  model is unit-tested; the window itself is only started under Xvfb.
+  Neither is how any window *looks* (text rendering) asserted, except by
+  the few pixel-probe tests (e.g. the taskbar's workspace-number
+  highlight), which need a real Xft - they cannot pass where Xft is
+  replaced by a stub.
+- Tests that need D-Bus, libsvg or PipeWire development files (the
+  native-app unit and live tests, `test_networkmanagerclient`) are only
+  built when `pkg-config` finds them, and `test_xembed_dock_grace.sh`
+  needs `xwininfo`; they are skipped otherwise - check the `make test`
+  output for the skips rather than assuming they ran.
+
 ## Known limitations / recommendations for the next session
 
 - **`kohiko-audio-tray`'s native notification toasts position against
@@ -946,17 +1052,16 @@ exist for exactly that reason (see each one's own header comment).
   `VerticalLayout`/`HorizontalLayout`/similar if a fourth app or a
   significantly different page shape is ever added; not worth
   retrofitting onto the existing three pages for its own sake.
-- **No automated tests for the UI toolkit or the three newer apps.**
-  The WM core has a BSP-tree unit test suite (see Phase 1 in
-  `PROJECT_HISTORY.md`); the UI toolkit and
-  `kohiko-audio`/`kohiko-network`/`kohiko-bluetooth` have none. All
-  verification this session was manual (Xvfb screenshots, `xdotool`-
-  driven interaction, an AddressSanitizer build for the use-after-free
-  bug). A lightweight widget-tree test harness - even just "build page
-  X with fake backend data, assert on the resulting `Rect`s or a
-  rendered screenshot's pixels" - would have caught the coordinate and
-  use-after-free bugs this session found by hand, faster and before
-  they shipped.
+- **Automated coverage of the UI toolkit and the three native apps is
+  partial.** There are unit tests for the pure parts (`OperationWorker`,
+  `BarLayout`, the scroll hit-testing and the Bluetooth/Network window
+  models) and live tests against a scripted fake D-Bus and synthetic
+  input (`tests/test_ui_event_queue_live.sh`, `test_tray_contract_live.sh`,
+  `test_native_responsive_live.sh`, `test_audio_notification_live.sh`) -
+  see [Testing and its limits](#testing-and-its-limits). There is still no
+  widget-tree harness that builds a page against fake backend data and
+  asserts on its `Rect`s or rendered pixels, which is what caught the
+  coordinate and use-after-free bugs the original session found by hand.
 - **The coordinate convention is a manual discipline, not an enforced
   one.** See [The coordinate convention](#the-coordinate-convention-and-why-it-matters) -
   nothing stops a future widget from caching an absolute rect the way

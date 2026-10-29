@@ -28,7 +28,13 @@ static WindowRule P(const std::string& text)
     WindowRule rule;
     std::string error;
     if (!WindowRule::Parse(text, rule, &error))
-        std::printf("  (unexpected parse failure for [%s]: %s)\n", text.c_str(), error.c_str());
+    {
+        // A rule this helper is asked to build must be valid: a failed
+        // parse would leave an empty rule that "does not match" anything,
+        // and a test of "X must not match" would then pass for nothing.
+        ++g_fail;
+        std::printf("  FAIL: (unexpected parse failure for [%s]: %s)\n", text.c_str(), error.c_str());
+    }
     return rule;
 }
 
@@ -448,6 +454,123 @@ int main()
         Check(P("app:zen role:browser workspace:3") == P("APP:ZEN ROLE:BROWSER workspace:3"), "case of keys and values is irrelevant to equality");
         Check(!(P("app:zen role:browser workspace:3") == P("app:zen role:PictureInPicture workspace:3")), "rules differing only in role are different rules");
         Check(!(P("app:zen workspace:3") == P("app:zen role:browser workspace:3")), "a scoped rule is not equal to the generic one");
+    }
+
+    std::printf("\nZen Browser: the normal window and its Picture-in-Picture window (the properties collected from a real Zen on Arch/KohikoDE):\n");
+    {
+        // WM_CLASS = "Navigator", "zen"  (instance first, class second)
+        // WM_WINDOW_ROLE = "browser"      _NET_WM_WINDOW_TYPE_NORMAL
+        WindowIdentity browser;
+        browser.className = "zen"; browser.instanceName = "Navigator";
+        browser.title = "KohikoDE Session Launch \xE2\x80\x94 Zen Browser";
+        browser.role = "browser"; browser.windowType = "normal";
+
+        // WM_CLASS = "Toolkit", "zen"
+        // WM_WINDOW_ROLE = "PictureInPicture"   _NET_WM_WINDOW_TYPE_UTILITY
+        WindowIdentity pip;
+        pip.className = "zen"; pip.instanceName = "Toolkit";
+        pip.title = "Picture-in-Picture";
+        pip.role = "PictureInPicture"; pip.windowType = "utility";
+
+        // The instance/class order is not interchangeable: a window whose
+        // CLASS is "Navigator" is not "zen", whatever its instance says.
+        WindowIdentity reversed = browser;
+        reversed.className = "Navigator"; reversed.instanceName = "zen";
+        Check(!P("app:zen workspace:1").Matches(reversed), "WM_CLASS order: class \"Navigator\" / instance \"zen\" is NOT the application zen");
+        Check(P("app:zen workspace:1").Matches(browser) && P("app:zen workspace:1").Matches(pip), "app:zen matches both windows (same class, different instance)");
+
+        // The three rules the user wants, and they do not depend on file order.
+        const std::string generic = "app:zen workspace:2";
+        const std::string normal  = "app:zen role:browser workspace:3 horizontal:left mode:tiled";
+        const std::string video   = "app:zen role:PictureInPicture workspace:5 horizontal:right mode:floating";
+
+        std::vector<std::vector<std::string>> orders = {
+            {generic, normal, video}, {video, normal, generic}, {normal, generic, video},
+            {video, generic, normal}, {generic, video, normal}, {normal, video, generic}};
+
+        bool allOrdersRight = true;
+
+        for (const auto& order : orders)
+        {
+            std::vector<WindowRule> rules;
+            for (const std::string& text : order) rules.push_back(P(text));
+
+            WindowRuleEffect b = ResolveWindowRules(rules, browser);
+            WindowRuleEffect v = ResolveWindowRules(rules, pip);
+
+            allOrdersRight = allOrdersRight &&
+                b.forceWorkspace == 3 && b.horizontal == WindowRule::Horizontal::Left && b.forceTile && !b.forceFloat &&
+                v.forceWorkspace == 5 && v.horizontal == WindowRule::Horizontal::Right && v.forceFloat && !v.forceTile;
+        }
+
+        Check(allOrdersRight, "in all 6 file orders: the browser gets ITS rule (ws3, left, tiled) and Picture-in-Picture gets ITS rule (ws5, right, floating)");
+
+        // MatchingWindowRules: the generic rule is applied first, the specific one last.
+        std::vector<WindowRule> rules = {P(video), P(generic), P(normal)};
+        std::vector<WindowRule> matched = MatchingWindowRules(rules, pip);
+        Check(matched.size() == 2 && matched[0] == P(generic) && matched[1] == P(video),
+              "MatchingWindowRules(PiP): only the generic and the PiP rule, generic first (least specific first)");
+        matched = MatchingWindowRules(rules, browser);
+        Check(matched.size() == 2 && matched[0] == P(generic) && matched[1] == P(normal),
+              "MatchingWindowRules(browser): only the generic and the browser rule - never the PiP rule");
+
+        // Only the generic rule: both windows get it (it is application-wide).
+        WindowRuleEffect g1 = ResolveWindowRules({P(generic)}, browser);
+        WindowRuleEffect g2 = ResolveWindowRules({P(generic)}, pip);
+        Check(g1.forceWorkspace == 2 && g2.forceWorkspace == 2, "a generic Zen rule applies to both window kinds");
+
+        // A generic rule never overrides what a specific rule says; it only fills in what the specific rule leaves at Default.
+        WindowRuleEffect partial = ResolveWindowRules(
+            {P("app:zen workspace:2 horizontal:left mode:tiled"), P("app:zen role:PictureInPicture mode:floating")}, pip);
+        Check(partial.forceFloat && !partial.forceTile, "mode: the specific rule's floating beats the generic tiled");
+        Check(partial.forceWorkspace == 2 && partial.horizontal == WindowRule::Horizontal::Left,
+              "workspace/horizontal the specific rule leaves at Default are inherited from the generic rule");
+
+        // ...and the specific rule's OWN value always beats the generic one's, for every property.
+        WindowRuleEffect full = ResolveWindowRules(
+            {P("app:zen role:PictureInPicture workspace:5 horizontal:right vertical:bottom mode:fullscreen"),
+             P("app:zen workspace:2 horizontal:left vertical:top mode:tiled")}, pip);
+        Check(full.forceWorkspace == 5 && full.horizontal == WindowRule::Horizontal::Right &&
+              full.vertical == WindowRule::Vertical::Bottom && full.forceFullscreen && !full.forceTile,
+              "workspace, horizontal, vertical and mode each come from the specific rule, even listed BEFORE the generic one");
+
+        // Missing / mismatched metadata never lets a role rule broaden.
+        WindowIdentity noRole = pip; noRole.role.clear();
+        WindowIdentity noType = pip; noType.windowType.clear();
+        WindowIdentity wrongRole = pip; wrongRole.role = "browser";
+        std::vector<WindowRule> onlyPip = {P("app:zen role:PictureInPicture type:utility workspace:5")};
+        Check(!onlyPip[0].Matches(noRole) && !onlyPip[0].Matches(noType) && !onlyPip[0].Matches(wrongRole) && onlyPip[0].Matches(pip),
+              "role+type rule: matches the real PiP window, never one with the role or type missing or different");
+        Check(ResolveWindowRules(onlyPip, noRole).forceWorkspace == 0 &&
+              ResolveWindowRules(onlyPip, wrongRole).forceWorkspace == 0,
+              "...so its workspace is not applied to such a window (no broadening to application-wide)");
+        Check(!P("app:zen role:PictureInPicture workspace:1").Matches(browser), "the PiP rule does not match the normal window");
+        Check(!P("app:zen role:browser workspace:1").Matches(pip), "the browser rule does not match the PiP window");
+        Check(P("app:zen type:utility workspace:1").Matches(pip) && !P("app:zen type:utility workspace:1").Matches(browser), "type:utility separates them too");
+        Check(P("app:zen type:NORMAL workspace:1").Matches(browser) && P("app:zen type:_NET_WM_WINDOW_TYPE_UTILITY workspace:1").Matches(pip),
+              "type: accepts the full atom name and any case");
+
+        // A rule with a role that the same-specificity-count other rule lacks: equal specificity -> file order (documented).
+        WindowRuleEffect tie = ResolveWindowRules({P("app:zen role:PictureInPicture workspace:5"), P("app:zen type:utility workspace:6")}, pip);
+        Check(tie.forceWorkspace == 6, "equally specific rules (role vs type): the later line wins");
+    }
+
+    std::printf("\nRuleScope::Describe and the window-type list:\n");
+    {
+        RuleScope none, role, type, both;
+        role.role = "PictureInPicture";
+        type.windowType = "utility";
+        both.role = "browser"; both.windowType = "normal";
+        Check(none.Describe() == "All windows", "empty scope: All windows");
+        Check(role.Describe() == "role PictureInPicture", "role scope");
+        Check(type.Describe() == "type utility", "type scope");
+        Check(both.Describe() == "role browser + type normal", "role+type scope");
+        Check(WindowRule::KnownWindowTypes().size() == 14 && WindowRule::KnownWindowTypes().front() == "normal",
+              "the 14 known window types, normal first");
+        bool allNormalise = true;
+        for (const std::string& t : WindowRule::KnownWindowTypes())
+            allNormalise = allNormalise && WindowRule::NormalizeWindowType(t) == t;
+        Check(allNormalise, "every listed type normalises to itself (the Settings cycle and the parser agree)");
     }
 
     std::printf("\n%d passed, %d failed\n", g_pass, g_fail);

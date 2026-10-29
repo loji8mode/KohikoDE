@@ -14,6 +14,12 @@ standalone native audio/network/Bluetooth apps (see
 piece is drawn the same plain-Xlib way, with no Qt, GTK, or compositor
 dependency anywhere in the stack.
 
+**Current version: 0.22.1** - the *Kohiko Rules* line: where a window opens
+is decided by the layout and by the [Window rules](#window-rules) you write
+explicitly; nothing is ever learned from where you put windows. See
+[CHANGELOG.md](CHANGELOG.md) for what changed in each release and the
+known limitations of the current one.
+
 Kohiko is **not** a Hyprland replacement and it isn't Wayland - Hyprland is
 a Wayland compositor, which means competing with it feature-for-feature
 would mean writing a compositor, a renderer, and an input stack from
@@ -584,11 +590,20 @@ What it gives you, on top of hand-editing `kohiko.conf`:
 
 `windowrule=` (under Window Rules) and `monitor=` (under Monitors) each
 get a **structured, row-based editor**: one row per rule. A window rule
-is two lines - the application (plus optional `instance:`/`title:`
-fields to narrow it) and then its Workspace field and click-to-cycle
-**Horizontal** (Default/Left/Right), **Vertical** (Default/Top/Bottom)
-and **Mode** (Default/Tiled/Floating/Fullscreen) buttons, where
-*Default* always means "this rule has no opinion about that". A monitor
+is three lines - the application (plus optional `instance:`/`title:`
+fields to narrow it); then its **window kind**, a `role:` field (the
+window's `WM_WINDOW_ROLE`) and a click-to-cycle **Type:** button (Any,
+normal, dialog, utility, ...) with a caption saying what the rule covers
+(`Window kind: All windows`, `role PictureInPicture`, ...); then its
+Workspace field and click-to-cycle **Horizontal** (Default/Left/Right),
+**Vertical** (Default/Top/Bottom) and **Mode**
+(Default/Tiled/Floating/Fullscreen) buttons, where *Default* always means
+"this rule has no opinion about that". Leave role and type empty for a
+rule about every window of the application; fill them for one kind of
+window - a normal browser window and its Picture-in-Picture overlay are
+two rows, and editing, adding or deleting one never touches the other
+(see [One application, several kinds of window](#one-application-several-kinds-of-window)).
+Editing any other field of a row keeps its role and type. A monitor
 rule is an output name and a workspace number. Tab moves between a
 row's fields and on to the next row, and each row gets its own `x` to
 remove it, plus an "+ Add rule" button below the last one. What
@@ -676,13 +691,17 @@ place.
 
 Focus a window and press **`Super+Shift+W`** (`choose_window`; or run
 `kohikoctl dispatch choose_window`). A small dialog opens for that
-window's application:
+window. It is told what the window says about itself - read from X11 at
+that moment, not remembered from when it first appeared:
 
 ```
 Window Rules
-Application: firefox
-class: firefox   instance: Navigator
+Application: zen
+class: zen   instance: Toolkit
+role: PictureInPicture   type: utility
+Rule matches: app:zen role:PictureInPicture  (only windows with role PictureInPicture)
 
+Applies to   [All windows] [role PictureInPicture] [type utility] [role PictureInPicture + type utility]
 Workspace    [Default] [1] [2] [3] [4]
 Horizontal   [Default] [Left] [Right]
 Vertical     [Default] [Top] [Bottom]
@@ -691,18 +710,45 @@ Mode         [Default] [Tiled] [Floating] [Fullscreen]
 [Reset rule]                          [Cancel] [Save]
 ```
 
-Every row has an explicit **Default** meaning "no opinion", so you can say
-"always on workspace 3" without touching position, or "always on the
-right" without touching the workspace. It opens showing the rule already
-saved for this application (if any); **Save** writes it, **Cancel**
-changes nothing, **Reset rule** deletes it - after which that application
-is back to Kohiko's default placement. Keyboard: Up/Down (or `k`/`j`)
-pick a row, Left/Right (or `h`/`l`) change the choice, `1`-`9` pick a
-workspace directly, Enter saves, Delete resets, Escape cancels. A rule
-applies to windows opened *afterwards*; saving never moves a window
-that's already open. Only the dialog's `Save`/`Reset` write anything:
-`kohiko-choose-window` is a separate program (it needs nothing but X11
-and Xft) that edits one `windowrule=` line and tells Kohiko to reload.
+**Applies to** says *which windows of this application* the rule is for,
+and the `Rule matches:` line shows the exact selectors that will be
+written, so you always see whether you are editing a rule for the whole
+application or for one kind of window. A browser and its
+Picture-in-Picture overlay share a `WM_CLASS` (`zen`) but not a
+`WM_WINDOW_ROLE` (`browser` vs `PictureInPicture`), so they can have
+independent rules - see [One application, several kinds of
+window](#one-application-several-kinds-of-window). The row offers `All
+windows` plus a kind for each of the window's role, its type and the two
+together, but only for what the window really declared: a window with no
+role and no type has just one kind, and then the row is not shown. Each
+kind keeps its **own** values, **Save** and **Reset rule** act only on
+the kind that is selected, and no other rule - the application-wide one
+included - is ever touched. The dialog opens on the rule that applies to
+the window (the most specific one already saved); if the application
+already has role/type rules but this window's kind has none yet, it opens
+on this window's own role, so a new kind gets its own rule instead of
+rewriting the application-wide one; otherwise it opens on `All windows`.
+You can change the kind in the dialog before saving.
+
+Every other row has an explicit **Default** meaning "no opinion", so you
+can say "always on workspace 3" without touching position, or "always on
+the right" without touching the workspace. **Save** writes the selected
+kind's rule, **Cancel** changes nothing, **Reset rule** deletes that
+kind's rule - after which those windows are back to the next less
+specific rule, or Kohiko's default placement. Keyboard: Up/Down (or
+`k`/`j`) pick a row, Left/Right (or `h`/`l`) change the choice (on the
+`Applies to` row, the kind), `1`-`9` pick a workspace directly, Enter
+saves, Delete resets, Escape cancels. A rule applies to windows opened
+*afterwards*; saving never moves a window that's already open. Only the
+dialog's `Save`/`Reset` write anything: `kohiko-choose-window` is a
+separate program (it needs nothing but X11 and Xft) that edits one
+`windowrule=` line and tells Kohiko to reload.
+
+`choose_window` takes an optional scope to open the dialog on a specific
+kind: `choose_window app`, `choose_window role`, `choose_window type` or
+`choose_window role+type` (the window must have declared that role/type;
+otherwise nothing opens and the reason is logged). Without one, the dialog
+picks as described above.
 
 Scripting uses the same code, without a window:
 
@@ -711,7 +757,18 @@ kohiko-choose-window --list
 kohiko-choose-window --app firefox --show
 kohiko-choose-window --app firefox --set "workspace:3 horizontal:right vertical:top mode:tiled"
 kohiko-choose-window --app firefox --delete
+
+# one kind of window of an application (the application-wide rule is untouched):
+kohiko-choose-window --app zen --role PictureInPicture --scope role \
+    --set "workspace:5 horizontal:right mode:floating"
+kohiko-choose-window --app zen --role browser --scope role --show
+kohiko-choose-window --app zen --role PictureInPicture --scope role --delete
 ```
+
+`--scope app|role|type|role+type` (default `app`) says which rule the
+command acts on; `--role` and `--type` give the role/type that scope is
+about (`--scope role` needs `--role`, and so on - a scope the window
+cannot satisfy is an error, never a broader rule).
 
 ### The rule format
 
@@ -731,10 +788,13 @@ least one **selector** and at least one **property**.
 | `class:<text>` | case-insensitive substring of `WM_CLASS` class |
 | `instance:<text>` | case-insensitive substring of `WM_CLASS` instance |
 | `title:<text>` | case-insensitive substring of the window title |
+| `role:<name>` | the window's `WM_WINDOW_ROLE`: **exact**, case-insensitive (`role:browser` never matches `PictureInPicture` or `browser-popup`). A window with no role never matches. |
+| `type:<name>` | the window's primary `_NET_WM_WINDOW_TYPE` - `normal`, `dialog`, `utility`, `toolbar`, `menu`, `splash`, `dropdown_menu`, `popup_menu`, `tooltip`, `notification`, `combo`, `dnd`, `desktop` or `dock` (the full `_NET_WM_WINDOW_TYPE_*` atom name is accepted too). Exact. A window that declares no type never matches. |
 
 All selectors given must match. Spaces and `%` in a value are written
 `%20`/`%25` (`app:My%20App`). `xprop` (click the window) shows a
-window's real class/instance/title.
+window's real class/instance/title/role/type (see
+[Checking what a window really says](#checking-what-a-window-really-says)).
 
 | Property | Meaning |
 |---|---|
@@ -760,12 +820,17 @@ by `general.outer_gap`). Horizontal is applied before vertical.
 Position is ignored for fullscreen.
 
 **Several rules match one window?** They are applied from the least to
-the most specific (the number of selectors), and equally specific rules
-in file order - so for each property the most specific rule wins, and a
-later line beats an earlier one of equal specificity. `app:telegram
-workspace:2` plus `class:telegram title:photo workspace:8` therefore sends
-only the media viewer to workspace 8. If two matching rules disagree on
-the mode, only one mode ever applies (the later/more specific one).
+the most specific (the number of selectors; `role:` and `type:` each
+count as one), and equally specific rules in file order. For each
+property the most specific rule that sets it wins, and a property a rule
+leaves at Default is inherited from the less specific rules; a later line
+beats an earlier one only between rules of equal specificity. The order
+of the lines never decides between rules of *different* specificity.
+`app:telegram workspace:2` plus `class:telegram title:photo workspace:8`
+therefore sends only the media viewer to workspace 8. If two matching
+rules disagree on the mode, only one mode ever applies (the most
+specific one). `nofullscreen` is cumulative: if any matching rule has it,
+real fullscreen is denied.
 
 **Typos are loud, not silent.** A line Kohiko can't apply exactly as
 written - an unknown key, a bad value, no selector (it would match
@@ -778,6 +843,98 @@ open when Kohiko started) > a window rule > a restored session > a
 `workspace<N>=` autostart > its transient parent > the current workspace.
 `session.restore_priority` defaults to `config`, which keeps your rules
 authoritative.
+
+### One application, several kinds of window
+
+Some programs open different kinds of window under one `WM_CLASS` and
+tell them apart by `WM_WINDOW_ROLE` and `_NET_WM_WINDOW_TYPE`. A Zen
+Browser (and Firefox) main window and its Picture-in-Picture overlay are
+the example this was built for. The properties collected from a real Zen
+Browser on Arch Linux:
+
+| | normal window | Picture-in-Picture window |
+|---|---|---|
+| `WM_CLASS` (instance, class) | `"Navigator", "zen"` | `"Toolkit", "zen"` |
+| `WM_WINDOW_ROLE` | `browser` | `PictureInPicture` |
+| `_NET_WM_WINDOW_TYPE` | `_NET_WM_WINDOW_TYPE_NORMAL` | `_NET_WM_WINDOW_TYPE_UTILITY` |
+| `WM_TRANSIENT_FOR` | not set | not set |
+
+Both are the application `zen`, so `app:zen` matches both; the role (and
+type) tell them apart. Three rules - written by the dialog, by Settings
+or by hand - keep them independent:
+
+```ini
+windowrule=app:zen workspace:2
+windowrule=app:zen role:browser workspace:3 horizontal:left mode:tiled
+windowrule=app:zen role:PictureInPicture workspace:5 horizontal:right mode:floating
+```
+
+- The **plain `app:zen` rule** applies to both windows - unless a more
+  specific rule sets the same property. With only this rule, both open on
+  workspace 2.
+- The **`role:browser` rule** applies only to the normal window, and
+  wins over `app:zen` for every property it sets (here: workspace 3,
+  left, tiled).
+- The **`role:PictureInPicture` rule** applies only to the video
+  window (workspace 5, right, floating).
+- **File order does not matter** between them: the specific rules win
+  whether they are written before or after the plain one. A specific rule
+  that leaves a property at Default (say no `workspace:`) takes it from
+  the plain rule.
+- **Missing or different metadata never widens a rule.** A window that
+  has no role (or a different role) does not match a `role:` rule at all
+  - the rule is not treated as `app:zen` - and the same for `type:`. It
+  still gets the plain `app:zen` rule, if there is one.
+- Matching uses the window's properties as read from X11 when it is first
+  managed: `WM_CLASS` is (instance, class) in that order and the class is
+  the application; `WM_WINDOW_ROLE` is read by that property name; and
+  `_NET_WM_WINDOW_TYPE` is compared as a real atom, not as text. (Kohiko
+  also re-reads them when a client changes them, so `kohikoctl clients`
+  and the dialog see the current values - but rules are only applied when
+  a window first appears.)
+
+**Creating, editing and deleting these rules.**
+- **Dialog**: focus the normal window, press `Super+Shift+W`, choose the
+  `role browser` kind under *Applies to*, set workspace/position/mode,
+  Save. Do the same from the Picture-in-Picture window with
+  `role PictureInPicture`. Saving either one leaves the other and the
+  plain `app:zen` rule exactly as they were.
+- **Settings > Window Rules**: every rule is a row. Besides the
+  application/instance/title cells it has a **`role:`** cell and a
+  **`Type:`** button (click to cycle Any, normal, dialog, utility, ...)
+  on its own line, with a `Window kind:` caption (`All windows`, `role
+  PictureInPicture`, ...), then the workspace/position/mode choices.
+  Editing any cell keeps the rest of the row, including its role and
+  type; `x` deletes just that row; `+ Add rule` adds a new one. Clearing
+  the `role:` cell is an explicit edit: that rule then applies to every
+  window of the application.
+- **By hand** in `kohiko.conf`, as above.
+
+### Checking what a window really says
+
+To see what a window declares, click it after running:
+
+```sh
+xprop WM_CLASS WM_WINDOW_ROLE _NET_WM_WINDOW_TYPE WM_TRANSIENT_FOR _NET_WM_PID _NET_WM_NAME
+```
+
+(`WM_CLASS` prints instance first, class second.) To see what Kohiko read
+from X11 for every window, including role and type, use
+`kohikoctl clients` (or `kohikoctl activewindow` for the focused one).
+The log says which rules matched each newly managed window and which
+rules written for the same application did *not*, for example:
+
+```
+window 83886085 (class "zen", instance "Toolkit", role "PictureInPicture", type "utility") matched 2 window rule(s), least specific first: app:zen workspace:2; app:zen role:PictureInPicture workspace:5 horizontal:right mode:floating
+window 83886085 (...) did not match these rules for the same application: app:zen role:browser workspace:3 horizontal:left mode:tiled
+```
+
+**What has and has not been verified.** The Zen behaviour above is tested
+against synthetic X11 clients that carry exactly the properties listed in
+the table (under Xvfb), including the real dialog driven with real key
+events. That has **not** been confirmed with a running Zen Browser: if a
+rule does not apply to your real Zen, compare `kohikoctl clients` and the
+log lines above with the `xprop` output.
 
 ### What happens with no rule
 
@@ -1345,16 +1502,38 @@ Kohiko's own XDG autostart handling - see [XDG
 autostart](#xdg-autostart-desktop-entries) above for exactly what runs
 them and when, since `auto_start_programs=` is a different,
 config-driven mechanism that has nothing to do with these three.
-Left-clicking `kohiko-audio-tray` opens `kohiko-audio`,
-and right-click opens a quick mute/device-switch menu; left-clicking
-`kohiko-network-tray`/`kohiko-bluetooth-tray` opens a quick popup, and
-right-click opens the full app - this asymmetry matches how each one
-is most often used (audio's quick actions are reached for constantly;
-network/Bluetooth's aren't). The audio tray widget's scroll wheel
+All three tray widgets share **one mouse convention**: **left click opens
+the application's main window** (or raises it, unchanged, if it is
+already open - never a second copy), and **right click opens a compact
+quick-action menu** whose last item is "Open ...". (Before 0.22.1 the
+network and Bluetooth widgets had the two swapped relative to audio.) A
+quick-menu action runs only after the menu has let go of the pointer and
+keyboard, so a slow action can no longer freeze the desktop's input, and
+a quick second click on the icon never runs the menu's first item. The audio tray widget's scroll wheel
 adjusts the default output's volume directly. Clicking a tray widget's
 "open the full app" action raises the already-running window instead
 of launching a second one, the same single-instance behavior as
 opening the app any other way.
+
+**Slow operations never freeze a window.** In the Bluetooth and Network
+windows, pairing, connecting, disconnecting, forgetting, trusting, VPN,
+radio/power and scan operations run on worker threads with their own
+private D-Bus connections (a Bluetooth connect can take 15 s, pairing 30
+s; connecting to a Wi-Fi network may wait on a keyring prompt), so the
+window keeps redrawing and responding. While one runs the control shows
+"Working..." and is disabled, a second copy of the same operation is
+refused, and when it finishes - or fails - the result is reported on the
+device/network and as a desktop notification instead of being swallowed.
+Closing the window never waits for a running operation. The audio
+(PipeWire) window needed none of this: its operations were already
+asynchronous. See [docs/AUDIO_NETWORK_BLUETOOTH.md](docs/AUDIO_NETWORK_BLUETOOTH.md#tray-mouse-contract-and-slow-operations)
+for the design.
+
+**How this was verified.** The native apps were tested under Xvfb against
+a scripted fake D-Bus (no real BlueZ, NetworkManager or PipeWire) and
+synthetic input; they have **not** been run against real Bluetooth
+hardware, a real NetworkManager with real networks, or a real PipeWire
+graph in this release's testing.
 
 None of these three apps or their tray widgets are built at all if
 `libdbus-1-dev`/`libpipewire-0.3-dev`/`librsvg2-dev` aren't present at
@@ -1458,6 +1637,28 @@ Both left-click gestures share one bind (`mouse.swap=`, default
 under the cursor is tiled or floating. Resize is separately rebindable
 via `mouse.resize=` (e.g. `SUPER+BTN2` for the middle button).
 
+### The bar: workspace numbers
+
+**Left-click a workspace number on the bar to switch to that workspace** -
+exactly the same transition as `Super+<N>` (an open Launcher follows,
+see above). The number boxes tile the strip with no gaps, so a click near
+an edge activates the number it is on and never its neighbour; a right
+or middle click, or a click beside the numbers, does nothing. Every
+configured workspace has a number to click (`workspace.count`).
+
+### Floating windows: stacking
+
+Tiled windows always sit *below* the floating ones: a floating window is
+never covered by a tile. Among floating windows the one you raised or
+focused most recently is on top, and the order is stable - two
+overlapping floating windows do not swap places because of a layout
+change or a workspace round trip. A newly opened floating window (the
+rule dialog included) comes to the top. `Super`+drag grabs the floating
+window that is actually on top. When you carry a tile with `Super`+drag
+and drop it with nothing to swap with (its own slot, a gap, a floating
+window), it goes back *under* the floating tier instead of staying above
+every floating window it overlaps.
+
 ## The launcher (Super+D)
 
 `Super+D` opens a small centered input box - about a twelfth of the
@@ -1495,6 +1696,30 @@ doesn't watch `$HOME` the same way (that would mean a watch per
 subdirectory, for comparatively little benefit); `Super+Shift+D` or
 `kohikoctl reloadlauncher` refreshes both immediately, live, if you ever
 need to force it.
+
+### While the Launcher is open
+
+- **Your shortcuts still work.** A key that is one of your configured
+  `bind=` shortcuts goes to Kohiko, not to the Launcher's input field -
+  `Super+3` switches to workspace 3 instead of typing a "3". Everything
+  else (digits, letters, Enter, Escape, the arrows) is the Launcher's.
+- **It follows a workspace switch.** Switching workspace with it open -
+  by keyboard, by clicking a workspace number on the bar, or with
+  `kohikoctl` - keeps its query, selection and keyboard focus and moves
+  it to the monitor that is focused now. When it closes, focus goes to a
+  window on the workspace you are *on*, not to the (now hidden) window
+  you opened it from.
+- **A program opens where you are.** A window started from the Launcher
+  appears on the workspace that is current when the *window* appears,
+  never on the one the Launcher was opened on - so starting something
+  slow and switching away does not drag you back. An explicit
+  `workspace:` [window rule](#window-rules) still wins.
+- **Enter launches exactly what was selected.** The selection is taken
+  once, as a snapshot (`LaunchRequest`: the command or path as values),
+  and submitted exactly once; anything typed or any list change after
+  Enter cannot alter it. A launch that fails is cleaned up and does not
+  leave the Launcher stuck. `kohikoctl launcher` prints its state
+  (open, query, selection, position, current workspace) as JSON.
 
 ## The notepad (Super+N)
 
@@ -1936,8 +2161,11 @@ relative proportions, just applied to whichever axis now applies.
   and whether it is tiled, floating or fullscreen, with
   `Super+Shift+W` (`kohiko-choose-window`), the Settings Window Rules
   tab, or by hand. Every aspect is independent and optional, matching
-  is by the application's `WM_CLASS`, and Kohiko never learns any of
-  it from what you do: moving, dragging, resizing or swapping windows
+  is by the application's `WM_CLASS` - and, for an application that
+  opens different kinds of window (a browser and its Picture-in-Picture
+  overlay), by `role:`/`type:` as well, so each kind gets its own rule
+  (0.22.1: in the dialog's "Applies to" row and in Settings, not only by
+  hand) - and Kohiko never learns any of it from what you do: moving, dragging, resizing or swapping windows
   never creates or changes a rule. (This replaced the "adaptive
   placement" of 0.20.x-0.21.x, which is gone - see
   [Window rules](#window-rules).)
@@ -1963,8 +2191,10 @@ relative proportions, just applied to whichever axis now applies.
   you click, not just at the start or end.
 - **Structured `windowrule=`/`monitor=` editors in Kohiko Settings** -
   each rule is its own row (for a window rule: the application plus
-  optional `instance:`/`title:` fields, then Workspace and click-to-cycle
-  Horizontal/Vertical/Mode buttons that each have an explicit Default;
+  optional `instance:`/`title:` fields, a `role:` field and a click-to-
+  cycle `Type:` button for the window kind, then Workspace and click-to-
+  cycle Horizontal/Vertical/Mode buttons that each have an explicit
+  Default;
   for a monitor rule an output-name field and a workspace number), with
   its own "+ Add rule" button and a `x` to remove a row - no need to
   remember the underlying syntax by hand, even though what actually

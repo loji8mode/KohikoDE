@@ -51,7 +51,7 @@ DESKTOP_APP_ONLY_SRC := src/PipeWireClient.cpp src/NetworkManagerClient.cpp src/
 # ChooseWindowModel.cpp has no X11 in it but is part of that tool only.
 CHOOSER_SRC := src/ChooseWindowDialog.cpp src/ChooseWindowModel.cpp
 
-GUI_ONLY_SRC := src/SettingsWindow.cpp $(CHOOSER_SRC) $(DESKTOP_SHARED_SRC) $(DESKTOP_APP_ONLY_SRC)
+GUI_ONLY_SRC := src/SettingsWindow.cpp src/WindowRuleDraft.cpp $(CHOOSER_SRC) $(DESKTOP_SHARED_SRC) $(DESKTOP_APP_ONLY_SRC)
 
 SRC := $(filter-out $(GUI_ONLY_SRC),$(wildcard src/*.cpp))
 OBJ := $(patsubst src/%.cpp,build/%.o,$(SRC))
@@ -62,7 +62,7 @@ OBJ := $(patsubst src/%.cpp,build/%.o,$(SRC))
 # helpers) - deliberately NOT the whole $(SRC) list above, which is
 # full of WM-only code (BSP layout, EWMH, XRandr monitor handling,
 # ...) kohiko-settings has no use for.
-SETTINGS_SRC := src/SettingsWindow.cpp src/ConfigWriter.cpp src/ConfigSchema.cpp src/Config.cpp src/Utils.cpp src/Font.cpp src/WindowRule.cpp src/Logger.cpp
+SETTINGS_SRC := src/SettingsWindow.cpp src/WindowRuleDraft.cpp src/ConfigWriter.cpp src/ConfigSchema.cpp src/Config.cpp src/Utils.cpp src/Font.cpp src/WindowRule.cpp src/Logger.cpp
 SETTINGS_OBJ := $(patsubst src/%.cpp,build/%.o,$(SETTINGS_SRC))
 
 ifeq ($(shell pkg-config --exists xrandr && echo yes),yes)
@@ -247,10 +247,11 @@ ifeq ($(KOHIKO_HAVE_PIPEWIRE)-$(KOHIKO_HAVE_DBUS_PKG)-$(KOHIKO_HAVE_LIBRSVG),yes
     TEST_TRAY_REDRAW := build/tray_redraw_probe
 endif
 
-test: kohiko kohikoctl kohiko-choose-window build/x11_test_client build/test_bsptree build/test_launcherscoring build/test_windowrule build/test_windowrulestore build/test_autostartplan build/test_choosewindowmodel build/test_dbusvalue build/test_sessionstore build/test_configmigration build/test_recoverymode build/test_lockrecovery build/test_appdirwatcher build/test_autologinconfigurator build/test_consoleautologinconfigurator build/test_wallpapermanager build/test_desktopentry build/test_iconresolver build/test_eventloop build/test_windowplacementnotice build/test_rect_clamping build/test_notificationlayout build/test_devicenotificationdiff build/test_barlayout build/test_operationworker build/x11_input build/x11_probe build/lock_probe_app build/launch_or_raise_probe $(TEST_NETWORKMANAGERCLIENT) $(TEST_SCROLLHITTEST) $(TEST_NETWORKWINDOW) $(TEST_NETWORKMANAGER_LIVE_HARNESS) $(TEST_BLUETOOTHWINDOW) $(TEST_AUDIO_LIVE_DEPS) $(TEST_TRAY_REDRAW)
+test: kohiko kohikoctl kohiko-choose-window build/x11_test_client build/test_bsptree build/test_launcherscoring build/test_windowrule build/test_windowruledraft build/test_windowrulestore build/test_autostartplan build/test_choosewindowmodel build/test_dbusvalue build/test_sessionstore build/test_configmigration build/test_recoverymode build/test_lockrecovery build/test_appdirwatcher build/test_autologinconfigurator build/test_consoleautologinconfigurator build/test_wallpapermanager build/test_desktopentry build/test_iconresolver build/test_eventloop build/test_windowplacementnotice build/test_rect_clamping build/test_notificationlayout build/test_devicenotificationdiff build/test_barlayout build/test_operationworker build/x11_input build/x11_probe build/lock_probe_app build/launch_or_raise_probe $(TEST_NETWORKMANAGERCLIENT) $(TEST_SCROLLHITTEST) $(TEST_NETWORKWINDOW) $(TEST_NETWORKMANAGER_LIVE_HARNESS) $(TEST_BLUETOOTHWINDOW) $(TEST_AUDIO_LIVE_DEPS) $(TEST_TRAY_REDRAW)
 	./build/test_bsptree
 	./build/test_launcherscoring
 	./build/test_windowrule
+	./build/test_windowruledraft
 	./build/test_windowrulestore
 	./build/test_autostartplan
 	./build/test_choosewindowmodel
@@ -275,6 +276,8 @@ test: kohiko kohikoctl kohiko-choose-window build/x11_test_client build/test_bsp
 	sh tests/test_instance_lock_live.sh
 	sh tests/test_floating_stacking_live.sh
 	sh tests/test_zen_window_rules_live.sh
+	sh tests/test_zen_chooser_dialog_live.sh
+	sh tests/test_version_consistency.sh
 	sh tests/test_launcher_live.sh
 	sh tests/test_taskbar_click_live.sh
 	sh tests/test_kohiko_session.sh
@@ -365,10 +368,13 @@ build/ui_probe: tests/live/ui_probe.cpp $(FAKEBUS_SHARED_OBJ) $(DESKTOP_COMMON_O
 build/tray_contract_probe: tests/live/tray_contract_probe.cpp $(FAKEBUS_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) | build
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ $(LIBS) $(RSVG_LIBS) -pthread
 
-build/test_choosewindowmodel: tests/test_choosewindowmodel.cpp src/ChooseWindowModel.cpp src/WindowRule.cpp src/Config.cpp src/Utils.cpp src/Logger.cpp | build
+build/test_choosewindowmodel: tests/test_choosewindowmodel.cpp src/ChooseWindowModel.cpp src/WindowRuleStore.cpp src/WindowRule.cpp src/ConfigWriter.cpp src/Config.cpp src/Utils.cpp src/Logger.cpp | build
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
 
 build/test_autostartplan: tests/test_autostartplan.cpp src/AutostartPlan.cpp src/Utils.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
+
+build/test_windowruledraft: tests/test_windowruledraft.cpp src/WindowRuleDraft.cpp src/WindowRule.cpp src/Config.cpp src/Utils.cpp src/Logger.cpp | build
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
 
 build/test_windowrulestore: tests/test_windowrulestore.cpp src/WindowRuleStore.cpp src/WindowRule.cpp src/ConfigWriter.cpp src/Config.cpp src/Utils.cpp src/Logger.cpp | build

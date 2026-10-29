@@ -7,6 +7,7 @@
 #include <X11/Xlib.h>
 #include <X11/Xft/Xft.h>
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -34,15 +35,7 @@ struct ChooseWindowIdentity
     // "role PictureInPicture", "role browser + type normal", ... or "" for the whole application.
     std::string ScopeLabel() const
     {
-        std::string label;
-
-        if (!scope.role.empty())
-            label = "role " + scope.role;
-
-        if (!scope.windowType.empty())
-            label += std::string(label.empty() ? "" : " + ") + "type " + scope.windowType;
-
-        return label;
+        return scope.IsApplication() ? std::string() : scope.Describe();
     }
 };
 
@@ -60,14 +53,18 @@ class ChooseWindowDialog
 {
 public:
 
-    // `otherRuleCount`: how many OTHER rules (hand-written class:/title:
-    // ones) also apply to this window - shown as a note, since they
-    // interact with the one being edited.
+    // `otherRules(scope)`: how many OTHER rules (hand-written class:/title:
+    // ones, or a rule of another kind for this application) also apply
+    // to this window while a rule of `scope` is being edited - shown as
+    // a note, since they interact with the one being edited. Asked again
+    // whenever the selected kind changes.
+    using OtherRuleCounter = std::function<int(const RuleScope&)>;
+
     ChooseWindowDialog(
         const Config& config,
         const ChooseWindowIdentity& identity,
         ChooseWindowModel& model,
-        int otherRuleCount);
+        OtherRuleCounter otherRules);
 
     ~ChooseWindowDialog();
 
@@ -105,7 +102,8 @@ private:
     const Config& m_config;
     ChooseWindowIdentity m_identity;
     ChooseWindowModel& m_model;
-    int m_otherRuleCount;
+    OtherRuleCounter m_otherRules;
+    bool m_reserveNote = false;
 
     Display* m_display = nullptr;
     int m_screen = 0;
@@ -123,10 +121,12 @@ private:
     int m_width = 0;
     int m_height = 0;
     std::vector<Hit> m_hits;
-    std::vector<int> m_rowLabelY;   // baseline of each row's label
+    std::vector<int> m_rowLabelY;   // baseline of each row's label, indexed by ChooseWindowModel::Row
     int m_headerBaseline = 0;
     int m_appBaseline = 0;
     int m_detailBaseline = 0;
+    int m_kindBaseline = 0;      // role / type this window declared
+    int m_selectorBaseline = 0;  // the selectors the rule being edited has
     int m_noteBaseline = 0;
     int m_hintBaseline = 0;
 };

@@ -75,6 +75,7 @@ file(GLOB KOHIKO_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/*.cpp)
 # the GUI-only exclusion, for the same "lightweight WM binary" reason.
 list(REMOVE_ITEM KOHIKO_SOURCES
     ${CMAKE_SOURCE_DIR}/src/SettingsWindow.cpp
+    ${CMAKE_SOURCE_DIR}/src/WindowRuleDraft.cpp
     ${CMAKE_SOURCE_DIR}/src/ChooseWindowDialog.cpp
     ${CMAKE_SOURCE_DIR}/src/ChooseWindowModel.cpp
     ${CMAKE_SOURCE_DIR}/src/DBusValue.cpp
@@ -148,6 +149,7 @@ target_compile_options(kohikoctl PRIVATE -Wall -Wextra)
 add_executable(kohiko-settings
     tools/kohiko-settings.cpp
     src/SettingsWindow.cpp
+    src/WindowRuleDraft.cpp
     src/ConfigWriter.cpp
     src/ConfigSchema.cpp
     src/Config.cpp
@@ -337,7 +339,9 @@ add_test(NAME WindowRule COMMAND test_windowrule)
 add_executable(test_choosewindowmodel
     tests/test_choosewindowmodel.cpp
     src/ChooseWindowModel.cpp
+    src/WindowRuleStore.cpp
     src/WindowRule.cpp
+    src/ConfigWriter.cpp
     src/Config.cpp
     src/Utils.cpp
     src/Logger.cpp
@@ -352,6 +356,17 @@ add_executable(test_autostartplan
 )
 target_include_directories(test_autostartplan PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME AutostartPlan COMMAND test_autostartplan)
+
+add_executable(test_windowruledraft
+    tests/test_windowruledraft.cpp
+    src/WindowRuleDraft.cpp
+    src/WindowRule.cpp
+    src/Config.cpp
+    src/Utils.cpp
+    src/Logger.cpp
+)
+target_include_directories(test_windowruledraft PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME WindowRuleDraft COMMAND test_windowruledraft)
 
 add_executable(test_windowrulestore
     tests/test_windowrulestore.cpp
@@ -794,6 +809,19 @@ add_test(
     COMMAND sh ${CMAKE_SOURCE_DIR}/tests/test_window_rules_live.sh
         $<TARGET_FILE:kohiko> $<TARGET_FILE:kohikoctl>
         $<TARGET_FILE:kohiko-choose-window> $<TARGET_FILE:x11_test_client>
+)
+add_test(
+    NAME ZenWindowRulesLive
+    COMMAND sh ${CMAKE_SOURCE_DIR}/tests/test_zen_window_rules_live.sh
+        $<TARGET_FILE:kohiko> $<TARGET_FILE:kohikoctl>
+        $<TARGET_FILE:kohiko-choose-window> $<TARGET_FILE:x11_test_client>
+)
+# tests/test_zen_chooser_dialog_live.sh (the real dialog driven with real
+# key events) needs the x11_input helper, which only the Makefile builds
+# (build/x11_input); run it through `make test`.
+add_test(
+    NAME VersionConsistency
+    COMMAND sh ${CMAKE_SOURCE_DIR}/tests/test_version_consistency.sh $<TARGET_FILE:kohiko> $<TARGET_FILE:kohikoctl>
 )
 add_test(
     NAME AutostartLive

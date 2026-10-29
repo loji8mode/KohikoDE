@@ -74,12 +74,22 @@ ChooseWindowDialog::ChooseWindowDialog(
     const Config& config,
     const ChooseWindowIdentity& identity,
     ChooseWindowModel& model,
-    int otherRuleCount)
+    OtherRuleCounter otherRules)
     : m_config(config),
       m_identity(identity),
       m_model(model),
-      m_otherRuleCount(otherRuleCount)
+      m_otherRules(std::move(otherRules))
 {
+    // The note's line is reserved if ANY kind has other rules, so the
+    // dialog never changes height when the selected kind changes.
+    if (m_otherRules)
+    {
+        for (int i = 0; i < m_model.ScopeCount(); ++i)
+        {
+            if (m_otherRules(m_model.ScopeAt(i)) > 0)
+                m_reserveNote = true;
+        }
+    }
 }
 
 ChooseWindowDialog::~ChooseWindowDialog()
@@ -145,7 +155,7 @@ void ChooseWindowDialog::Text(int x, int baseline, const std::string& text, cons
 void ChooseWindowDialog::ComputeLayout()
 {
     m_hits.clear();
-    m_rowLabelY.assign(ChooseWindowModel::kRowCount, 0);
+    m_rowLabelY.assign(5, 0); // indexed by ChooseWindowModel::Row
 
     const int lineHeight = m_font.Height();
     const int chipHeight = lineHeight + kChipPadY * 2;
@@ -162,7 +172,13 @@ void ChooseWindowDialog::ComputeLayout()
     m_detailBaseline = y + ascent;
     y += lineHeight;
 
-    if (m_otherRuleCount > 0)
+    m_kindBaseline = y + ascent;
+    y += lineHeight + 6;
+
+    m_selectorBaseline = y + ascent;
+    y += lineHeight;
+
+    if (m_reserveNote)
     {
         y += 4;
         m_noteBaseline = y + ascent;
@@ -176,11 +192,9 @@ void ChooseWindowDialog::ComputeLayout()
     const int chipsLeft = kPad + kLabelWidth;
     const int chipsRight = kWidth - kPad;
 
-    for (int r = 0; r < ChooseWindowModel::kRowCount; ++r)
+    for (ChooseWindowModel::Row row : m_model.Rows())
     {
-        auto row = static_cast<ChooseWindowModel::Row>(r);
-
-        m_rowLabelY[static_cast<std::size_t>(r)] = y + kChipPadY + ascent;
+        m_rowLabelY[static_cast<std::size_t>(row)] = y + kChipPadY + ascent;
 
         int x = chipsLeft;
         int rowY = y;
@@ -249,28 +263,47 @@ void ChooseWindowDialog::Draw()
     Text(kPad, m_headerBaseline, "Window Rules", accent.Get(), true);
 
     Text(kPad, m_appBaseline,
-         Elide(m_font, "Application: " + m_identity.appKey +
-             (m_identity.scope.IsApplication() ? std::string() : " (" + m_identity.ScopeLabel() + " only)"), textWidth), fg.Get());
+         Elide(m_font, "Application: " + m_identity.appKey, textWidth), fg.Get());
 
-    std::string detail = "class: " + (m_identity.className.empty() ? std::string("-") : m_identity.className) +
-                         "   instance: " + (m_identity.instanceName.empty() ? std::string("-") : m_identity.instanceName);
+    auto shown = [](const std::string& value) { return value.empty() ? std::string("-") : value; };
+
+    std::string detail = "class: " + shown(m_identity.className) +
+                         "   instance: " + shown(m_identity.instanceName);
     Text(kPad, m_detailBaseline, Elide(m_font, detail, textWidth), muted.Get());
 
-    if (m_otherRuleCount > 0)
+    // What THIS window says it is - the facts a role/type rule is
+    // matched against.
+    std::string kind = "role: " + shown(m_identity.role) +
+                       "   type: " + shown(m_identity.windowType);
+    Text(kPad, m_kindBaseline, Elide(m_font, kind, textWidth), muted.Get());
+
+    // What the rule being edited will match, exactly as it is written in
+    // the config - and in words, so an application-wide rule is never
+    // mistaken for one about this kind of window.
     {
-        std::string note = std::to_string(m_otherRuleCount) +
-            (m_otherRuleCount == 1 ? " other rule also applies" : " other rules also apply") +
+        const RuleScope& scope = m_model.CurrentRuleScope();
+        std::string selectors = "Rule matches: " + m_model.SelectorText(m_identity.appKey) +
+            (scope.IsApplication() ? "  (every window of this application)"
+                                   : "  (only windows with " + scope.Describe() + ")");
+        Text(kPad, m_selectorBaseline, Elide(m_font, selectors, textWidth), accent.Get());
+    }
+
+    int otherRules = m_otherRules ? m_otherRules(m_model.CurrentRuleScope()) : 0;
+
+    if (m_reserveNote && otherRules > 0)
+    {
+        std::string note = std::to_string(otherRules) +
+            (otherRules == 1 ? " other rule also applies" : " other rules also apply") +
             " (see Settings > Window Rules)";
         Text(kPad, m_noteBaseline, Elide(m_font, note, textWidth), muted.Get());
     }
 
     // Row labels.
-    for (int r = 0; r < ChooseWindowModel::kRowCount; ++r)
+    for (ChooseWindowModel::Row row : m_model.Rows())
     {
-        auto row = static_cast<ChooseWindowModel::Row>(r);
         bool current = (row == m_model.CurrentRow());
 
-        Text(kPad, m_rowLabelY[static_cast<std::size_t>(r)],
+        Text(kPad, m_rowLabelY[static_cast<std::size_t>(row)],
              ChooseWindowModel::RowLabel(row), current ? accent.Get() : fg.Get(), current);
     }
 
@@ -307,7 +340,9 @@ void ChooseWindowDialog::Draw()
     }
 
     Text(kPad, m_hintBaseline,
-         Elide(m_font, "hjkl/arrows  1-9 workspace  Enter save  Del reset  Esc cancel", textWidth),
+         Elide(m_font, m_model.HasScopeRow()
+             ? "hjkl/arrows  1-9 workspace  Enter save  Del reset this kind  Esc cancel"
+             : "hjkl/arrows  1-9 workspace  Enter save  Del reset  Esc cancel", textWidth),
          muted.Get());
 
     XCopyArea(m_display, m_backBuffer, m_window, m_gc, 0, 0,
@@ -415,8 +450,7 @@ ChooseWindowModel::Action ChooseWindowDialog::Run()
     classHint.res_class = const_cast<char*>("Kohiko-choose-window");
     XSetClassHint(m_display, m_window, &classHint);
 
-    std::string title = "Window Rules - " + (m_identity.appKey.empty() ? std::string("window") : m_identity.appKey) +
-        (m_identity.scope.IsApplication() ? std::string() : " [" + m_identity.ScopeLabel() + "]");
+    std::string title = "Window Rules - " + (m_identity.appKey.empty() ? std::string("window") : m_identity.appKey);
     XStoreName(m_display, m_window, title.c_str());
 
     Atom netWmName = XInternAtom(m_display, "_NET_WM_NAME", False);

@@ -24,6 +24,13 @@
 //   --scope app|role|type|role+type
 //                       which of them the rule is for (default app: the
 //                       whole application). `--scope role` needs --role.
+//                       For the dialog, --scope only chooses which kind
+//                       it OPENS on - without it the dialog opens on the
+//                       rule already in force for the window (see
+//                       ChooseWindowModel::BuildScopeChoices) - and the
+//                       person can change the kind in the dialog's
+//                       "Applies to" row; Save/Reset then act on the
+//                       selected kind only.
 //
 //   kohiko-choose-window --app zen --role PictureInPicture --scope role --set "mode:floating horizontal:right"
 //       writes `windowrule=app:zen role:PictureInPicture mode:floating horizontal:right`,
@@ -52,6 +59,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -98,6 +106,7 @@ int main(int argc, char** argv)
     std::string configPath;
     std::string setTokens;
     std::string scopeName = "app";
+    bool scopeGiven = false;
     bool haveApp = false, list = false, show = false, doDelete = false, doSet = false, reload = true;
 
     for (int i = 1; i < argc; ++i)
@@ -111,7 +120,7 @@ int main(int argc, char** argv)
         else if (arg == "--title")    identity.title = value();
         else if (arg == "--role")     identity.role = value();
         else if (arg == "--type")     identity.windowType = WindowRule::NormalizeWindowType(value());
-        else if (arg == "--scope")    scopeName = Utils::Lower(value());
+        else if (arg == "--scope")    { scopeName = Utils::Lower(value()); scopeGiven = true; }
         else if (arg == "--config")   configPath = value();
         else if (arg == "--no-reload") reload = false;
         else if (arg == "--list")     list = true;
@@ -260,7 +269,19 @@ int main(int argc, char** argv)
 
     int workspaceCount = config.GetInt("workspace.count", 4);
 
-    ChooseWindowModel model(workspaceCount, WindowRuleStore::FindAppRule(lines, identity.appKey, identity.scope));
+    // Which kinds of window this application's rules can be for is
+    // decided by what THIS window declared (role/type), and the dialog
+    // opens on the kind that already has a rule - or on the one named
+    // with --scope. The person can change it in the dialog.
+    std::optional<RuleScope> requested;
+
+    if (scopeGiven)
+        requested = identity.scope;
+
+    ChooseWindowModel::ScopeChoices choices = ChooseWindowModel::BuildScopeChoices(
+        lines, identity.appKey, identity.role, identity.windowType, requested);
+
+    ChooseWindowModel model(workspaceCount, choices.choices, choices.defaultIndex);
 
     WindowIdentity windowIdentity;
     windowIdentity.className = identity.className;
@@ -269,10 +290,12 @@ int main(int argc, char** argv)
     windowIdentity.role = identity.role;
     windowIdentity.windowType = identity.windowType;
 
-    int others = static_cast<int>(
-        WindowRuleStore::OtherMatchingRules(lines, windowIdentity, identity.scope).size());
-
-    ChooseWindowDialog dialog(config, identity, model, others);
+    ChooseWindowDialog dialog(config, identity, model,
+        [&](const RuleScope& scope)
+        {
+            return static_cast<int>(
+                WindowRuleStore::OtherMatchingRules(lines, windowIdentity, scope).size());
+        });
 
     ChooseWindowModel::Action action = dialog.Run();
 
@@ -283,11 +306,13 @@ int main(int argc, char** argv)
         case ChooseWindowModel::Action::Save:
             // All-Default is not a rule: Upsert removes it, so "Save"
             // with nothing chosen is the same as deleting.
-            updated = WindowRuleStore::UpsertAppRule(lines, model.ToRule(identity.appKey, identity.scope));
+            // Only the kind that is selected - the other kinds' rules are
+            // untouched, and so is every rule of another application.
+            updated = WindowRuleStore::UpsertAppRule(lines, model.ToRule(identity.appKey));
             break;
 
         case ChooseWindowModel::Action::Reset:
-            updated = WindowRuleStore::RemoveAppRule(lines, identity.appKey, identity.scope);
+            updated = WindowRuleStore::RemoveAppRule(lines, identity.appKey, model.CurrentRuleScope());
             break;
 
         default:

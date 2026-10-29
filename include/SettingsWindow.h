@@ -3,6 +3,7 @@
 #include "ConfigSchema.h"
 #include "ConfigWriter.h"
 #include "Font.h"
+#include "WindowRuleDraft.h"
 #include "Types.h"
 
 #include <X11/Xlib.h>
@@ -81,8 +82,10 @@ private:
     //
     // Class is a window rule's first selector cell: the application key
     // (`app:`), or - for a hand-written legacy rule that uses it - the
-    // `class:` substring; see WindowRuleDraft::firstCellIsClass().
-    enum class StructuredCell { Class, Instance, Title, Output, Workspace };
+    // `class:` substring; see WindowRuleDraft::firstCellIsClass(). Role is
+    // the window kind's `role:` text (a window rule's second line; its
+    // `type:` choice is a click-to-cycle button like Horizontal/Vertical).
+    enum class StructuredCell { Class, Instance, Title, Role, Output, Workspace };
 
     struct RawBlockPanel
     {
@@ -124,6 +127,8 @@ private:
             Rect classRect{};       // WindowRule only: the application (app:/class:) cell
             Rect instanceRect{};    // WindowRule only
             Rect titleRect{};       // WindowRule only
+            Rect roleRect{};        // WindowRule only: the window kind's role: text cell
+            Rect typeRect{};        // WindowRule only: click-to-cycle Any/normal/dialog/utility/...
             Rect horizontalRect{};  // WindowRule only: click-to-cycle Default/Left/Right
             Rect verticalRect{};    // WindowRule only: click-to-cycle Default/Top/Bottom
             Rect modeRect{};        // WindowRule only: click-to-cycle Default/Tiled/Floating/Fullscreen
@@ -138,57 +143,8 @@ private:
         Rect textAreaRect{}; // RawText panels only
     };
 
-    // A windowrule= line's structured fields, parsed leniently from
-    // (and re-serialized exactly back to) one RawBlockPanel::lines
-    // entry - see ParseWindowRuleDraft()/SerializeWindowRuleDraft().
-    // Deliberately its own lightweight, tolerant-of-partial-input type
-    // rather than reusing WindowRule::Parse() directly: that parser
-    // rejects anything incomplete outright, whereas a row being
-    // actively edited is expected to pass through invalid in-between
-    // states (e.g. no selector at all yet) - and it keeps the text
-    // exactly as typed. (Whether a finished line is VALID is a
-    // separate question, answered by ValidateRawBlockLine() asking
-    // WindowRule::Parse(), so the editor and the window manager can
-    // never disagree about what a rule means.)
-    //
-    // Every choice has an explicit Default (index 0 / empty text) that
-    // means "this rule has no opinion about that aspect".
-    struct WindowRuleDraft
-    {
-        // Selectors, as typed (decoded - %XX escapes shown as the
-        // character they stand for; SerializeWindowRuleDraft()
-        // re-escapes). appText is the exact application key (`app:`,
-        // what kohiko-choose-window writes); classText/instanceText/
-        // titleText are the substring selectors of hand-written rules.
-        std::string appText;
-        std::string classText;
-        std::string instanceText;
-        std::string titleText;
-
-        // `role:` (exact WM_WINDOW_ROLE) and `type:` (primary window
-        // type) selectors. This editor has no cells for them - they are
-        // written by kohiko-choose-window's --scope or by hand - but a
-        // row that has them must keep them when any OTHER cell is
-        // edited: dropping one would silently turn a rule for one kind
-        // of window (a browser's Picture-in-Picture overlay) into a rule
-        // for every window of the application.
-        std::string roleText;
-        std::string typeText;
-
-        std::string workspaceText;   // digits; "" = Default (no workspace rule)
-        int horizontalIndex = 0;     // 0 Default, 1 Left, 2 Right
-        int verticalIndex = 0;       // 0 Default, 1 Top, 2 Bottom
-        int modeIndex = 0;           // 0 Default, 1 Tiled, 2 Floating, 3 Fullscreen
-        bool denyFullscreen = false; // legacy `nofullscreen` - kept, not editable here
-
-        // True when the first text cell is showing/editing the legacy
-        // `class:` substring rather than the exact `app:` key: only for
-        // a hand-written rule that has class: and no app:.
-        bool firstCellIsClass() const { return appText.empty() && !classText.empty(); }
-    };
-
     // A monitor= line's structured fields - see WindowRuleDraft's
-    // comment above for why this exists instead of MonitorRule::Parse().
+    // comment (WindowRuleDraft.h) for why this exists instead of MonitorRule::Parse().
     struct MonitorRuleDraft
     {
         std::string outputText;
@@ -302,8 +258,6 @@ private:
     // into the old raw-text editor was.
     std::string DefaultStructuredLine(RawBlockPanel::Kind kind) const;
 
-    WindowRuleDraft ParseWindowRuleDraft(const std::string& line) const;
-    std::string SerializeWindowRuleDraft(const WindowRuleDraft& draft) const;
     MonitorRuleDraft ParseMonitorRuleDraft(const std::string& line) const;
     std::string SerializeMonitorRuleDraft(const MonitorRuleDraft& draft) const;
 

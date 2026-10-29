@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <iterator>
 
 namespace Kohiko
 {
@@ -88,6 +89,28 @@ bool RuleScope::operator==(const RuleScope& other) const
 {
     return EqualsInsensitive(role, other.role) &&
            EqualsInsensitive(windowType, other.windowType);
+}
+
+std::string RuleScope::Describe() const
+{
+    if (IsApplication())
+        return "All windows";
+
+    std::string text;
+
+    if (!role.empty())
+        text = "role " + role;
+
+    if (!windowType.empty())
+        text += std::string(text.empty() ? "" : " + ") + "type " + windowType;
+
+    return text;
+}
+
+const std::vector<std::string>& WindowRule::KnownWindowTypes()
+{
+    static const std::vector<std::string> types(std::begin(kWindowTypes), std::end(kWindowTypes));
+    return types;
 }
 
 std::string WindowRule::NormalizeWindowType(
@@ -462,7 +485,7 @@ WindowRuleEffect ResolveWindowRules(
     return ResolveWindowRules(rules, window);
 }
 
-WindowRuleEffect ResolveWindowRules(
+std::vector<WindowRule> MatchingWindowRules(
     const std::vector<WindowRule>& rules,
     const WindowIdentity& window)
 {
@@ -475,31 +498,50 @@ WindowRuleEffect ResolveWindowRules(
     }
 
     // Least specific first; stable, so equally specific rules keep file
-    // order and the later line overrides the earlier one.
+    // order and the later line overrides the earlier one. The order
+    // rules appear in the file never changes which of two DIFFERENTLY
+    // specific rules wins.
     std::stable_sort(matching.begin(), matching.end(),
         [](const WindowRule* a, const WindowRule* b)
         {
             return a->SelectorCount() < b->SelectorCount();
         });
 
+    std::vector<WindowRule> ordered;
+    ordered.reserve(matching.size());
+
+    for (const WindowRule* rule : matching)
+        ordered.push_back(*rule);
+
+    return ordered;
+}
+
+WindowRuleEffect ResolveWindowRules(
+    const std::vector<WindowRule>& rules,
+    const WindowIdentity& window)
+{
     WindowRule::Mode winningMode = WindowRule::Mode::Default;
     WindowRuleEffect effect;
 
-    for (const WindowRule* rule : matching)
+    // Per property: the most specific rule that has an opinion about it
+    // wins; a property a rule leaves unset is inherited from the less
+    // specific rules (so a role-scoped rule that only says
+    // `mode:floating` still opens where the application-wide rule says).
+    for (const WindowRule& rule : MatchingWindowRules(rules, window))
     {
-        if (rule->workspace > 0)
-            effect.forceWorkspace = rule->workspace;
+        if (rule.workspace > 0)
+            effect.forceWorkspace = rule.workspace;
 
-        if (rule->horizontal != WindowRule::Horizontal::Default)
-            effect.horizontal = rule->horizontal;
+        if (rule.horizontal != WindowRule::Horizontal::Default)
+            effect.horizontal = rule.horizontal;
 
-        if (rule->vertical != WindowRule::Vertical::Default)
-            effect.vertical = rule->vertical;
+        if (rule.vertical != WindowRule::Vertical::Default)
+            effect.vertical = rule.vertical;
 
-        if (rule->mode != WindowRule::Mode::Default)
-            winningMode = rule->mode;
+        if (rule.mode != WindowRule::Mode::Default)
+            winningMode = rule.mode;
 
-        if (rule->denyFullscreen)
+        if (rule.denyFullscreen)
             effect.denyFullscreen = true;
     }
 

@@ -268,4 +268,42 @@ check_true "plain choose_window keeps the whole-application default (no --scope)
 check_true "...and still names the application" sh -c "echo \"\$1\" | grep -q -- '--app zen'" _ "$ARGS"
 close_both
 
+echo "== 10. Kohiko's view of a window follows its properties, and the dialog is handed the CURRENT role =="
+
+# A client that changes WM_WINDOW_ROLE after it was mapped (sets its
+# identity late, or changes it). What Kohiko read at map time would
+# otherwise be stale forever - and the dialog would write a rule for a
+# window kind this window no longer is.
+"$TEST_CLIENT" --title "late role" --class zen --instance Late --role browser --change-role PictureInPicture \
+    --change-after-ms 700 --window-type _NET_WM_WINDOW_TYPE_NORMAL --set-pid \
+    > "$WORKDIR/c10.log" 2>&1 & LIVE_PIDS="$LIVE_PIDS $!"; P10=$!
+live_wait_for 60 inst_listed Late; sleep 0.15
+check "$(win_field Late role)" "browser" "at map time the window declared role browser"
+sleep 1.3
+check "$(win_field Late role)" "PictureInPicture" "after the client replaces WM_WINDOW_ROLE, kohikoctl clients reports the new role (PropertyNotify)"
+: > "$WORKDIR/chooser_args.log"
+"$KOHIKOCTL" dispatch choose_window >/dev/null; sleep 0.3
+ARGS=$(cat "$WORKDIR/chooser_args.log" 2>/dev/null)
+check_true "the dialog is handed the window's CURRENT role (--role PictureInPicture), not the one it had when first managed" \
+    sh -c "echo \"\$1\" | grep -q -- '--role PictureInPicture'" _ "$ARGS"
+check_true "...and not the stale one" sh -c "! echo \"\$1\" | grep -q -- '--role browser'" _ "$ARGS"
+kill "$P10" 2>/dev/null; wait "$P10" 2>/dev/null
+
+echo "== 11. The log says which rules matched a new window, and which same-application rules did not =="
+
+live_write_config 'workspace.count=4
+auto_start_programs=
+windowrule=app:zen workspace:1
+windowrule=app:zen role:browser workspace:1
+windowrule=app:zen role:PictureInPicture workspace:1 mode:floating'
+reload_and_wait
+: > "$WORKDIR/kohiko.log"
+open_zen_pip
+PIPLINE=$(grep 'role "PictureInPicture", type "utility")' "$WORKDIR/kohiko.log" | head -2)
+check_true "log: the PiP window matched 2 rules, generic first" \
+    sh -c "echo \"\$1\" | grep -q 'matched 2 window rule(s), least specific first: app:zen workspace:1; app:zen role:PictureInPicture workspace:1 mode:floating'" _ "$PIPLINE"
+check_true "log: ...and says the role:browser rule did not match it" \
+    sh -c "echo \"\$1\" | grep -q 'did not match these rules for the same application: app:zen role:browser workspace:1'" _ "$PIPLINE"
+close_both
+
 live_finish

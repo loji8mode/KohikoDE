@@ -45,6 +45,10 @@
 //                              *mapped at root level* before being
 //                              reparented into a tray (the "flash")
 //     --instance NAME         WM_CLASS instance (default: same as --class)
+//     --change-role ROLE      After the window has been up for
+//     --change-after-ms N      N ms, REPLACE its WM_WINDOW_ROLE with ROLE
+//                              (a client that sets its identity late or
+//                              changes it - Kohiko must notice)
 //     --role ROLE             Set WM_WINDOW_ROLE (what Firefox/Zen/Qt/GTK
 //                              apps use to tell their own window kinds
 //                              apart, e.g. "browser" vs
@@ -96,6 +100,8 @@ int main(int argc, char** argv)
     std::string instanceName;
     std::string role;
     int mapDelayMs = 0;
+    std::string changeRole;
+    int changeAfterMs = 0;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -122,6 +128,8 @@ int main(int argc, char** argv)
         else if (arg == "--set-pid") setPid = true;
         else if (arg == "--instance") instanceName = next();
         else if (arg == "--role") role = next();
+        else if (arg == "--change-role") changeRole = next();
+        else if (arg == "--change-after-ms") changeAfterMs = atoi(next().c_str());
         else if (arg == "--map-delay-ms") mapDelayMs = atoi(next().c_str());
     }
 
@@ -264,8 +272,28 @@ int main(int argc, char** argv)
 
     GC gc = XCreateGC(display, win, 0, nullptr);
 
+    double changeRoleAt = changeRole.empty() ? 0.0 : NowMs() + changeAfterMs;
+
     while (true)
     {
+        // A late role change: poll until it is due, without ever
+        // blocking past it (XNextEvent would).
+        if (changeRoleAt > 0.0 && !XPending(display))
+        {
+            usleep(20000);
+
+            if (NowMs() >= changeRoleAt)
+            {
+                Atom windowRole = XInternAtom(display, "WM_WINDOW_ROLE", False);
+                XChangeProperty(display, win, windowRole, XA_STRING, 8, PropModeReplace,
+                                reinterpret_cast<const unsigned char*>(changeRole.c_str()), static_cast<int>(changeRole.size()));
+                XFlush(display);
+                changeRoleAt = 0.0;
+            }
+
+            continue;
+        }
+
         XEvent event;
         XNextEvent(display, &event);
 

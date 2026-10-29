@@ -1,8 +1,65 @@
 # Changelog
 
-## Unreleased
+## Version 0.22.1
+
+Release date: 2026-10-29
+
+Kohiko Rules - the 0.22.0 line (explicit Window Rules; nothing learns
+from where you put windows). A fix-and-polish release: independent rules
+for a browser and its Picture-in-Picture window, the Launcher and
+workspace switching, the native tray apps, and floating-window stacking.
+No setting was added or removed, existing `windowrule=` lines behave as
+before, and no adaptive placement came back.
 
 ### Fixed
+- **A browser and its Picture-in-Picture window can now have independent
+  Window Rules - through the normal dialog and Settings, not only by
+  hand-editing.** The matching engine was already correct (a role/type
+  rule only matches a window that really has that role/type; the more
+  specific rule wins whatever the file order). The two windows collided
+  in the *user-facing* layer: the shipped `Super+Shift+W choose_window`
+  binding opened the dialog with no way to say *which windows* the rule
+  was for, so it always edited the single application-wide
+  `app:zen` rule - from the normal window and from the
+  Picture-in-Picture window alike, each overwriting the other. Choosing
+  a kind existed only as a `--scope` command-line option / a
+  `choose_window role` binding that no default config had; the dialog
+  showed neither the window's role/type nor the selectors it was about
+  to write; and Settings had no role/type cells at all. Now:
+  - The dialog has an **Applies to** row - `All windows`, `role <R>`,
+    `type <T>`, `role <R> + type <T>`, offered according to what the
+    window actually declared - and shows the window's class, instance,
+    role and type plus the exact selectors being written
+    (`Rule matches: app:zen role:PictureInPicture ...`), updating as you
+    change the kind. Each kind keeps its own saved values; **Save and
+    Reset act on the selected kind only** and never touch another kind's
+    rule or the application-wide one. It opens on the rule that applies
+    to the window (the most specific saved one); if the application
+    already has role/type rules and this window's kind has none, on that
+    window's own role rather than on the application-wide rule;
+    otherwise on `All windows`, as before.
+  - **Settings > Window Rules** has a `role:` cell and a `Type:` button
+    per rule (and a `Window kind:` caption), so a normal-window rule, a
+    Picture-in-Picture rule and an application-wide rule can be created,
+    edited and deleted there. Editing any other cell keeps the rule's
+    role and type; deleting one rule leaves the others.
+  - Kohiko now re-reads a window's `WM_CLASS`, `WM_WINDOW_ROLE` and
+    `_NET_WM_WINDOW_TYPE` when the client changes them, and again when
+    the dialog is opened for it. It used to keep the values it saw when
+    the window first appeared, so a dialog could be opened with a stale
+    role. (Rules themselves are still decided once, when a window is
+    first managed - a window is not moved because its role changed
+    later.)
+  - `WM_WINDOW_ROLE` written with a trailing NUL byte (some toolkits do)
+    no longer yields a role that differs invisibly from the one in a
+    rule.
+  - Diagnosis: `kohikoctl clients` and `kohikoctl activewindow` now
+    report each window's `role` and `type` (what Kohiko read from X11),
+    and the log says which rules matched a newly managed window and
+    which rules written for the same application did *not* (a role/type
+    mismatch is the usual reason), e.g. `window 123 (class "zen",
+    instance "Toolkit", role "PictureInPicture", type "utility") matched
+    2 window rule(s), least specific first: ...`.
 - **Floating windows no longer vanish under a tile you carried across
   them.** Dragging a tiled window (Super+drag) raises it above everything
   so it can be carried; when it was dropped with no swap target - on its
@@ -82,22 +139,68 @@
 
 ### Added
 - **Window Rules can target one kind of window of an application**: new
-  `role:` (exact WM_WINDOW_ROLE) and `type:` (primary _NET_WM_WINDOW_TYPE)
-  selectors, e.g. `windowrule=app:zen role:PictureInPicture mode:floating`.
-  A rule asking for a role/type the window lacks never matches (it is not
-  widened into an application-wide rule); the more specific rule beats
-  `app:zen` regardless of file order. `kohiko-choose-window --role R
-  --type T --scope app|role|type|role+type` and the `choose_window role`
-  command write/edit/delete such rules independently of the plain
-  application rule; the Settings Window Rules tab keeps them when other
-  cells of the same rule are edited. Existing rules are unaffected. (A
-  `role:` selector used to be rejected as unsupported, so a line using one
-  was skipped; it now takes effect.)
+  `role:` (exact `WM_WINDOW_ROLE`, case-insensitive) and `type:` (primary
+  `_NET_WM_WINDOW_TYPE`) selectors, e.g.
+  `windowrule=app:zen role:PictureInPicture mode:floating`. A rule asking
+  for a role/type the window lacks never matches (it is not widened into
+  an application-wide rule). Matching rules apply least specific first
+  (by number of selectors; equally specific ones in file order) and each
+  property comes from the most specific rule that sets it, so the order of
+  the lines never decides between a role rule and the plain `app:` rule,
+  and a specific rule that leaves a property at Default inherits it from
+  the less specific one. `kohiko-choose-window` also takes `--role R
+  --type T --scope app|role|type|role+type` for scripting. Existing rules
+  are unaffected. (A `role:` selector used to be rejected as unsupported,
+  so a line using one was skipped; it now takes effect.)
 - `kohikoctl launcher` (read-only): whether the Launcher is open, its
   query, selection, position and the workspace you are on.
-- Test tooling: real XTEST input and an X-server-side probe (stacking
-  order, pixels, grabs) for the live tests, a scripted fake D-Bus for the
-  native apps, and new regression tests for everything above.
+- Tests: the real chooser dialog driven with real (XTEST) key events under
+  Xvfb for the two Zen window kinds (`tests/test_zen_chooser_dialog_live.sh`),
+  the Settings editing model (`tests/test_windowruledraft.cpp`), kind
+  selection and per-kind save/reset in the chooser model, precedence and
+  mismatched-metadata cases in `tests/test_windowrule.cpp`, a late role
+  change and the rule-match log in `tests/test_zen_window_rules_live.sh`,
+  and `tests/test_version_consistency.sh` (the version in `Version.h`,
+  the newest changelog heading, the README's current-version line and the
+  startup banner must agree). Earlier in this release: real XTEST input
+  and an X-server-side probe (stacking order, pixels, grabs) for the
+  live tests, a scripted fake D-Bus for the native apps, and regression
+  tests for the fixes above.
+
+### Known limitations and how this release was verified
+- **Not verified against a real Zen Browser.** The two window kinds are
+  reproduced by synthetic X11 clients carrying exactly the properties
+  collected from a real Zen on Arch/KohikoDE (`WM_CLASS` `Navigator`/`zen`
+  with role `browser`, type normal; `Toolkit`/`zen` with role
+  `PictureInPicture`, type utility). That shows Kohiko handles windows
+  with those properties correctly; it does not show that Zen presents
+  them to the window manager at the moment of mapping. To check a real
+  window: `xprop WM_CLASS WM_WINDOW_ROLE _NET_WM_WINDOW_TYPE` (click it),
+  or `kohikoctl clients` / the log lines above for what Kohiko read.
+- Everything was tested under Xvfb with synthetic clients and mock
+  services (a scripted fake D-Bus, no real BlueZ/NetworkManager/PipeWire),
+  on a single virtual screen. Real Bluetooth hardware, a real
+  NetworkManager, a real PipeWire graph and multi-monitor behaviour were
+  not exercised. In the build environment used (no Xft/Imlib2/PAM
+  development files, no network) the font and image libraries were
+  replaced by stubs that draw nothing, so how the dialog and Settings
+  *look*, and the eight pixel checks of the taskbar workspace-number
+  test, were not verified there; the same eight checks fail identically
+  on the unmodified 0.22.0 source in that environment.
+- The Settings editor's behaviour is covered at the editing-model level
+  (`WindowRuleDraft`); its window is not driven by an automated test, only
+  started and left running under Xvfb. The chooser dialog's key handling
+  is driven end to end; its drawing is not checked.
+- Rules are decided when a window is first mapped; changing a rule does
+  not move windows that are already open, and a window that changes its
+  role afterwards is not re-placed.
+- Equally specific rules that both match (say `role:` and `type:` alone)
+  are ordered by file position, the later line winning per property.
+  The legacy `nofullscreen` word is cumulative across matching rules: a
+  more specific rule cannot lift it.
+- Clearing the `role:` cell of a rule in Settings is an explicit edit and
+  turns it into a rule for every window of the application (the
+  `Window kind:` caption says so as you do it).
 
 ## Version 0.22.0
 

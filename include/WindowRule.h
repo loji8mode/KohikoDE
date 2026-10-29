@@ -112,6 +112,11 @@ struct RuleScope
 
     bool IsApplication() const { return role.empty() && windowType.empty(); }
     bool operator==(const RuleScope& other) const;
+
+    // Human-readable, for the chooser, Settings and log lines:
+    // "All windows", "role PictureInPicture", "type utility" or
+    // "role PictureInPicture + type utility".
+    std::string Describe() const;
 };
 
 struct WindowRule
@@ -179,6 +184,10 @@ struct WindowRule
     static std::string NormalizeWindowType(
         const std::string& text);
 
+    // Every window type a `type:` selector accepts, in the order the
+    // Settings editor cycles through them.
+    static const std::vector<std::string>& KnownWindowTypes();
+
     // Parses one `windowrule=` value (the text after the `=`). Returns
     // false - leaving `out` untouched and, if `error` is non-null,
     // saying why - for anything that isn't a complete, valid rule: an
@@ -224,6 +233,16 @@ struct WindowRuleEffect
     WindowRule::Horizontal horizontal = WindowRule::Horizontal::Default;
     WindowRule::Vertical vertical = WindowRule::Vertical::Default;
 };
+
+// The rules of `rules` that match this window, in the order they are
+// APPLIED: least specific (fewest selectors) first, equally specific
+// ones in file order. The last one to set a property wins that
+// property. This is the single place that order is decided -
+// ResolveWindowRules() folds exactly this list, and the window
+// manager logs it - so "which rule won" never has two answers.
+std::vector<WindowRule> MatchingWindowRules(
+    const std::vector<WindowRule>& rules,
+    const WindowIdentity& window);
 
 // Folds every rule in `rules` that matches this window into one effect,
 // least specific first, ties in file order, later overriding earlier
