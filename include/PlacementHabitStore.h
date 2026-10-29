@@ -2,6 +2,7 @@
 
 #include "Types.h"
 
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -11,122 +12,231 @@
 // the "Adaptive placement" half of Session Restore (see README).
 // Two independent habits, scored completely separately - an app can
 // have a strong workspace habit and no position habit at all, or vice
-// versa, or both, or neither:
+// versa, or both, or neither.
 //
-//   - Workspace habit: a vote is cast every time
-//     WindowManager::MoveFocusedToWorkspace() sends a window of this
-//     class somewhere else by hand (Super+Shift+<N>, or `kohikoctl
-//     move-to-workspace`). Once one workspace holds a clear, durable
-//     majority of the votes, PredictWorkspace() starts recommending
-//     it for brand new windows of that class - the lowest-priority
-//     link in the same workspace-decision chain windowrule=workspace:
-//     and session restore already sit at the top of, in
-//     WindowManager::Manage().
+// ---------------------------------------------------------------
+// What counts as evidence (the learning events)
+// ---------------------------------------------------------------
 //
-//   - Position habit: a vote is cast every time
-//     WindowManager::SwapWindows() moves a tiled window of this class
-//     by hand (a Super+LMB drag, or Super+Shift+h/j/k/l) and records
-//     which half of its monitor's work area (left/right,
-//     independently top/bottom) it ended up in. Once an axis holds a
-//     clear majority, PredictPositions() starts recommending nudging
-//     brand new windows of that class toward that edge - see
-//     WindowManager::ApplyAdaptivePlacementNudge().
+// The store never guesses intent. WindowManager tells it, explicitly,
+// about exactly two kinds of event:
 //
-// Both habits use the exact same "clear majority" bar
-// (kMinObservations/kMinShare in the .cpp) precisely so a single
-// one-off manual move never immediately hard-codes a permanent habit:
-// it takes a genuinely repeated pattern before Kohiko starts
-// predicting anything, and a prediction is silently withdrawn the
-// moment the user's own votes stop actually agreeing with each other
-// that strongly - there's no decay or expiry beyond that; a habit
-// that was once strong and has since been diluted by enough
-// contrary votes simply stops being confident, the same as it never
-// having formed.
+//   1. A USER-DIRECTED PLACEMENT (a "vote"):
+//        - RecordWorkspaceMove(): the user sent a window to another
+//          workspace by hand (Super+Shift+<N>, `kohikoctl
+//          movetoworkspace`).
+//        - RecordPositionMove(): the user repositioned a tiled window
+//          by hand (a Super+LMB drag, or Super+Shift+h/j/k/l). Only
+//          the window the USER moved is recorded. The window it
+//          traded places with is passive: it was moved as a side
+//          effect, not by choice, so it receives no vote.
+//      Kohiko's own placement (a habit being applied to a new
+//      window, session restore, a window rule, autostart) never
+//      calls either - there is no path from "Kohiko placed it" to
+//      "Kohiko learned from it".
 //
-// This is deliberately a general, ongoing habit, not something that
-// only kicks in after a restart - every RecordX() call updates the
-// live in-memory table immediately, so a habit formed five minutes
-// ago already applies to the very next window opened this same
-// session; disk persistence (one small flat file under
-// Xdg::DataDir(), same approach as HistoryStore/SessionStore) is only
-// what carries it across a restart, not what makes it apply at all.
+//   2. AN OPPORTUNITY TO LEARN (an "opening"):
+//        - RecordWorkspaceOpening() / RecordPositionOpening(): a new
+//          window of this class appeared and NOTHING had already
+//          decided where it goes - not a session record, not a
+//          window rule, not an autostart placement, not its transient
+//          parent, and not an existing habit. Only then did the user
+//          genuinely have the chance to express a preference by
+//          moving it (or not). See PlacementOrigin below.
+//
+// A window that an existing habit already placed is deliberately NOT
+// an opening: counting it as "the user didn't move it" would make a
+// working habit erode itself just by being used.
+//
+// ---------------------------------------------------------------
+// Confidence (the same bar for both habits, unchanged baseline +
+// one new requirement)
+// ---------------------------------------------------------------
+//
+// A habit is confident (and only then predicts anything) when ALL of:
+//   (a) at least kMinObservations votes             (3, unchanged)
+//   (b) the leading choice holds >= kMinShare of
+//       those votes                                  (70%, unchanged)
+//   (c) leading votes / openings >= kMinExposureShare (50%, NEW)
+//       with at least one opening on record.
+//
+// (c) is the missing denominator: "moved it 3 times" is very
+// different from "opened it 30 times and moved it 3 times". The
+// position habit applies (c) per axis with its own opening counter.
+//
+// ---------------------------------------------------------------
+// One vote per window instance ("last placement wins")
+// ---------------------------------------------------------------
+//
+// Callers may pass the window's id. Within one window's lifetime,
+// each kind of vote is replaced rather than accumulated: moving a
+// window to workspace 5 "just for now" and then back to workspace 3
+// leaves exactly one vote, for 3, not one for 5 and one for 3. The
+// instance table is in-memory only (never persisted) and is cleared
+// per window by ForgetInstance().
+//
+// There is deliberately no time decay or expiry: counters are plain
+// integers, the whole model stays deterministic, and a stale habit
+// is displaced the same way it was formed - by the user's own later
+// placements and by the openings those windows produce.
+//
+// ---------------------------------------------------------------
+// Persistence (versioned; see Load()/Save() in the .cpp)
+// ---------------------------------------------------------------
+//
+// One small flat file under Xdg::DataDir() ("placement_habits"),
+// first line `# kohiko-placement-habits v2`. A file with no such
+// header is the 0.21.4-and-earlier format; it is migrated on load
+// (each legacy vote is taken to have come from one opening, so a
+// legacy habit predicts exactly as it did before and is never
+// MORE confident than 0.21.4 made it), the original is kept as
+// `placement_habits.v1.bak`, and the file is rewritten as v2. A file
+// from a NEWER format version is left untouched and not used.
 namespace Kohiko
 {
 
+// Where a new window's placement came from, as decided by
+// WindowManager::Manage()'s priority chain. Only Default - nothing
+// else decided - is a genuine opportunity to learn.
+enum class PlacementOrigin
+{
+    Default,         // nothing decided; fell through to "current workspace"
+    SessionRestore,  // session.restore_priority / saved session record
+    WindowRule,      // windowrule= forced workspace
+    Autostart,       // launched by Kohiko's own startup plan
+    TransientParent, // dialog/transient follows its parent
+    AdaptiveHabit    // an existing learned habit decided it
+};
+
+constexpr bool CountsAsOpportunity(PlacementOrigin origin)
+{
+    return origin == PlacementOrigin::Default;
+}
+
+// Which side of an axis a window sits on. Neutral = no meaningful side
+// (the window spans the axis, or its center is indistinguishable
+// from the work-area center), which is NOT evidence for either side.
+enum class AxisSide { Neutral, Low, High }; // Low = left/top, High = right/bottom
+
+struct PositionSides
+{
+    AxisSide horizontal = AxisSide::Neutral;
+    AxisSide vertical = AxisSide::Neutral;
+};
+
 struct PlacementHabit
 {
-    // Workspace -> number of times a manual move landed a window of
-    // this class there. 1-based workspace numbers; an absent entry
-    // means 0 votes.
+    // Workspace -> number of user placements that landed a window of
+    // this class there. 1-based; an absent entry means 0 votes.
     std::unordered_map<int, int> workspaceVotes;
 
-    // Independent left/right and top/bottom tallies - see the class
-    // comment's "Position habit" paragraph. A window that ends up
-    // left-of-center after a manual move bumps leftVotes; right-of-
-    // center bumps rightVotes; likewise topVotes/bottomVotes against
-    // vertical center - every manual move counted exactly once on
-    // each axis (a window can be, and often is, both "left" and
-    // "top" from the same single move).
+    // Opportunities where nothing else decided the workspace.
+    int workspaceOpenings = 0;
+
+    // Independent left/right and top/bottom tallies. A window whose
+    // center is not clearly on one side of an axis casts no vote on
+    // that axis (see ClassifyPosition()).
     int leftVotes = 0;
     int rightVotes = 0;
     int topVotes = 0;
     int bottomVotes = 0;
+
+    // Per-axis opportunities (a tiled window opened, a swap was
+    // possible, and no position habit/restore had already placed it
+    // on that axis).
+    int horizontalOpenings = 0;
+    int verticalOpenings = 0;
 };
 
 class PlacementHabitStore
 {
 public:
 
-    // Loads from disk immediately - cheap (one small flat file), same
-    // reasoning HistoryStore uses.
+    // Identifies one window for the "last placement wins" rule. 0
+    // means "unknown/untracked": the vote is simply added.
+    using InstanceId = unsigned long;
+
+    // Loads (and, for a legacy file, migrates) from disk immediately.
     PlacementHabitStore();
 
-    // Records one manual "moved to workspace `workspace`" observation
-    // for `appClass` and saves immediately - a manual move is rare
-    // enough (nowhere near a hot path) that synchronous, immediate
-    // persistence isn't worth avoiding, exactly like
-    // HistoryStore::RecordLaunch().
+    // ---- User-directed placement (votes) --------------------------
+
     void RecordWorkspaceMove(
         const std::string& appClass,
-        int workspace
+        int workspace,
+        InstanceId instance = 0
     );
 
-    // Records one manual reposition observation for `appClass`, given
-    // the window's final geometry and the work area of the monitor it
-    // landed on (used only to find each axis's center - see the class
-    // comment for exactly what gets counted). A geometry/work area
-    // with no area (width or height <= 0) is silently ignored - there
-    // is no meaningful "which half" answer for either.
+    // `finalGeometry` is the window's content rect as Kohiko tracks
+    // it; `borderWidth` is the X11 border drawn OUTSIDE that rect.
+    // `monitorWorkArea` is the area whose center defines the axes.
+    // A geometry/work area with no area is ignored.
     void RecordPositionMove(
         const std::string& appClass,
         const Rect& finalGeometry,
-        const Rect& monitorWorkArea
+        const Rect& monitorWorkArea,
+        int borderWidth = 0,
+        InstanceId instance = 0
     );
 
-    // 0 if `appClass` has no confident workspace habit yet - too few
-    // observations, or too evenly split to call a genuine preference.
-    int PredictWorkspace(
-        const std::string& appClass
-    ) const;
+    // ---- Opportunities (openings) ---------------------------------
 
-    // One entry per axis with a confident habit, strongest first -
-    // empty if `appClass` has no confident position habit on either
-    // axis. A caller walking this list in order and nudging one step
-    // at a time per entry (see ApplyAdaptivePlacementNudge()) ends up
-    // approximating a corner (e.g. Left then Up for "always dragged
-    // to the top-left") when both axes are confident, without this
-    // class needing any notion of "corner" itself.
-    std::vector<Direction> PredictPositions(
-        const std::string& appClass
-    ) const;
+    void RecordWorkspaceOpening(const std::string& appClass);
+
+    // Per-axis: pass true for each axis on which this window had a
+    // genuine opportunity (not already positioned on that axis).
+    void RecordPositionOpening(
+        const std::string& appClass,
+        bool horizontal,
+        bool vertical
+    );
+
+    // Drops the per-window "last placement" memory (window closed).
+    void ForgetInstance(InstanceId instance);
+
+    // ---- Prediction -------------------------------------------------
+
+    // 0 if `appClass` has no confident workspace habit.
+    int PredictWorkspace(const std::string& appClass) const;
+
+    // One entry per confident axis, strongest first; empty if none.
+    std::vector<Direction> PredictPositions(const std::string& appClass) const;
+
+    // ---- Introspection (tests, diagnostics) -------------------------
+
+    std::optional<PlacementHabit> Inspect(const std::string& appClass) const;
+
+    // The exact classification RecordPositionMove() uses. Windows are
+    // judged by their OUTER rect (content + border on each side),
+    // which is the layout slot the window actually occupies, with a
+    // 1 px tolerance for integer rounding in the layout. Anything
+    // within that tolerance of the work-area center on an axis is
+    // AxisSide::Neutral for that axis.
+    static PositionSides ClassifyPosition(
+        const Rect& finalGeometry,
+        const Rect& monitorWorkArea,
+        int borderWidth
+    );
 
 private:
+
+    struct InstanceVote
+    {
+        std::string appClass;
+        int workspace = 0;
+        AxisSide horizontal = AxisSide::Neutral;
+        AxisSide vertical = AxisSide::Neutral;
+    };
 
     void Load();
     void Save() const;
 
     std::unordered_map<std::string, PlacementHabit> m_habits;
+    std::unordered_map<InstanceId, InstanceVote> m_instances;
 
+    // True when the on-disk file is from a newer format than this
+    // build understands: it is neither used nor overwritten.
+    bool m_persistDisabled = false;
 };
 
 }

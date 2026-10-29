@@ -168,6 +168,36 @@ void XConnection::Flush()
     XFlush(m_display);
 }
 
+bool XConnection::ClaimRootMarker(const char* name)
+{
+    Atom atom = XInternAtom(m_display, name, False);
+
+    Atom actualType = None;
+    int actualFormat = 0;
+    unsigned long itemCount = 0;
+    unsigned long bytesAfter = 0;
+    unsigned char* data = nullptr;
+
+    int status = XGetWindowProperty(
+        m_display, DefaultRootWindow(m_display), atom,
+        0, 1, False, XA_CARDINAL,
+        &actualType, &actualFormat, &itemCount, &bytesAfter, &data);
+
+    if (data)
+        XFree(data);
+
+    if (status == Success && actualType == XA_CARDINAL && itemCount > 0)
+        return false; // already claimed in this X session
+
+    long value = 1;
+    XChangeProperty(
+        m_display, DefaultRootWindow(m_display), atom, XA_CARDINAL, 32,
+        PropModeReplace, reinterpret_cast<unsigned char*>(&value), 1);
+    XFlush(m_display);
+
+    return true;
+}
+
 void XConnection::Sync()
 {
     XSync(m_display, False);
@@ -791,6 +821,28 @@ bool XConnection::IsDockWindowType(::Window window, const XAtoms& atoms)
     }
 
     return isDock;
+}
+
+bool XConnection::DeclaresWindowType(::Window window, const XAtoms& atoms)
+{
+    Atom actualType;
+    int actualFormat = 0;
+    unsigned long itemCount = 0;
+    unsigned long bytesLeft = 0;
+    unsigned char* data = nullptr;
+
+    bool declared = false;
+
+    if (XGetWindowProperty(
+            m_display, window, atoms.NET_WM_WINDOW_TYPE, 0, 16, False,
+            XA_ATOM, &actualType, &actualFormat, &itemCount, &bytesLeft, &data
+        ) == Success && data)
+    {
+        declared = itemCount > 0;
+        XFree(data);
+    }
+
+    return declared;
 }
 
 bool XConnection::IsNotificationWindowType(::Window window, const XAtoms& atoms)

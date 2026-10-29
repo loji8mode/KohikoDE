@@ -232,6 +232,13 @@ public:
     // here tracks real X11 stacking order beyond that.
     ManagedWindow* FloatingWindowAt(const Point& point) const;
 
+    // Trades `first` and `second` in their workspace's BSP tree. By
+    // contract `first` is the window the USER moved (the one dragged
+    // with Super+LMB, or the focused window for Super+Shift+h/j/k/l)
+    // and `second` is the passive window it traded places with. The
+    // swap itself is symmetric; adaptive placement is not: only
+    // `first` is user intent and only `first` is ever recorded as an
+    // observation - see the body.
     void SwapWindows(ManagedWindow* first, ManagedWindow* second);
     void ResizeWindow(ManagedWindow* window, int dx, int dy);
     void SetResizingCursor(bool resizing);
@@ -526,37 +533,60 @@ private:
     // on `reload` (setxkbmap is idempotent), unlike RunAutostart().
     void ApplyKeyboardLayouts();
 
-    // Launches every program listed in `auto_start_programs`, plus
-    // every `workspace<N>=` line (N from 1 to workspace.count) - the
-    // same idea, except each program listed there also gets recorded
-    // in m_pendingWorkspaceAutostarts so Manage() can land its
-    // window(s) on workspace N once they actually show up - and every
-    // freedesktop XDG autostart .desktop entry found by
-    // RunXdgAutostartEntries() below, which is how the audio/network/
-    // Bluetooth tray widgets (desktop/kohiko-*-tray.desktop) actually
-    // get started; Kohiko has no session manager of its own to do this
-    // otherwise. All of it runs exactly once, right after startup -
-    // see Initialize(). Deliberately never called from ReloadConfig(),
-    // or `kohikoctl reload` would relaunch every autostart program (a
-    // second Telegram, a second Discord, a second tray icon...) every
-    // time someone reloads the config.
+    // Launches the startup programs. WHICH programs is decided in
+    // exactly one place - BuildStartupPlan() (see StartupPlan.h for
+    // the responsibility model and what counts as "the same program"):
+    // `workspace<N>=` lines (launch + place on workspace N, N from 1
+    // to workspace.count), `auto_start_programs` (launch), and every
+    // freedesktop XDG autostart .desktop entry (CollectXdgAutostart-
+    // Commands() below - this is how the audio/network/Bluetooth tray
+    // widgets, desktop/kohiko-*-tray.desktop, actually get started;
+    // Kohiko has no session manager of its own). One logical program
+    // named in several sources launches ONCE, by the most specific
+    // one; intentional repeats and different-argument instances are
+    // never merged. Every launch, placed or not, is recorded in
+    // m_pendingStartupLaunches so Manage() can both land a
+    // `workspace<N>` window on its workspace and know the window
+    // came from Kohiko's own startup (never an adaptive-learning
+    // opportunity).
+    //
+    // Runs at most ONCE PER X SESSION, not once per Kohiko process:
+    // see ClaimAutostartForThisXSession(). Deliberately never called
+    // from ReloadConfig(), or `kohikoctl reload` would relaunch every
+    // autostart program every time someone reloads the config.
     void RunAutostart();
 
-    // The freedesktop-autostart half of RunAutostart() above: scans
-    // every directory Xdg::AutostartDirs() returns, in priority order,
-    // parses each ".desktop" file found (skipping any desktop ID
-    // already seen in a higher-priority directory, exactly as the spec
-    // requires - see AutostartDirs()'s own comment), and spawns
-    // whichever ones ShouldAutostart() accepts. Broken out on its own
-    // only because RunAutostart() was already doing something
-    // different (config-string parsing) for its other two sources;
-    // never called on its own from anywhere else.
-    void RunXdgAutostartEntries();
+    // Marks this X session as "autostart has run", via a property on
+    // the root window (which lives exactly as long as the X server -
+    // so a genuinely new X session starts without it). True the first
+    // time (caller should launch), false if it was already set: i.e.
+    // Kohiko was restarted/crash-restarted inside a session whose
+    // autostart programs are already running, and relaunching them
+    // would only duplicate every one.
+    bool ClaimAutostartForThisXSession();
 
-    // 0 if nothing pending matches `pid` (or it's <= 0); otherwise the
-    // workspace a `workspace<N>=` autostart line asked this window's
-    // process to land on - see RunAutostart() and Manage().
-    int ResolveWorkspaceAutostart(
+    // The commands of every XDG autostart entry that should start:
+    // scans every directory Xdg::AutostartDirs() returns, in priority
+    // order, parses each ".desktop" file (skipping any desktop ID
+    // already seen in a higher-priority directory, exactly as the
+    // spec requires - see AutostartDirs()'s own comment), and returns
+    // the Exec line of each one ShouldAutostart() accepts. Spawning
+    // is RunAutostart()'s job, after the plan has de-duplicated.
+    std::vector<std::string> CollectXdgAutostartCommands();
+
+    // Result of matching a newly-mapped window's process against
+    // Kohiko's own startup launches.
+    struct StartupLaunchMatch
+    {
+        bool launched = false; // this window's process came from a startup launch
+        int workspace = 0;     // 0 = that launch asked for no particular workspace
+    };
+
+    // `launched` is false if nothing live matches `pid` (or it's
+    // <= 0); otherwise the match carries the workspace a
+    // `workspace<N>=` line asked this window's process to land on
+    // (0 for an unplaced launch) - see RunAutostart() and Manage().
+    StartupLaunchMatch ResolveStartupLaunch(
         long pid
     ) const;
 
@@ -667,7 +697,14 @@ private:
     // one whose class has no confident habit on either axis yet.
     // Never called for a window TryRestoreSessionPosition() already
     // placed precisely - see Manage()'s call site.
-    void ApplyAdaptivePlacementNudge(ManagedWindow* window);
+    //
+    // `countOpportunity` is true when this window is a genuine
+    // opportunity to learn (see PlacementHabitStore.h): it then also
+    // records, per axis, whether the habit left that axis undecided,
+    // so the store has the "openings" denominator for position
+    // confidence. Axes the habit itself just decided are never
+    // counted - a working habit must not erode by being applied.
+    void ApplyAdaptivePlacementNudge(ManagedWindow* window, bool countOpportunity);
 
     // The identity a habit is learned/predicted against: `window`'s
     // WM_CLASS class string, falling back to its instance string if
@@ -690,10 +727,19 @@ private:
     // instance identity.
     void RecordAdaptiveWorkspaceHabit(ManagedWindow* window, int workspace);
 
+    // Records one genuine OPPORTUNITY to learn a workspace habit for
+    // `window`'s class: a new window appeared and nothing else
+    // (session, window rule, autostart, transient parent, or an
+    // existing habit) decided its workspace - Manage() calls this
+    // only for PlacementOrigin::Default. Same no-op conditions as
+    // above.
+    void RecordAdaptiveWorkspaceOpening(ManagedWindow* window);
+
     // Records one manual reposition observation for `window`'s app
     // class from its current (post-Arrange()) geometry - called from
-    // SwapWindows() for both windows involved in a swap. Same no-op
-    // conditions as RecordAdaptiveWorkspaceHabit() above.
+    // SwapWindows() for the window the USER moved only, never for the
+    // passive window it traded places with. Same no-op conditions as
+    // RecordAdaptiveWorkspaceHabit() above.
     void RecordAdaptivePositionHabit(ManagedWindow* window);
 
     // `new_workspace` fallback destination: whichever *other*
@@ -871,7 +917,8 @@ private:
     // both Initialize() and ReloadConfig() - see WindowRule.h.
     std::vector<WindowRule> m_windowRules;
 
-    // One program launched via `workspace<N>=` (see RunAutostart()).
+    // One program launched by Kohiko's startup plan (see RunAutostart()),
+    // with `workspace` 0 for a launch that asked for no placement.
     // `pid` is whatever Process::Spawn() actually returned for it -
     // the `/bin/sh -c` process's own pid, not the launched program's
     // (see Process::Spawn()'s comment for why those two are normally
@@ -882,15 +929,21 @@ private:
     // match stays live, so a window the same long-running process
     // opens much later in the session, well past anything "startup"
     // actually means, is never still being redirected by a config line
-    // about launching it in the first place.
-    struct PendingWorkspaceAutostart
+    // about launching it in the first place (or still treated as
+    // "launched by Kohiko's startup" rather than by the user).
+    struct PendingStartupLaunch
     {
         long pid = -1;
         int workspace = 0;
         std::chrono::steady_clock::time_point expiry;
     };
 
-    std::vector<PendingWorkspaceAutostart> m_pendingWorkspaceAutostarts;
+    std::vector<PendingStartupLaunch> m_pendingStartupLaunches;
+
+    // True only while AdoptExistingWindows() is calling Manage():
+    // adoption re-manages windows that were already open, which are
+    // never genuine opportunities for adaptive placement to learn from.
+    bool m_adoptingExistingWindows = false;
 
     // The invisible window WindowManager::Initialize() creates via
     // XConnection::InitializeEwmhSupport() to advertise EWMH support -

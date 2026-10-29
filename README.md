@@ -117,8 +117,11 @@ Two build systems are provided; pick whichever you'd rather have installed.
 make -j$(nproc)          # -> ./kohiko, ./kohikoctl, ./kohiko-settings, and (if libdbus-1-dev
                            #    + libpipewire-0.3-dev are present) ./kohiko-audio, ./kohiko-network,
                            #    ./kohiko-bluetooth, and their three tray widgets
-make test                 # BSP tree, launcher scoring, adaptive-placement, session persistence,
-                           # config migration, recovery mode, DBusValue unit tests (no X server needed)
+make test                 # BSP tree, launcher scoring, adaptive-placement, startup-plan, session persistence,
+                           # config migration, recovery mode, DBusValue unit tests, plus live window-manager
+                           # tests (adaptive placement, autostart, XEmbed) that need Xvfb (skip without it)
+make test-placementhabits # just the adaptive-placement learning-engine test
+make test-startupplan     # just the startup-plan (autostart de-duplication) test
 make test-monitors        # MonitorManager/XRandr tests (needs a real X server - skips gracefully without one)
 sudo make install          # installs to /usr/local, incl. every app's .desktop entry + icon,
                            # the tray widgets' autostart entries under /etc/xdg/autostart, and
@@ -899,7 +902,85 @@ Leave both alone and the lock screen just uses
 `lockscreen.background_color`, exactly as if no image were configured
 at all.
 
+## How adaptive placement learns
+
+This section describes Kohiko 0.21.5, which keeps adaptive placement
+enabled (see `general.adaptive_placement`); earlier releases recorded
+only the placements you made, with no notion of opportunities.
+
+Adaptive placement keeps two small, independent tallies per application
+class (the window's `WM_CLASS`): which **workspace** its windows end up
+on, and which **side of the layout** (left/right, top/bottom). It records
+two kinds of event, and nothing else:
+
+- **A placement you made by hand** - `Super+Shift+<N>` /
+  `kohikoctl dispatch movetoworkspace N`, or repositioning a tiled window
+  with a `Super`+drag or `Super+Shift+h/j/k/l`. Only the window *you*
+  moved counts: the window it traded places with is passive and learns
+  nothing. A window that spans an axis (two side-by-side windows both
+  span the full height) casts no vote on that axis.
+- **An opportunity to learn** - a new window appeared and *nothing had
+  already decided where it goes*. Opened it, left it where it landed:
+  that is evidence too, and it is the half that was missing before.
+
+What is deliberately **not** evidence - so Kohiko never learns from its
+own actions, and nothing you configured can quietly dilute a real habit:
+
+- a window an existing habit placed (a working habit would otherwise
+  erode simply by being used);
+- a window restored by Session Restore, placed by a `windowrule=`,
+  launched by Kohiko's own autostart, or following its transient parent;
+- a dialog/utility/splash window;
+- a window that was already open when Kohiko started.
+
+A habit predicts only when **all three** hold, for the leading choice:
+
+1. at least **3** placements by hand;
+2. at least **70%** of all placements for that application agree;
+3. those placements are at least **50%** of the opportunities - so
+   "moved it 3 times in 20 launches" is not a habit, while "moved it
+   every time" is.
+
+Within one window's lifetime only its *last* placement counts: sending a
+window to another workspace "just for now" and then back is not two
+votes, and cannot unseat an established habit. There is no time decay;
+a habit changes the same way it formed - by what you actually do next.
+
+The data lives in `$XDG_DATA_HOME/kohiko/placement_habits` (default
+`~/.local/share/kohiko/placement_habits`), a plain text file whose first
+line is `# kohiko-placement-habits v2`. A file written by 0.21.4 or
+earlier (no header) is migrated automatically the first time it is
+loaded: each old vote is treated as coming from one opportunity, so an
+existing habit keeps working with exactly the confidence it had and no
+more, the original is kept as `placement_habits.v1.bak`, and the file is
+rewritten as v2. A file from a *newer* Kohiko than the one running is
+left untouched. Delete the file at any time to forget everything.
+
+**Placement priority, strongest first:** Session Restore (when
+`session.restore_priority=session`) → `windowrule=workspace:N` → Session
+Restore → `workspace<N>=` startup line → a dialog's parent window →
+learned habit → the focused workspace. A learned habit never overrides
+something you configured.
+
 ## Autostart
+
+Three things can name a program to start with Kohiko, and - since 0.21.5 -
+they are deliberately *one* mechanism with three ways to write it down:
+Kohiko builds a single launch plan from all of them, and **a program named in
+more than one place is launched once, by the most specific one** -
+`workspace<N>=` (launch and place) over `auto_start_programs=` (launch)
+over a freedesktop `.desktop` autostart entry. Two entries are "the
+same program" only if they have the same executable (path ignored) *and*
+the same arguments, so `firefox -P work` and `firefox -P home` are never
+merged, and a program repeated within one list (`workspace1=xterm xterm`)
+is launched twice, because you wrote it twice. Skipped duplicates are
+logged at startup.
+
+Autostart runs **once per X session**, not once per Kohiko process: a
+Kohiko restart or crash-restart inside a session whose programs are
+already running does not launch them a second time. (It is remembered in
+a root-window property, which disappears with the X server - so a new
+login starts everything again.)
 
 `auto_start_programs=` takes a space-separated list of commands, each
 launched once, right after the bar/tray/launcher finish starting up -
@@ -927,9 +1008,10 @@ workspace2=discord telegram-desktop
 workspace3=steam
 ```
 
-List a program under `workspace<N>=` instead of `auto_start_programs=`,
-not in addition to it - either one launches it, and `workspace<N>=` is
-just `auto_start_programs=` with a destination attached. Same
+List a program under `workspace<N>=` instead of `auto_start_programs=`.
+If you name it in both anyway, it is launched once, on the workspace.
+`workspace<N>=` is just `auto_start_programs=` with a destination
+attached. Same
 space-separated, `/bin/sh -c`-through-DISPLAY syntax either way, and a
 program can only be pinned to one workspace at a time.
 
@@ -1764,13 +1846,15 @@ relative proportions, just applied to whichever axis now applies.
   Super+Shift+`h`/`j`/`k`/`l`), and starts placing new windows of that
   application there automatically once the pattern is clear and
   consistent - during an ordinary session, not just after a restart.
-  A one-off manual move never immediately becomes a habit; it takes a
-  genuinely repeated, consistent pattern (see `general.
-  adaptive_placement` in `config/default.conf`) before Kohiko starts
-  predicting anything, and it only ever fills in when neither an
-  explicit `windowrule=` nor a precise Session Restore match already
-  has an opinion. Turn off with `general.adaptive_placement=false` to
-  place every new window using only the ordinary rules, with no
+  A one-off manual move never immediately becomes a habit: it takes a
+  genuinely repeated, consistent pattern - and, since 0.21.5, one that
+  holds up against how often you simply *left the application alone*
+  (see [How adaptive placement learns](#how-adaptive-placement-learns)).
+  It only ever fills in when nothing you configured - a `windowrule=`,
+  a `workspace<N>=` line, a precise Session Restore match - has an
+  opinion. This is deterministic bookkeeping of your own repeated
+  actions, nothing more. Turn off with `general.adaptive_placement=false`
+  to place every new window using only the ordinary rules, with no
   learned habits at all.
 - **A power menu on every bar** - shutdown/restart/suspend, nothing
   else - see [The power menu](#the-power-menu).

@@ -172,6 +172,52 @@ check "$(xwininfo -id "$C_WIN" 2>&1 | grep -c 'Width: 24')" "0" \
     "...and it's still sized to fit the tray (resized by ReflowIcons()), not back at its raw 24px request "\
 "as it would be if it had been forced through ordinary tiling instead"
 
+# --- Client D: a Qt-like application window ----------------------------------
+# Qt sets _XEMBED_INFO on EVERY top-level window (main windows, dialogs,
+# tool windows, splash screens - not just tray icons) and ALSO declares
+# an EWMH _NET_WM_WINDOW_TYPE on all of them. Measured against real
+# FeatherPad and a real Qt app, the hold above used to keep every such
+# window invisible for the full 2 s deadline (2.5 s on screen, because
+# the sweep only runs once per Tick()). A window that declares a type is
+# an ordinary managed window, not a possible tray icon, and must be
+# tiled immediately - while B above (no declared type) is still held
+# for the deadline and C still docks.
+echo
+echo "-- A Qt-like window (_XEMBED_INFO + declared window type) is NOT held --"
+
+now_ms() { date +%s%3N; }
+
+D_START=$(now_ms)
+"$TEST_CLIENT" --title "QtLike" --class "TestApp" --width 400 --height 300 --xembed \
+    --window-type _NET_WM_WINDOW_TYPE_NORMAL > "$WORKDIR/D.log" 2>&1 &
+D_PID=$!
+
+D_WIN=""
+while [ -z "$D_WIN" ]; do
+    D_WIN=$(grep -oE '0x[0-9a-f]+' "$WORKDIR/D.log" 2>/dev/null | head -1)
+    [ -n "$D_WIN" ] || sleep 0.02
+    [ $(( $(now_ms) - D_START )) -lt 3000 ] || break
+done
+
+# Poll until it has been resized by the tiling layout (no longer its raw
+# 400px creation width), up to 3 s - the old hold would take >= 2 s.
+D_TILED=0
+while [ $(( $(now_ms) - D_START )) -lt 3000 ]; do
+    if [ -n "$D_WIN" ] && [ "$(xwininfo -id "$D_WIN" 2>/dev/null | grep -c 'Width: 400')" = "0" ] && \
+       xwininfo -id "$D_WIN" 2>/dev/null | grep -q 'IsViewable'; then
+        D_TILED=1
+        break
+    fi
+    sleep 0.02
+done
+D_MS=$(( $(now_ms) - D_START ))
+
+echo "  (Qt-like window tiled and viewable after ${D_MS} ms)"
+check "$D_TILED" "1" \
+    "a window with _XEMBED_INFO that declares a window type is managed and visible, not held as a possible tray icon"
+check "$([ "$D_MS" -lt 1000 ] && echo fast || echo slow)" "fast" \
+    "...and promptly: within 1 s of launch, versus the >= 2 s the XEmbed hold imposed on every Qt window before"
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

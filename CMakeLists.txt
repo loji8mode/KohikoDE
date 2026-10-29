@@ -248,6 +248,14 @@ if(KOHIKO_DESKTOP_APPS_AVAILABLE)
     target_link_libraries(test_trayiconclient PRIVATE kohiko-desktop-shared)
     add_test(NAME TrayIconClient COMMAND test_trayiconclient)
 
+    # State change -> visible pixels, measured with the real
+    # TrayIconClient and an independent X connection (see the file's
+    # header comment). Skips cleanly with no X display.
+    find_package(Threads REQUIRED)
+    add_executable(test_trayiconclient_redraw_latency tests/test_trayiconclient_redraw_latency.cpp)
+    target_link_libraries(test_trayiconclient_redraw_latency PRIVATE kohiko-desktop-shared Threads::Threads)
+    add_test(NAME TrayIconClientRedrawLatency COMMAND test_trayiconclient_redraw_latency)
+
     # Same "needs a real X11 connection, kept out of `make test`" deal
     # again - focused tests for the new native notification mechanism
     # itself (NotificationPopup/NotificationCenter - see that file's
@@ -289,14 +297,30 @@ target_include_directories(test_launcherscoring PRIVATE ${CMAKE_SOURCE_DIR}/incl
 add_test(NAME LauncherScoring COMMAND test_launcherscoring)
 
 # Pure logic + a throwaway XDG_DATA_HOME the test redirects itself to
-# (see the file) - no X11 display needed.
+# (see the file) - no X11 display needed. Also links the real
+# BSPTree/LayoutEngine/ManagedWindow so the position-classification
+# regression is driven by genuine layout geometry.
 add_executable(test_placementhabits
     tests/test_placementhabits.cpp
     src/PlacementHabitStore.cpp
     src/Xdg.cpp
+    src/BSPTree.cpp
+    src/BSPLeaf.cpp
+    src/BSPSplit.cpp
+    src/ManagedWindow.cpp
+    src/LayoutEngine.cpp
 )
 target_include_directories(test_placementhabits PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME PlacementHabitStore COMMAND test_placementhabits)
+
+# Pure logic (no X11, nothing spawned): the single decision point for
+# which startup programs Kohiko launches - see StartupPlan.h.
+add_executable(test_startupplan
+    tests/test_startupplan.cpp
+    src/StartupPlan.cpp
+)
+target_include_directories(test_startupplan PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME StartupPlan COMMAND test_startupplan)
 
 # Needs a real X11/XRandR connection (skips its X-dependent checks
 # gracefully if $DISPLAY isn't set - see the file for why) - the same
@@ -710,6 +734,28 @@ add_test(
     NAME XEmbedDockTimeout
     COMMAND sh ${CMAKE_SOURCE_DIR}/tests/test_xembed_dock_timeout.sh
         $<TARGET_FILE:kohiko> $<TARGET_FILE:x11_test_client>
+)
+
+# Live regression tests for adaptive placement's WindowManager wiring
+# and for the startup plan / once-per-X-session autostart guard - both
+# run the real `kohiko` as an actual window manager under Xvfb and are
+# gracefully skipped by the scripts themselves if Xvfb isn't available.
+add_test(
+    NAME AdaptivePlacementLive
+    COMMAND sh ${CMAKE_SOURCE_DIR}/tests/test_adaptive_live.sh
+        $<TARGET_FILE:kohiko> $<TARGET_FILE:kohikoctl> $<TARGET_FILE:x11_test_client>
+)
+add_test(
+    NAME AutostartLive
+    COMMAND sh ${CMAKE_SOURCE_DIR}/tests/test_autostart_live.sh
+        $<TARGET_FILE:kohiko> $<TARGET_FILE:kohikoctl> $<TARGET_FILE:x11_test_client>
+)
+
+# Pure text check: include/Version.h must match the newest numbered
+# release in CHANGELOG.md.
+add_test(
+    NAME VersionConsistency
+    COMMAND sh ${CMAKE_SOURCE_DIR}/tests/test_version_consistency.sh
 )
 
 # --- install ------------------------------------------------------------------------

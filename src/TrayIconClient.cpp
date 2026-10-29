@@ -213,6 +213,27 @@ void TrayIconClient::Redraw()
         m_drawCallback(m_display, m_window, m_gc, m_visual, m_colormap, m_iconSize);
 
     m_dirty = false;
+
+    // Send what was just drawn to the X server NOW. Xlib only buffers
+    // draw requests client-side; without this they sat in that buffer
+    // until something else happened to flush it - and Run() goes
+    // straight from here into a blocking poll(), whose only wake-ups
+    // are the X fd, a watched fd, or a timer. So a real state change
+    // (a PipeWire/D-Bus callback on a watched fd -> RequestRedraw() ->
+    // this function) redrew into the buffer and then stayed invisible
+    // until the tool's next unrelated wake-up: a slow 2 s state timer,
+    // an incidental X event, a click - measured at ~1 s to several
+    // seconds on the unfixed code (tests/
+    // test_trayiconclient_redraw_latency.cpp). It was masked for a long
+    // time by kohiko-audio-tray's permanent 100 ms ticker, which woke
+    // the loop (and so flushed) ten times a second whether or not
+    // anything had changed; removing that ticker in 0.21.4 exposed it.
+    // Flushing at the end of the redraw is the event-driven fix: it
+    // costs one write per redraw, and redraws only ever happen because
+    // something real (a state change, an Expose) asked for one - no
+    // timer, no polling. (Bar::Redraw(), UiWindow and SystemTray all
+    // already flush after drawing; this was the one that didn't.)
+    XFlush(m_display);
 }
 
 void TrayIconClient::HandleEvent(XEvent& event)

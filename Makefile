@@ -119,7 +119,7 @@ DESKTOP_SHARED_OBJ := $(patsubst src/%.cpp,build/%.o,$(DESKTOP_SHARED_SRC))
 DESKTOP_COMMON_OBJ := build/Font.o build/Config.o build/IconResolver.o build/Xdg.o build/Utils.o build/IniFile.o \
     build/NotificationPopup.o build/NotificationCenter.o
 
-.PHONY: all clean test install uninstall
+.PHONY: all clean test install uninstall test-placementhabits test-startupplan
 
 all: kohiko kohikoctl kohiko-settings
 
@@ -226,10 +226,11 @@ ifeq ($(KOHIKO_HAVE_PIPEWIRE)-$(KOHIKO_HAVE_DBUS_PKG)-$(KOHIKO_HAVE_LIBRSVG),yes
     TEST_AUDIO_LIVE_DEPS := kohiko-audio kohiko-audio-tray
 endif
 
-test: kohiko build/x11_test_client build/test_bsptree build/test_launcherscoring build/test_placementhabits build/test_dbusvalue build/test_sessionstore build/test_configmigration build/test_recoverymode build/test_lockrecovery build/test_appdirwatcher build/test_autologinconfigurator build/test_consoleautologinconfigurator build/test_wallpapermanager build/test_desktopentry build/test_iconresolver build/test_eventloop build/test_windowplacementnotice build/test_rect_clamping build/test_notificationlayout build/test_devicenotificationdiff $(TEST_NETWORKMANAGERCLIENT) $(TEST_SCROLLHITTEST) $(TEST_NETWORKWINDOW) $(TEST_NETWORKMANAGER_LIVE_HARNESS) $(TEST_BLUETOOTHWINDOW) $(TEST_AUDIO_LIVE_DEPS)
+test: kohiko kohikoctl build/x11_test_client build/test_bsptree build/test_launcherscoring build/test_placementhabits build/test_startupplan build/test_dbusvalue build/test_sessionstore build/test_configmigration build/test_recoverymode build/test_lockrecovery build/test_appdirwatcher build/test_autologinconfigurator build/test_consoleautologinconfigurator build/test_wallpapermanager build/test_desktopentry build/test_iconresolver build/test_eventloop build/test_windowplacementnotice build/test_rect_clamping build/test_notificationlayout build/test_devicenotificationdiff $(TEST_NETWORKMANAGERCLIENT) $(TEST_SCROLLHITTEST) $(TEST_NETWORKWINDOW) $(TEST_NETWORKMANAGER_LIVE_HARNESS) $(TEST_BLUETOOTHWINDOW) $(TEST_AUDIO_LIVE_DEPS)
 	./build/test_bsptree
 	./build/test_launcherscoring
 	./build/test_placementhabits
+	./build/test_startupplan
 	./build/test_dbusvalue
 	./build/test_sessionstore
 	./build/test_configmigration
@@ -249,6 +250,9 @@ test: kohiko build/x11_test_client build/test_bsptree build/test_launcherscoring
 	sh tests/test_kohiko_session.sh
 	sh tests/test_networkmanager_live.sh
 	sh tests/test_xembed_dock_timeout.sh
+	sh tests/test_adaptive_live.sh
+	sh tests/test_autostart_live.sh
+	sh tests/test_version_consistency.sh
 ifeq ($(KOHIKO_HAVE_DBUS_PKG),yes)
 	./build/test_networkmanagerclient
 endif
@@ -271,8 +275,21 @@ build/test_launcherscoring: tests/test_launcherscoring.cpp src/LauncherScoring.c
 # Same reasoning again - pure logic, plus a throwaway XDG_DATA_HOME
 # the test redirects itself to (see the file) so it never touches a
 # real user's actual learned habits.
-build/test_placementhabits: tests/test_placementhabits.cpp src/PlacementHabitStore.cpp src/Xdg.cpp | build
+# Also links the real BSPTree/LayoutEngine/ManagedWindow so the
+# position-classification regression is driven by genuine layout
+# geometry, not hand-made rectangles (see the file's own comment).
+build/test_placementhabits: tests/test_placementhabits.cpp src/PlacementHabitStore.cpp src/Xdg.cpp src/BSPTree.cpp src/BSPLeaf.cpp src/BSPSplit.cpp src/ManagedWindow.cpp src/LayoutEngine.cpp | build
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
+
+test-placementhabits: build/test_placementhabits
+	./build/test_placementhabits
+
+# Pure logic (no X11, nothing spawned): the startup-program planner.
+build/test_startupplan: tests/test_startupplan.cpp src/StartupPlan.cpp | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
+
+test-startupplan: build/test_startupplan
+	./build/test_startupplan
 
 # DBusValue is pure data-structure logic too (no actual D-Bus
 # connection involved - see the file itself).
@@ -486,8 +503,15 @@ build/test_bar: tests/test_bar.cpp src/Bar.cpp src/SystemTray.cpp src/Font.cpp s
 # set every one of the three real tray tools already links) rather
 # than hand-picking a smaller subset, since TrayIconClient/UiIconCache
 # are already part of that shared object set for exactly this reason.
-test-trayiconclient: build/test_trayiconclient
+test-trayiconclient: build/test_trayiconclient build/test_trayiconclient_redraw_latency
 	./build/test_trayiconclient
+	./build/test_trayiconclient_redraw_latency
+
+# Real TrayIconClient on its own X connection + an independent observer
+# connection reading real pixels back: measures state change -> visible.
+# Needs an X display (skips cleanly without one).
+build/test_trayiconclient_redraw_latency: tests/test_trayiconclient_redraw_latency.cpp $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) | build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ $(LIBS) $(RSVG_LIBS) -pthread
 
 build/test_trayiconclient: tests/test_trayiconclient.cpp $(DESKTOP_SHARED_OBJ) $(DESKTOP_COMMON_OBJ) | build
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ $(LIBS) $(RSVG_LIBS)

@@ -53,14 +53,16 @@ const std::vector<ConfigOption>& ConfigSchema::All()
             {}
         },
         {
-            "General", "Autostart", "auto_start_programs", ConfigValueType::String, "Telegram discord zen-browser flameshot",
+            "General", "Autostart", "auto_start_programs", ConfigValueType::String, "flameshot",
             "Space-separated programs launched once, automatically, right "
             "after Kohiko finishes starting up - no keybind needed. Each runs "
             "exactly like an exec.<name>= command (through /bin/sh -c, on "
             "this session's DISPLAY). Leave empty to autostart nothing. Want "
             "one of these on a specific workspace instead of wherever's "
             "current? Use the Workspaces category's per-workspace autostart "
-            "fields instead of (not in addition to) this one.",
+            "fields instead of (not in addition to) this one. If a program is "
+            "named in both places anyway, Kohiko launches it once, on the "
+            "workspace.",
             {}
         },
         {
@@ -81,11 +83,17 @@ const std::vector<ConfigOption>& ConfigSchema::All()
             "tiling layout you repeatedly move its windows to by hand, and "
             "starts placing new windows of that application there "
             "automatically once the pattern is clear and consistent - during "
-            "an ordinary session, not just after a restart. Never overrides "
-            "an explicit windowrule= or a precise Session Restore match; only "
-            "fills in when neither has an opinion. Turn off to open every "
-            "new window using only the ordinary placement rules, with no "
-            "learned habits at all.",
+            "an ordinary session, not just after a restart. A habit needs at "
+            "least 3 manual placements, 70% agreement, and for those "
+            "placements to be at least half of the times a new window of that "
+            "application appeared with nothing else deciding where it goes - "
+            "so moving something a few times among many launches is not a "
+            "habit. It learns only from placements you make by hand, never "
+            "from Kohiko's own placement, and never overrides an explicit "
+            "windowrule=, a workspace<N>= line, or a precise Session Restore "
+            "match; only fills in when none has an opinion. Turn off to open "
+            "every new window using only the ordinary placement rules, with "
+            "no learned habits at all.",
             {}
         },
 

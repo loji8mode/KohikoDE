@@ -74,6 +74,14 @@ public:
 
     void Sync();
 
+    // Atomically-enough claims a once-per-X-session marker: a
+    // CARDINAL property named `name` on the root window, which lives
+    // exactly as long as the X server does. Returns true if this call
+    // set it (the caller is the first in this X session), false if it
+    // was already set - and also false-safe: if the property can't be
+    // set, returns true (better to act than to silently never act).
+    bool ClaimRootMarker(const char* name);
+
     // --- window lifecycle ---------------------------------------------
 
     void MapWindow(::Window window);
@@ -288,6 +296,18 @@ public:
     // so it applies the same way to any window that sets it, present
     // or future.
     bool IsXEmbedWindow(::Window window, const XAtoms& atoms);
+
+    // True if `window` declares at least one _NET_WM_WINDOW_TYPE atom
+    // (EWMH). A client that sets one is explicitly identifying itself
+    // as a window the window manager is meant to manage - every Qt
+    // top-level (main window, dialog, tool window, splash screen)
+    // does, with _NET_WM_WINDOW_TYPE_NORMAL always present as the
+    // fallback atom. A hand-rolled XEmbed tray-icon client has no
+    // reason to, which is exactly why Manage() uses this to tell an
+    // ordinary Qt window (that happens to carry _XEMBED_INFO too -
+    // Qt sets it on EVERY top-level) from a possible tray icon. See
+    // Manage()'s XEmbed comment and CHANGELOG.md.
+    bool DeclaresWindowType(::Window window, const XAtoms& atoms);
 
     // Direct children of the root window, in bottom-to-top stacking
     // order (as XQueryTree returns them) - used once, at startup, by

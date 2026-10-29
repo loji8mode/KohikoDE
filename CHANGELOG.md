@@ -1,5 +1,205 @@
 # Changelog
 
+## Version 0.21.5
+
+Release date: 2026-10-08
+
+**0.21.5 is the adaptation-preserving release.** Adaptive placement
+(`PlacementHabitStore`, `general.adaptive_placement`, the learned-habit
+file) remains fully enabled and unchanged in purpose: it is
+**deterministic bookkeeping of repeated, intentional user actions** (no
+model, no scoring beyond three integer thresholds), and it still learns
+where you put an application. Nothing about it is removed or replaced by
+explicit window rules in this version. This release makes it stop
+learning from things you never did, and adds the denominator it was
+missing, alongside independent fixes for autostart duplication, slow Qt
+window startup, tray-icon redraw latency, and the reported version
+string. Everything below was reproduced against the pristine 0.21.4
+binary first, then re-measured after the fix.
+
+### Fixed - adaptive placement learned from signals that were not user intent
+- **A swap voted for the window you did NOT move.** `SwapWindows()`
+  recorded a position vote for both windows. Both callers (a Super+LMB
+  drag, Super+Shift+h/j/k/l) pass the window the *user* moved first and
+  the window it traded places with second, so the passive neighbour
+  learned from a move it never made. Only the mover is recorded now;
+  the swap itself is unchanged. Live, on the real window manager,
+  after one `move left`: 0.21.4 recorded votes for **both** classes
+  (`Passive` got a right and a top vote); now `Mover` gets exactly one
+  left vote and `Passive` gets none.
+- **Windows on the center line got an invented top/bottom or left/right
+  vote.** The classifier compared the *content* rect's center with the
+  work-area center using `<`/`else`, but the layout shrinks content by
+  `2 x border` without shifting its origin, so a window that spans an
+  axis sat `border` px off center and was forced to one side - two
+  side-by-side windows both voted "top" (or, at border 0, both
+  "bottom"), and three such swaps manufactured a 100% "Up" habit from
+  nothing. The classifier now judges a window by its **outer** rect
+  (content + border), which *is* the layout slot and so is exactly
+  centered when the window spans the axis, with a 1 px rounding
+  tolerance; an axis with no meaningful side casts no vote. Verified
+  against the real `LayoutEngine` for borders 0, 1, 2, 3 and 5.
+
+### Changed - adaptive evidence and confidence
+- **Exposure-aware confidence.** The store only ever knew "I moved it N
+  times", never "I opened it M times". It now also records *openings*:
+  a new window appeared and nothing had already decided its placement.
+  A habit still needs the 0.21.4 baseline (>= 3 votes, >= 70% share)
+  **and** leading votes / openings >= 50% (initial value, pinned on
+  both sides of the boundary by tests so it can be evaluated and
+  changed deliberately). "3 moves in 20 launches" used to predict a
+  workspace and survive a restart; it no longer does. The position
+  habit applies the same rule per axis.
+- **What counts as an opening is strict.** Only `PlacementOrigin::
+  Default` - nothing decided. Never an opening: a window an existing
+  habit placed (or a working habit would erode by being used),
+  Session Restore, a `windowrule=`, a `workspace<N>=` line, Kohiko's
+  own autostart launches, a transient/dialog or utility/splash window,
+  and windows already open when Kohiko started. Position openings
+  additionally require another tile to swap with, and exclude any axis
+  the habit itself just decided.
+- **Kohiko never learns from its own placement** - verified rather than
+  assumed: the automatic nudge goes straight to `BSPTree::Swap()`,
+  habit-placed windows call no recorder, and the live test places three
+  windows via a habit and checks its votes and openings are unchanged.
+- **One vote per window instance ("last placement wins").** Sending a
+  window to workspace 5 "for now" and straight back to 3 used to leave
+  a vote for each (0.21.4: a 3-vote habit became 3/5 = 60% and was
+  silently withdrawn after a two-gesture excursion). Now it is one vote
+  for the final workspace and the habit is untouched. In-memory only.
+- No recency/decay was added: the openings denominator already dilutes
+  stale habits, and the model stays deterministic and explainable.
+- Persistence is **versioned**. New files start with
+  `# kohiko-placement-habits v2` and are written atomically (temp file +
+  rename), sorted, deterministically. A 0.21.4 file (no header) is
+  migrated on first load - each legacy vote is treated as one opening
+  (so a habit that predicted under 0.21.4 predicts identically and is
+  never *more* confident), the original is kept once as
+  `placement_habits.v1.bak`. A file from a newer format is neither used
+  nor overwritten. Corrupt lines are skipped individually.
+
+### Fixed - Workspace / Autostart conflicts (duplicate launches)
+- **Root cause.** `ConfigMigration` appends every schema key missing
+  from an existing config using its schema default, and the schema
+  default for `auto_start_programs` was `Telegram discord zen-browser
+  flameshot` - while the shipped `default.conf` uses `workspace1=
+  zen-browser`, `workspace2=discord Telegram` and `auto_start_programs=
+  flameshot`. Any existing config without that one key gained the
+  4-program list and then launched Telegram, discord and zen-browser
+  **twice**: once by `auto_start_programs` and once by `workspace<N>`.
+  Only the `workspace<N>` launch was tracked for placement, so the two
+  instances fought (one on workspace 2, one wherever focus was). XDG
+  autostart entries were a third, untracked launch path, and autostart
+  ran again on every Kohiko *process* start - including a crash-restart
+  inside a live session, relaunching everything.
+  Reproduced on the pristine 0.21.4 binary: 2 launches and 2 windows
+  per program, the unplaced one left on workspace 1.
+- **One plan, one decision** (`StartupPlan`, pure and unit-tested). Every
+  source feeds `BuildStartupPlan()`; a program named in several places
+  launches once, by the most specific: `workspace<N>=` > `auto_start_
+  programs=` > XDG entry. "Same program" means same executable
+  (path-stripped) **and** same arguments - not merely the same
+  executable name - so `firefox -P work` / `firefox -P home` are never
+  merged, and a program repeated within one source (`workspace1=xterm
+  xterm`) launches as many times as written. Skipped duplicates are
+  logged. Every launch, placed or not, is now tracked.
+- **Autostart runs once per X session.** A root-window property
+  (`_KOHIKO_AUTOSTART_DONE`) lives exactly as long as the X server, so a
+  clean restart or a `kill -9` + restart inside the session does not
+  relaunch, and a new X session does. (An X server with no clients left
+  resets and forgets; a real session always has other clients.)
+- The schema default for `auto_start_programs` now matches the shipped
+  config (`flameshot`). Configs already migrated with the old default
+  need no edit - the plan removes the duplicates at launch.
+- Responsibilities, final: autostart/`workspace<N>` *launch*; adaptive
+  placement *learns from your placements and never launches anything*;
+  session restore restores; none of them overrides an explicit
+  `windowrule=`. `workspace<N>=` still launches (a shipped, documented
+  behavior) - it is autostart with a destination.
+- Known limit: a window is matched to its launch through
+  `_NET_WM_PID`; a client that does not set it is simply not recognised
+  as a startup launch (the same limit `workspace<N>` placement always
+  had).
+
+### Fixed - 2-3 s delay before Qt windows (FeatherPad, Telegram, ...) appear
+- **Root cause, measured on real FeatherPad 1.4.1 and a real Qt app
+  under the real window manager:** Qt sets `_XEMBED_INFO` on **every**
+  top-level window it creates - main windows, dialogs, tool windows,
+  splash screens - not only tray icons. Since 0.20.4 `Manage()` holds
+  any window with that property for up to 2 s waiting for a tray dock
+  request, and the deadline is only checked by the 1 Hz `Tick()`, so
+  every Qt window sat invisible for 2.4-2.5 s (FeatherPad: 2528 ms
+  median over 5 launches).
+- **Fix.** The hold now applies only to an XEmbed window that is neither
+  already docked nor *self-declared as a managed window* through an EWMH
+  `_NET_WM_WINDOW_TYPE`. Measured protocol traffic is why this is safe: a
+  genuine Qt tray icon (and Kohiko's own `TrayIconClient`) sends its dock
+  request **before** mapping - docked and reparented ~0.5 ms later with
+  no MapRequest at all - while every Qt window kind (main, dialog, tool,
+  splash) declares a window type. The hand-rolled map-first tray client
+  the hold exists for declares none and is still held. The 2 s deadline
+  is kept as the backstop; nothing was removed.
+  FeatherPad: 2528 ms -> 67 ms median (5 launches each). Qt main window
+  with a real Qt tray icon beside it: 2531 ms -> 98 ms, and the tray icon
+  is still embedded into the tray within ~1 ms of creation under both.
+- Trade-off, stated plainly: a map-first tray icon that *also* declares a
+  window type would be tiled for an instant before its dock request
+  arrives; the reverse-race path (dock after management) already corrects
+  the end state.
+- Not measured: Telegram (not installable in the test environment). It
+  is Qt/xcb and expected to behave like the Qt apps above.
+
+### Fixed - tray icons stayed stale after a real state change
+- **Root cause, measured.** `TrayIconClient::Redraw()` drew and returned
+  without `XFlush`, and `Run()` goes straight into a blocking `poll()`.
+  Draw requests sat in Xlib's client-side buffer until something
+  unrelated woke the loop - the tools' 2 s state timer, an incidental X
+  event, a click. (`Bar::Redraw()`, `UiWindow` and `SystemTray` already
+  flushed; this was the one that did not.) It was masked for a long time
+  by `kohiko-audio-tray`'s permanent 100 ms ticker, whose removal in
+  0.21.4 exposed it.
+- **Fix.** One `XFlush` at the end of `Redraw()`. Event-driven: redraws
+  only ever happen because a state change or Expose asked for one; no
+  timer, no polling, and the removed 100 ms ticker stays removed.
+- Measured with the real `TrayIconClient`, a watched-fd callback calling
+  `RequestRedraw()` and an independent X connection reading the real
+  pixels back: state change visible after **~999 ms** (with a 2 s timer)
+  and **~2000 ms** (without) -> **0.1 ms** and **2.2 ms**; first paint
+  after mapping ~3000 ms / never -> ~1 ms; zero redraws while idle.
+- Not measured: the real PipeWire / D-Bus tray tools (no PipeWire in the
+  test environment). They use the same `TrayIconClient::Redraw()` path.
+
+### Fixed - the reported version was stale
+- `include/Version.h` still said `0.21.1` - never bumped for 0.21.2,
+  0.21.3 or 0.21.4 - so the log read "kohiko 0.21.1 starting". It is the
+  single source of the string and only feeds that log line. Now 0.21.5,
+  and `tests/test_version_consistency.sh` fails if it ever disagrees with
+  the newest numbered release here.
+
+### Tests
+- `tests/test_placementhabits.cpp` rewritten (137 checks): baseline
+  3-vote/70% behavior, exposure boundaries, origins, last-placement-wins,
+  classification driven by the real `LayoutEngine` (including proof the
+  old classifier cast the fake votes), v2 round-trip, v1 migration,
+  corrupt/newer files. Each case now uses its own data directory.
+- `tests/test_startupplan.cpp` (39 checks): accidental cross-source
+  duplicates removed; intentional repeats and different-argument
+  instances preserved.
+- `tests/test_adaptive_live.sh` (32 checks) - the real window manager:
+  passive swap target, self-placement, openings, rules, transients,
+  adoption, autostart, temporary moves, legacy migration.
+- `tests/test_autostart_live.sh` (19 checks) - real duplicate scenario,
+  and once-per-X-session: fresh session launches once, a clean and a
+  `kill -9` restart in the same session do not relaunch, a new X
+  session does. Fails 10 of 19 against the 0.21.4 binary.
+- `tests/test_xembed_dock_timeout.sh` - every existing assertion
+  unchanged; a Qt-like window (`_XEMBED_INFO` + window type) is added
+  and must be visible within 1 s (0.21.4: 2916 ms).
+- `tests/test_trayiconclient_redraw_latency.cpp` - state change to
+  visible pixels, with an idle-no-polling assertion. Fails 4 of 6 on the
+  unfixed code.
+- `tests/live/x11_test_client` gained `--net-wm-pid`.
+
 ## Version 0.21.4
 
 Release date: 2026-09-26

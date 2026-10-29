@@ -12,6 +12,9 @@
 //
 // Usage:
 //   x11_test_client [options]
+//     --net-wm-pid            Set _NET_WM_PID to this process's pid, as every
+//                             well-behaved real application does (lets Kohiko
+//                             match the window to the process that launched it)
 //     --title NAME            WM_NAME / _NET_WM_NAME (default "TestClient")
 //     --class NAME            WM_CLASS class (default "TestClient")
 //     --xembed                Set _XEMBED_INFO on this window (mimics
@@ -47,6 +50,7 @@ int main(int argc, char** argv)
     int width = 400, height = 300;
     int r = 100, g = 120, b = 200;
     bool sendDockRequest = false;
+    bool setNetWmPid = false;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -56,6 +60,7 @@ int main(int argc, char** argv)
         if (arg == "--title") title = next();
         else if (arg == "--class") className = next();
         else if (arg == "--xembed") xembed = true;
+        else if (arg == "--net-wm-pid") setNetWmPid = true;
         else if (arg == "--transient-for") transientFor = strtoul(next().c_str(), nullptr, 0);
         else if (arg == "--override-redirect") overrideRedirect = true;
         else if (arg == "--window-type") windowType = next();
@@ -123,6 +128,14 @@ int main(int argc, char** argv)
         Atom typeAtom = XInternAtom(display, windowType.c_str(), False);
         XChangeProperty(display, win, netWmWindowType, XA_ATOM, 32, PropModeReplace,
                          reinterpret_cast<unsigned char*>(&typeAtom), 1);
+    }
+
+    if (setNetWmPid)
+    {
+        Atom netWmPid = XInternAtom(display, "_NET_WM_PID", False);
+        long pid = static_cast<long>(getpid());
+        XChangeProperty(display, win, netWmPid, XA_CARDINAL, 32, PropModeReplace,
+                         reinterpret_cast<unsigned char*>(&pid), 1);
     }
 
     if (xembed)

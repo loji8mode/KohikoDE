@@ -1,4 +1,5 @@
 #include "WindowManager.h"
+#include "StartupPlan.h"
 
 #include "Command.h"
 #include "Config.h"
@@ -304,7 +305,13 @@ void WindowManager::AdoptExistingWindows()
         if (attrs.map_state != IsViewable && !hasSessionRecord)
             continue;
 
+        // A window that was already on screen when Kohiko started is
+        // not a new window the user just opened: whoever placed it,
+        // it wasn't an opportunity for adaptive placement to observe
+        // a preference, so Manage() must not count it as an opening.
+        m_adoptingExistingWindows = true;
         Manage(child);
+        m_adoptingExistingWindows = false;
     }
 }
 
@@ -1194,15 +1201,20 @@ void WindowManager::SwapWindows(ManagedWindow* first, ManagedWindow* second)
     Arrange();
 
     // Adaptive Placement (see PlacementHabitStore's header comment):
-    // both windows just changed sides by hand (a Super+LMB drag, or
-    // Super+Shift+h/j/k/l - SwapWindows() is the sole chokepoint for
-    // both), so both get a vote for wherever they actually landed,
-    // using the fresh geometry Arrange() just wrote. Deliberately not
-    // called from ApplyAdaptivePlacementNudge()'s own tree.Swap()
-    // calls, which go straight to BSPTree rather than through here -
-    // an automatic nudge isn't a user decision to learn from.
+    // SwapWindows() is the sole chokepoint for both user gestures
+    // (a Super+LMB drag, Super+Shift+h/j/k/l), and in both the
+    // caller passes the window the USER moved as `first` - EndSwapDrag()
+    // the one it picked up, MoveFocusedDirection() the focused one.
+    // `second` merely happened to be sitting where `first` was dropped
+    // and was displaced as a side effect: it never expressed a
+    // preference, so it receives no observation (it used to get one,
+    // which taught a class it didn't move that it "belongs" wherever
+    // someone else's drag happened to push it). Only `first`'s fresh
+    // post-Arrange() geometry is recorded. Deliberately not called
+    // from ApplyAdaptivePlacementNudge()'s own tree.Swap() calls,
+    // which go straight to BSPTree rather than through here - an
+    // automatic nudge isn't a user decision to learn from.
     RecordAdaptivePositionHabit(first);
-    RecordAdaptivePositionHabit(second);
 }
 
 void WindowManager::ResizeWindow(ManagedWindow* window, int dx, int dy)
@@ -1655,7 +1667,42 @@ void WindowManager::Manage(WindowID id, bool skipXEmbedCheck)
     // when CheckPendingXEmbedWindows() below re-invokes this after a
     // real dock request never arrived in time) is what actually keeps
     // this fast path from becoming the same permanent trap again.
-    if (!skipXEmbedCheck && m_connection.IsXEmbedWindow(id, m_atoms))
+    //
+    // ...and not every window carrying the property deserves even a
+    // provisional hold. Measured against real applications (see the
+    // CHANGELOG), Qt - which sets _XEMBED_INFO on EVERY top-level
+    // window it creates, not just tray icons - made FeatherPad,
+    // Telegram and every other Qt application sit invisible for
+    // 2-3 s on every start: the hold above waited out its full
+    // deadline for a dock request that, for an ordinary application
+    // window, was never going to come. Two facts from the real
+    // protocol traffic separate those from genuine tray icons:
+    //
+    //  - A conformant tray client sends SYSTEM_TRAY_REQUEST_DOCK
+    //    BEFORE it maps (a real Qt tray icon: dock request handled
+    //    and the window reparented ~0.5 ms later, no MapRequest at
+    //    all; Kohiko's own TrayIconClient does the same). If we are
+    //    seeing a MapRequest for a window the tray has already
+    //    claimed, there is nothing to hold - it is docked.
+    //  - An ordinary application window identifies itself to the WM
+    //    with an EWMH _NET_WM_WINDOW_TYPE (every Qt main window,
+    //    dialog, tool window and splash does). A hand-rolled tray
+    //    icon that maps itself first and docks afterwards - the only
+    //    kind of client this hold still exists for - has no reason to.
+    //
+    // So the hold applies only to an XEmbed window that is neither
+    // already docked nor self-declared as a managed window type.
+    // Anything else is managed immediately, exactly as before this
+    // check existed. (A map-first tray icon that DOES declare a type
+    // would be tiled for an instant before its dock request arrives;
+    // the reverse race - dock after management - is already handled
+    // in HandleClientMessage(), so the end state is still correct.)
+    if (!skipXEmbedCheck && m_tray.IsDocked(id))
+        return;
+
+    if (!skipXEmbedCheck &&
+        m_connection.IsXEmbedWindow(id, m_atoms) &&
+        !m_connection.DeclaresWindowType(id, m_atoms))
     {
         bool alreadyPending = std::any_of(m_pendingXEmbedWindows.begin(), m_pendingXEmbedWindows.end(),
             [id](const PendingXEmbedWindow& pending) { return pending.id == id; });
@@ -1732,7 +1779,8 @@ void WindowManager::Manage(WindowID id, bool skipXEmbedCheck)
     // place - resolved here, before it's needed below, since (like
     // the windowrule above) which workspace this window even competes
     // for tiling room on depends on it.
-    int autostartWorkspace = ResolveWorkspaceAutostart(window->Pid());
+    StartupLaunchMatch startup = ResolveStartupLaunch(window->Pid());
+    int autostartWorkspace = startup.workspace;
 
     // Session Restore: a record here means this exact X11 Window ID
     // was already managed - and had its state saved - the last time
@@ -1764,18 +1812,75 @@ void WindowManager::Manage(WindowID id, bool skipXEmbedCheck)
     bool hasConfigWorkspace = rules.forceWorkspace >= 1 && rules.forceWorkspace <= m_workspaces.Count();
     bool hasSessionWorkspace = session && session->workspace >= 1 && session->workspace <= m_workspaces.Count();
 
+    // Final workspace-decision priority order (strongest first); the
+    // learned habit is deliberately the LAST link, so nothing the
+    // user configured explicitly is ever overridden by something
+    // Kohiko merely learned:
+    //
+    //   1. session restore (when session.restore_priority=session)
+    //   2. windowrule=workspace:N
+    //   3. session restore (default priority)
+    //   4. `workspace<N>=` startup line
+    //   5. transient parent's workspace
+    //   6. learned adaptive habit
+    //   7. otherwise: the focused workspace (nothing decided)
+    //
+    // `workspaceOrigin` records which link decided it, because
+    // adaptive placement must only ever learn from case 7: a window
+    // placed by 1-6 gave the user no genuine chance to express a
+    // preference, and counting it as "the user didn't move this"
+    // would let session restore, rules, autostart - or the habit
+    // itself - dilute a habit the user actually has.
+    PlacementOrigin workspaceOrigin = PlacementOrigin::Default;
+
     if (sessionPriority && hasSessionWorkspace)
+    {
         window->SetWorkspace(session->workspace);
+        workspaceOrigin = PlacementOrigin::SessionRestore;
+    }
     else if (hasConfigWorkspace)
+    {
         window->SetWorkspace(rules.forceWorkspace);
+        workspaceOrigin = PlacementOrigin::WindowRule;
+    }
     else if (hasSessionWorkspace)
+    {
         window->SetWorkspace(session->workspace);
+        workspaceOrigin = PlacementOrigin::SessionRestore;
+    }
     else if (autostartWorkspace >= 1 && autostartWorkspace <= m_workspaces.Count())
+    {
         window->SetWorkspace(autostartWorkspace);
+        workspaceOrigin = PlacementOrigin::Autostart;
+    }
     else if (parent)
+    {
         window->SetWorkspace(parent->Workspace());
+        workspaceOrigin = PlacementOrigin::TransientParent;
+    }
     else if (int habitWorkspace = AdaptiveWorkspaceHabit(AppClassKey(window)); habitWorkspace != 0)
+    {
         window->SetWorkspace(habitWorkspace);
+        workspaceOrigin = PlacementOrigin::AdaptiveHabit;
+    }
+
+    // Whether this window is a candidate for adaptive-placement
+    // observation at all: an ordinary top-level application window
+    // that the user themselves caused to appear. Excluded:
+    //   - windows adopted from before Kohiko started;
+    //   - windows whose process Kohiko's own startup plan launched
+    //     (the user didn't open those, and Kohiko placed them);
+    //   - transients/dialogs and utility/splash/etc. window types
+    //     (they follow their parent or float; "which workspace does
+    //     this app's main window live on" is not what they say).
+    const bool opportunityEligible =
+        !m_adoptingExistingWindows &&
+        !startup.launched &&
+        !isTransient &&
+        !isFloatingType;
+
+    if (opportunityEligible && CountsAsOpportunity(workspaceOrigin))
+        RecordAdaptiveWorkspaceOpening(window);
 
     // Window Placement: a transient/dialog always follows its parent's
     // *monitor*, not just its workspace - if the parent's workspace is
@@ -1959,7 +2064,7 @@ void WindowManager::Manage(WindowID id, bool skipXEmbedCheck)
     // answer than a general habit could ever be, so there's nothing
     // for the softer heuristic to improve on.
     if (window->IsTiled() && !sessionPositionRestored)
-        ApplyAdaptivePlacementNudge(window);
+        ApplyAdaptivePlacementNudge(window, opportunityEligible);
 
     // A client's own EWMH fullscreen request, made before it was ever
     // mapped (some toolkits set _NET_WM_STATE directly instead of
@@ -2129,6 +2234,9 @@ void WindowManager::Unmanage(WindowID id)
     }
 
     m_scratchpad.Forget(id);
+
+    // Per-window "last placement wins" memory (see PlacementHabitStore.h).
+    m_placementHabits.ForgetInstance(id);
     m_repository.Remove(id);
 
     RefreshClientList();
@@ -3221,16 +3329,51 @@ void WindowManager::ApplyKeyboardLayouts()
     Process::Spawn(command, m_connection.DisplayName());
 }
 
+bool WindowManager::ClaimAutostartForThisXSession()
+{
+    // Root-window property, so the marker lives exactly as long as the
+    // X server does: Kohiko restarting (a crash restarted by
+    // kohiko-session, `kohikoctl restart`, an upgrade) inside the same
+    // session finds it and does NOT relaunch programs that are
+    // already running; a new login starts a new X server with a clean
+    // root window and launches everything again.
+    return m_connection.ClaimRootMarker("_KOHIKO_AUTOSTART_DONE");
+}
+
 void WindowManager::RunAutostart()
 {
-    for (const std::string& program :
-         Utils::SplitWhitespace(
-             m_config.GetString("auto_start_programs")))
+    if (!ClaimAutostartForThisXSession())
     {
-        Process::Spawn(program, m_connection.DisplayName());
+        Logger::Info(
+            "Autostart already ran in this X session (a previous Kohiko "
+            "process launched it) - not launching the startup programs again.");
+        return;
     }
 
-    RunXdgAutostartEntries();
+    // Gather every source, then let BuildStartupPlan() make the one
+    // decision about what to launch (see StartupPlan.h): a program
+    // named by more than one source launches once, by the most
+    // specific; intentional repeats and different-argument instances
+    // are left alone.
+    StartupPlanInput input;
+    input.autoStartPrograms = Utils::SplitWhitespace(m_config.GetString("auto_start_programs"));
+    input.xdgCommands = CollectXdgAutostartCommands();
+
+    for (int workspaceId = 1; workspaceId <= m_workspaces.Count(); ++workspaceId)
+    {
+        input.workspacePrograms.push_back(
+            Utils::SplitWhitespace(m_config.GetString("workspace" + std::to_string(workspaceId))));
+    }
+
+    StartupPlan plan = BuildStartupPlan(input);
+
+    for (const StartupPlan::Skipped& skipped : plan.skipped)
+    {
+        Logger::Info(
+            "Startup: not launching '" + skipped.entry.command + "' from " +
+            StartupSourceName(skipped.entry.source) + " - the same program is already " +
+            "launched by " + StartupSourceName(skipped.claimedBy) + ".");
+    }
 
     // `workspace<N>=` is autostart with a target workspace attached -
     // e.g.
@@ -3239,47 +3382,45 @@ void WindowManager::RunAutostart()
     //   workspace2=discord telegram-desktop
     //   workspace3=steam
     //
-    // Every program listed launches exactly like `auto_start_programs`
-    // above (space-separated, through `/bin/sh -c`, args and all) -
-    // the only difference is that whichever window(s) it opens land on
-    // workspace N once they actually show up, however long that takes
-    // (Steam and friends are never instant), instead of wherever
-    // happened to be focused at the moment Kohiko itself started.
+    // Every program launches through `/bin/sh -c`; the only
+    // difference is that whichever window(s) a workspace<N> program
+    // opens land on workspace N once they actually show up, however
+    // long that takes (Steam and friends are never instant), instead
+    // of wherever happened to be focused at the moment Kohiko itself
+    // started.
     //
-    // A window is only ever eligible for this for a bounded time after
-    // its process launches - long enough to cover a genuinely slow
-    // starter, not so long that the same process opening some unrelated
-    // window an hour into the session gets silently redirected too.
-    static constexpr auto kWorkspaceAutostartWindow = std::chrono::seconds(60);
+    // A window is only ever matched to a startup launch for a bounded
+    // time after its process launches - long enough to cover a
+    // genuinely slow starter, not so long that the same process
+    // opening some unrelated window an hour into the session gets
+    // silently redirected (or treated as Kohiko's own launch) too.
+    static constexpr auto kStartupLaunchWindow = std::chrono::seconds(60);
 
     std::chrono::steady_clock::time_point expiry =
-        std::chrono::steady_clock::now() + kWorkspaceAutostartWindow;
+        std::chrono::steady_clock::now() + kStartupLaunchWindow;
 
-    for (int workspaceId = 1; workspaceId <= m_workspaces.Count(); ++workspaceId)
+    for (const StartupEntry& entry : plan.launches)
     {
-        std::string key = "workspace" + std::to_string(workspaceId);
+        pid_t pid = Process::Spawn(entry.command, m_connection.DisplayName());
 
-        for (const std::string& program : Utils::SplitWhitespace(m_config.GetString(key)))
-        {
-            pid_t pid = Process::Spawn(program, m_connection.DisplayName());
+        if (pid <= 0)
+            continue;
 
-            if (pid <= 0)
-                continue;
+        PendingStartupLaunch pending;
+        pending.pid = static_cast<long>(pid);
+        pending.workspace = entry.workspace; // 0 = launched, but no placement requested
+        pending.expiry = expiry;
 
-            PendingWorkspaceAutostart pending;
-            pending.pid = static_cast<long>(pid);
-            pending.workspace = workspaceId;
-            pending.expiry = expiry;
-
-            m_pendingWorkspaceAutostarts.push_back(pending);
-        }
+        m_pendingStartupLaunches.push_back(pending);
     }
 }
 
-void WindowManager::RunXdgAutostartEntries()
+std::vector<std::string> WindowManager::CollectXdgAutostartCommands()
 {
+    std::vector<std::string> commands;
+
     // Desktop IDs already resolved by a higher-priority directory -
-    // once a given basename has been decided (spawn it, or explicitly
+    // once a given basename has been decided (start it, or explicitly
     // don't), a same-named file further down the list is a system
     // fallback the user/admin has already overridden and must be
     // ignored outright, not merged with or fallen back to. See
@@ -3314,29 +3455,37 @@ void WindowManager::RunXdgAutostartEntries()
             std::optional<DesktopEntry> entry = ParseDesktopFile(path, 0);
 
             if (entry && ShouldAutostart(*entry))
-                Process::Spawn(entry->exec, m_connection.DisplayName());
+                commands.push_back(entry->exec);
         }
     }
+
+    return commands;
 }
 
-int WindowManager::ResolveWorkspaceAutostart(
+WindowManager::StartupLaunchMatch WindowManager::ResolveStartupLaunch(
     long pid) const
 {
+    StartupLaunchMatch match;
+
     if (pid <= 0)
-        return 0;
+        return match;
 
     std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
 
-    for (const PendingWorkspaceAutostart& pending : m_pendingWorkspaceAutostarts)
+    for (const PendingStartupLaunch& pending : m_pendingStartupLaunches)
     {
         if (now >= pending.expiry)
             continue;
 
         if (pending.pid == pid || Process::IsDescendantOf(pid, static_cast<pid_t>(pending.pid)))
-            return pending.workspace;
+        {
+            match.launched = true;
+            match.workspace = pending.workspace;
+            return match;
+        }
     }
 
-    return 0;
+    return match;
 }
 
 Monitor& WindowManager::MonitorForModal() const
@@ -3481,7 +3630,18 @@ void WindowManager::RecordAdaptiveWorkspaceHabit(ManagedWindow* window, int work
     std::string appClass = AppClassKey(window);
 
     if (!appClass.empty())
-        m_placementHabits.RecordWorkspaceMove(appClass, workspace);
+        m_placementHabits.RecordWorkspaceMove(appClass, workspace, window->Id());
+}
+
+void WindowManager::RecordAdaptiveWorkspaceOpening(ManagedWindow* window)
+{
+    if (!window || !m_config.GetBool("general.adaptive_placement", true))
+        return;
+
+    std::string appClass = AppClassKey(window);
+
+    if (!appClass.empty())
+        m_placementHabits.RecordWorkspaceOpening(appClass);
 }
 
 void WindowManager::RecordAdaptivePositionHabit(ManagedWindow* window)
@@ -3499,10 +3659,15 @@ void WindowManager::RecordAdaptivePositionHabit(ManagedWindow* window)
     if (!monitor)
         return;
 
-    m_placementHabits.RecordPositionMove(appClass, window->Geometry(), monitor->WorkArea());
+    // The border is passed so the store can judge the window by its
+    // OUTER rect (content + border), i.e. the layout slot it really
+    // occupies - see PlacementHabitStore::ClassifyPosition().
+    m_placementHabits.RecordPositionMove(
+        appClass, window->Geometry(), monitor->WorkArea(),
+        window->BorderWidth(), window->Id());
 }
 
-void WindowManager::ApplyAdaptivePlacementNudge(ManagedWindow* window)
+void WindowManager::ApplyAdaptivePlacementNudge(ManagedWindow* window, bool countOpportunity)
 {
     if (!window || !window->IsTiled())
         return;
@@ -3517,10 +3682,33 @@ void WindowManager::ApplyAdaptivePlacementNudge(ManagedWindow* window)
 
     std::vector<Direction> habitDirections = m_placementHabits.PredictPositions(appClass);
 
+    BSPTree& tree = m_workspaces.Get(window->Workspace()).Tree();
+
+    // Opportunity accounting. A position preference can only be
+    // expressed if there is something to swap with, so only a window
+    // that opened next to at least one other tile counts (a lone
+    // window fills the screen: nothing to choose). Per axis, only an
+    // axis the habit did NOT already decide is an opportunity - an
+    // axis the nudge below is about to place is Kohiko's own
+    // placement, and counting it would erode a working habit.
+    if (countOpportunity && tree.Count() >= 2)
+    {
+        bool horizontalDecided = false;
+        bool verticalDecided = false;
+
+        for (Direction direction : habitDirections)
+        {
+            if (direction == Direction::Left || direction == Direction::Right)
+                horizontalDecided = true;
+            else
+                verticalDecided = true;
+        }
+
+        m_placementHabits.RecordPositionOpening(appClass, !horizontalDecided, !verticalDecided);
+    }
+
     if (habitDirections.empty())
         return;
-
-    BSPTree& tree = m_workspaces.Get(window->Workspace()).Tree();
 
     // Best-effort, bounded walk: repeatedly trades places with
     // whichever neighbor sits one step further toward each confident
